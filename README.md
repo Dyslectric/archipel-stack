@@ -7,27 +7,29 @@ The original product brief lives in [ARCHIPEL.md](ARCHIPEL.md). The
 [architecture proposal](docs/architecture.md) and [milestones](docs/milestones.md)
 describe the longer-term direction.
 
-## Run locally
+## Run with Docker
 
-Requires Node.js 24 or newer. SQLite is built into Node; no database server is needed.
+Requires Python 3.9 or newer, Docker, and Docker Compose 2.30 or newer on the host.
+Setup uses Python's standard library. Node, npm, and application dependencies are
+installed and used inside Docker; no host npm or pip installation is needed.
 
 ```sh
-npm ci
-npm run setup -- --mode local
-npm run dev
+python3 scripts/setup.py --mode container
+docker compose config --quiet
+docker compose up --build -d
 ```
 
-Open **http://127.0.0.1:8788**. Choose Alice, Bob, or Charlie. Alice is the explicit
-development administrator. Use separate browser profiles or a private window to
-try two users. Create a channel, join it from the other session, and send messages.
+Configure your OIDC issuer/client during setup, then open
+**http://127.0.0.1:8788** and sign in. Use separate browser profiles or a private
+window to try two users. Create a channel, join it from the other session, and send messages.
 New messages and permission changes appear within about 2.5 seconds.
 
 For containers, external proxy networks, trusted proxy addresses, and Traefik
 routing, see [setup and deployment](docs/deployment.md). Start with
-`npm run setup -- --mode traefik`, then `docker compose up --build -d`.
+`python3 scripts/setup.py --mode traefik`, then `docker compose up --build -d`.
 
-Development login is available only with `DEV_AUTH=true`, a loopback listener,
-and a loopback HTTP `BASE_URL`. `npm run dev` sets that flag; `npm start` does not.
+Container deployments disable development login. Tests use development accounts
+only with `DEV_AUTH=true`, a loopback listener, and a loopback HTTP `BASE_URL`.
 Development identities are separate from real OIDC identities, even when their
 usernames match. New instances start without fabricated channels or conversations.
 
@@ -53,30 +55,30 @@ usernames match. New instances start without fabricated channels or conversation
 - Stable actor URLs with ActivityStreams discovery and signed, authorized channel history.
 
 The server is Express/TypeScript; the browser uses TypeScript and Vite. Runtime
-files live in `data/`. Preserve the database and `BASE_URL` across restarts: they
+files live in the persistent Docker volume at `/app/data`. Preserve the database and `BASE_URL` across restarts: they
 hold identity and object continuity. To back up a running instance, use SQLite's
 backup facilities; to copy files directly, stop the server first and copy the
 whole data directory. Do not copy only a live WAL database's main file.
 
 ## Connect FedIdP or another OIDC provider
 
-1. Run `npm run setup` to configure the environment, or copy `.env.example` to
-   `.env` for a native instance and set `OIDC_ISSUER` and `OIDC_CLIENT_ID`.
+1. Run `python3 scripts/setup.py` and configure `OIDC_ISSUER` and `OIDC_CLIENT_ID`.
 2. Register `${BASE_URL}/auth/callback` as an exact redirect URI at the provider.
    For the default local instance this is `http://127.0.0.1:8788/auth/callback`.
 3. Use a public PKCE client with `OIDC_AUTH_METHOD=none`, or configure its secret
    and `client_secret_basic` / `client_secret_post` as appropriate.
-4. Run `npm run build` and `npm start` for OIDC-only mode. A loopback HTTP issuer
-   is permitted only in local development; use `npm run dev` for that case.
+4. Run `docker compose up --build -d`. Containers use OIDC-only mode; the issuer
+   must use HTTPS and be reachable from the container.
 
 No provider configuration is changed automatically. FedIdP's `openid profile`
 claims supply its permanent username and consent-selected `verified_socials`.
 Archipel also asks whether to show those socials to other members; the default
 is off. Claims omitted on a subsequent login are removed from the local profile.
 
-To appoint a production administrator, sign in once, run `npm run identities`
-locally, and add the exact OIDC subject to the comma-separated `ADMIN_SUBJECTS`
-setting for the configured issuer. Restart to apply it. Removing a subject
+To appoint a production administrator, sign in once, run
+`docker compose exec archipel node scripts/identities.js`, and add the exact OIDC
+subject to the comma-separated `ADMIN_SUBJECTS` setting using setup. Recreate the
+container with `docker compose up -d` to apply it. Removing a subject
 revokes that stored administrator grant on restart, including for existing
 sessions. Disabling development authentication revokes development sessions;
 changing issuers revokes sessions that no longer match the configured issuer.
@@ -159,16 +161,20 @@ for the permission matrix, deployment requirements, and current limits.
 ## Checks
 
 ```sh
-npm run build
-npm test
-npx playwright install --with-deps chromium
-npm run test:browser
+python3 -m unittest discover -s test -p 'test_*.py' -v
+docker build --target build -t archipel-checks .
+docker run --rm archipel-checks npm test
+docker build --target browser-tests -t archipel-browser-tests .
+docker run --rm --init --shm-size=1g archipel-browser-tests
 ```
 
 Backend tests cover access control, persistence, identity isolation, social
 disclosure, a real signed local OIDC fixture, and real HTTP federation between
 two and three instances, including forgery, retries, and permission revocation.
 Browser tests use isolated temporary databases and two separate local servers.
+The Docker build checks TypeScript and compiles both client and server. The browser
+test image installs Chromium and its dependencies inside Docker. Setup tests run
+with Python only; Compose integration checks also run when Compose is installed.
 
 ## Next
 

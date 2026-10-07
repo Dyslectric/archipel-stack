@@ -10,3 +10,5 @@ test-results
 playwright-report
 .browser-data
 core.*
+__pycache__
+*.py[cod]

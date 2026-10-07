@@ -6,10 +6,15 @@ COPY tsconfig*.json vite.config.ts ./
 COPY src ./src
 COPY client ./client
 COPY scripts ./scripts
+COPY migrations ./migrations
 COPY test ./test
 COPY e2e ./e2e
 COPY playwright.config.ts ./
 RUN npm run build && npm run build:server
+
+FROM build AS browser-tests
+RUN npx playwright install --with-deps chromium
+CMD ["npm", "run", "test:browser"]
 
 FROM node:24-bookworm-slim AS dependencies
 WORKDIR /app

@@ -1,10 +1,10 @@
 # Setup and container deployment
 
-Run the interactive setup after installing dependencies with Node 24:
+Install Python 3.9 or newer, Docker, and Docker Compose 2.30 or newer on the host.
+Run setup directly; it uses only Python's standard library:
 
 ```sh
-npm ci
-npm run setup
+python3 scripts/setup.py
 ```
 
 Setup validates the application settings, writes private configuration files with
@@ -13,11 +13,11 @@ values as prompt defaults. Press Enter to retain a value or enter `-` to clear i
 Client secrets are hidden while typing and omitted from the printed summary.
 Setup configures deployment; it does not start containers or change your proxy.
 
-Choose one of four modes:
+Choose one of three modes. Setup defaults to `container`; `--mode local` is a
+compatibility alias for that same loopback Docker deployment.
 
 | Mode        | Listener and access                                                   | Start command                  |
 | ----------- | --------------------------------------------------------------------- | ------------------------------ |
-| `local`     | Native Node; optional loopback development accounts                   | `npm run build && npm start`   |
 | `container` | OIDC-only container, published on host loopback                       | `docker compose up --build -d` |
 | `proxy`     | HTTPS behind a generic proxy, on an external network or host loopback | `docker compose up --build -d` |
 | `traefik`   | HTTPS behind Traefik on an external network, with routing labels      | `docker compose up --build -d` |
@@ -25,10 +25,10 @@ Choose one of four modes:
 To start directly with a mode:
 
 ```sh
-npm run setup -- --mode traefik
+python3 scripts/setup.py --mode traefik
 ```
 
-Container modes disable development personas and bind the application to
+All modes disable development personas and bind the application to
 `0.0.0.0:8788` inside the container. The `PORT` prompt controls host publishing
 only when using the loopback overlay. The database lives in the named
 `archipel-data` volume at `/app/data/archipel.sqlite`. Keep this volume across
@@ -123,9 +123,16 @@ container with `docker compose up -d`. No administrator is created automatically
 for a real OIDC account.
 
 For unattended setup, supply the settings as environment variables and run
-`npm run setup -- --mode traefik --non-interactive`. Proxy modes require an
+`python3 scripts/setup.py --mode traefik --non-interactive`. Proxy modes require an
 explicit `TRUSTED_PROXY`; setup does not guess a network's IP range. `--directory`
 can write into another existing directory for staging or validation.
+
+The host does not need Node, npm, pip packages, or application dependencies.
+Docker installs and builds the application. Existing `.env` files from the old
+Node setup are read as prompt defaults, and `.env.container` credentials are
+retained when reconfiguring an existing container deployment.
+For a previous native installation, transfer its SQLite database to the named
+Docker volume before startup if you need to retain its accounts and history.
 
 The image builds the browser and compiles the server to JavaScript, installs
 production dependencies, and runs as the unprivileged `node` user. Compose uses
