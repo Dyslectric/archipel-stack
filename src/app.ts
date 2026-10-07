@@ -10,7 +10,8 @@ import { existsSync } from "node:fs";
 import { Config } from "./config.js";
 import { Problem, Store, type User } from "./store.js";
 import { Federation } from "./federation.js";
-import { createOidc } from "./oidc.js";
+import { createOidc, OidcFailure, type OidcStage } from "./oidc.js";
+import { logSignInFailure } from "./auth-log.js";
 
 function cookie(req: Request, name: string) {
   const value = (req.headers.cookie || "")
@@ -259,19 +260,32 @@ export function createApp(config: Config, store: Store) {
     },
   );
   app.get("/auth/login", async (_req, res) => {
-    const flow = await oidc.begin();
-    res.cookie("archipel-flow", flow.browser, {
-      ...cookieOptions,
-      maxAge: 10 * 60000,
-    });
-    res.redirect(flow.url);
+    try {
+      const flow = await oidc.begin();
+      res.cookie("archipel-flow", flow.browser, {
+        ...cookieOptions,
+        maxAge: 10 * 60000,
+      });
+      res.redirect(flow.url);
+    } catch (error) {
+      res.locals.authFailureLogged = true;
+      res.setHeader(
+        "X-Request-ID",
+        logSignInFailure(error, config, { stage: "authorization_start" }),
+      );
+      throw error instanceof OidcFailure && error.cause instanceof Problem
+        ? error.cause
+        : error;
+    }
   });
   app.get("/auth/callback", async (req, res) => {
+    let stage: OidcStage = "callback_validation";
     try {
       const user = await oidc.complete(
         req.originalUrl.split("?")[1] || "",
         cookie(req, "archipel-flow"),
       );
+      stage = "session_creation";
       store.logout(cookie(req, authCookie));
       const session = store.createSession(user.id);
       res.cookie(authCookie, session.token, {
@@ -280,7 +294,19 @@ export function createApp(config: Config, store: Store) {
       });
       res.clearCookie("archipel-flow", cookieOptions);
       res.redirect("/");
-    } catch {
+    } catch (error) {
+      res.setHeader(
+        "X-Request-ID",
+        logSignInFailure(error, config, {
+          stage,
+          flow_cookie_present: !!cookie(req, "archipel-flow"),
+          state_present:
+            typeof req.query.state === "string" && !!req.query.state,
+          code_present: typeof req.query.code === "string" && !!req.query.code,
+          request_host_matches_base:
+            req.headers.host === new URL(config.baseUrl).host,
+        }),
+      );
       res.clearCookie("archipel-flow", cookieOptions);
       res.redirect("/?signin=failed");
     }
@@ -600,7 +626,8 @@ export function createApp(config: Config, store: Store) {
             : error.type === "entity.too.large"
               ? 413
               : 500;
-      if (status === 500) console.error("Request failed:", error.name);
+      if (status === 500 && !res.locals.authFailureLogged)
+        console.error("Request failed:", error.name);
       res.status(status).json({
         error:
           error instanceof Problem

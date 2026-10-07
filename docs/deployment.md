@@ -159,6 +159,31 @@ it to configuration, and restart. Their existing session then gains admin access
 Custom emoji images, admission decisions, and message edits are part of the
 SQLite database and use the existing persistent volume and backup procedure.
 
+## Diagnose sign-in failures
+
+After updating the code, rebuild/recreate the application and follow its logs:
+
+```sh
+docker compose up --build -d
+docker compose logs --tail=100 -f archipel
+```
+
+Failed login starts and callbacks emit a JSON `oidc.signin_failed` event to
+standard error. It includes a reference ID, the failed stage, configured issuer
+and callback, client authentication method, safe provider/network/validation
+codes, and a diagnostic hint. The failure response carries the same reference
+in `X-Request-ID`. Browser errors remain generic. Tokens, client secrets,
+callback query values, claims, provider descriptions, and response bodies are
+omitted from these logs.
+
+For `invalid_client`, compare the client ID, secret, and `OIDC_AUTH_METHOD` with
+FedIdP's downstream client registration. For `invalid_grant`, start a fresh
+sign-in and check the exact registered `${BASE_URL}/auth/callback` URI. Missing
+flow-cookie errors point to expired/replaced sign-in attempts, browser cookie
+handling, or an incorrect public `BASE_URL`. Discovery, JWKS, token, and UserInfo
+requests must reach the provider from inside the container; proxy/WAF pages
+and TLS/DNS failures are identified by the logged stage and codes.
+
 ## Federation and personal emoji
 
 Federation is enabled in **Instance administration → Federation controls**;

@@ -308,7 +308,14 @@ test("rate limits count the forwarded clients separately behind a trusted proxy"
   );
 });
 
-async function provider(t: TestContext, profile: Record<string, unknown> = {}) {
+async function provider(
+  t: TestContext,
+  profile: Record<string, unknown> = {},
+  options: {
+    authentication?: "client_secret_basic" | "client_secret_post";
+    secret?: string;
+  } = {},
+) {
   const { server, origin } = await listen(t);
   const app = express();
   app.use(express.urlencoded({ extended: false }));
@@ -334,7 +341,13 @@ async function provider(t: TestContext, profile: Record<string, unknown> = {}) {
     string,
     { nonce: string; challenge: string; mode: Mode }
   >();
-  app.get("/.well-known/openid-configuration", (_req, res) =>
+  let discoveryStatus = 200;
+  app.get("/.well-known/openid-configuration", (_req, res) => {
+    if (discoveryStatus !== 200)
+      return res
+        .status(discoveryStatus)
+        .type("text")
+        .send("Provider temporarily unavailable");
     res.json({
       issuer: origin,
       authorization_endpoint: `${origin}/authorize`,
@@ -344,12 +357,32 @@ async function provider(t: TestContext, profile: Record<string, unknown> = {}) {
       response_types_supported: ["code"],
       subject_types_supported: ["public"],
       id_token_signing_alg_values_supported: ["RS256"],
-      token_endpoint_auth_methods_supported: ["none"],
+      token_endpoint_auth_methods_supported: [options.authentication || "none"],
       code_challenge_methods_supported: ["S256"],
-    }),
-  );
+    });
+  });
   app.get("/jwks", (_req, res) => res.json({ keys: [jwk] }));
   app.post("/token", (req, res) => {
+    if (options.authentication) {
+      let clientId = req.body.client_id,
+        secret = req.body.client_secret;
+      if (options.authentication === "client_secret_basic") {
+        const authorization = String(req.headers.authorization || "");
+        const [encodedId, encodedSecret] = Buffer.from(
+          authorization.replace(/^Basic /, ""),
+          "base64",
+        )
+          .toString()
+          .split(":");
+        clientId = decodeURIComponent((encodedId || "").replace(/\+/g, " "));
+        secret = decodeURIComponent((encodedSecret || "").replace(/\+/g, " "));
+      }
+      if (clientId !== "archipel-test" || secret !== options.secret)
+        return res.status(401).json({
+          error: "invalid_client",
+          error_description: `Private provider details ${options.secret}`,
+        });
+    }
     const flow = codes.get(req.body.code);
     if (!flow || flow.mode === "error")
       return res.status(400).json({ error: "invalid_grant" });
@@ -399,6 +432,9 @@ async function provider(t: TestContext, profile: Record<string, unknown> = {}) {
   });
   return {
     issuer: origin,
+    discoveryStatus(value: number) {
+      discoveryStatus = value;
+    },
     code(url: URL, mode: Mode = "valid") {
       const code = randomUUID();
       codes.set(code, {
@@ -412,6 +448,10 @@ async function provider(t: TestContext, profile: Record<string, unknown> = {}) {
 }
 
 test("OIDC completes a signed code/PKCE/nonce flow and rejects replay and forged identities", async (t) => {
+  const logs: Record<string, unknown>[] = [];
+  t.mock.method(console, "error", (line: string) =>
+    logs.push(JSON.parse(line)),
+  );
   const idp = await provider(t);
   const { origin, store } = await application(t, {
     oidcIssuer: idp.issuer,
@@ -465,6 +505,19 @@ test("OIDC completes a signed code/PKCE/nonce flow and rejects replay and forged
         const { callback } = await begin(mode);
         const response = await client.request(callback);
         assert.equal(response.headers.get("location"), "/?signin=failed");
+        assert.equal(
+          response.headers.get("x-request-id"),
+          logs.at(-1)?.reference,
+        );
+        assert.equal(
+          logs.at(-1)?.stage,
+          mode === "userinfo" ? "userinfo" : "token_exchange",
+        );
+        assert.equal(logs.at(-1)?.flow_cookie_present, true);
+        assert.equal(logs.at(-1)?.state_present, true);
+        assert.equal(logs.at(-1)?.code_present, true);
+        if (mode === "error")
+          assert.equal(logs.at(-1)?.oauth_error, "invalid_grant");
         assert.equal((await client.session()).user, null);
       },
     );
@@ -477,8 +530,124 @@ test("OIDC completes a signed code/PKCE/nonce flow and rejects replay and forged
       "/?signin=failed",
     );
     assert.equal((await stranger.session()).user, null);
+    assert.equal(logs.at(-1)?.stage, "callback_validation");
+    assert.equal(logs.at(-1)?.reason, "missing_or_expired_flow");
     assert.equal((await client.request(callback)).headers.get("location"), "/");
   });
+});
+
+test("unconfigured OIDC preserves its service-unavailable response and logs the configuration stage", async (t) => {
+  const logs: Record<string, unknown>[] = [];
+  t.mock.method(console, "error", (line: string) =>
+    logs.push(JSON.parse(line)),
+  );
+  const { origin } = await application(t);
+  const response = await browser(origin).request("/auth/login");
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), {
+    error: "OIDC sign-in is not configured.",
+  });
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].stage, "configuration");
+  assert.equal(logs[0].reason, "oidc_not_configured");
+  assert.equal(response.headers.get("x-request-id"), logs[0].reference);
+});
+
+test("session creation failures after valid OIDC authentication are logged without exception text", async (t) => {
+  const idp = await provider(t),
+    logs: Record<string, unknown>[] = [];
+  t.mock.method(console, "error", (line: string) =>
+    logs.push(JSON.parse(line)),
+  );
+  const { origin, store } = await application(t, {
+    oidcIssuer: idp.issuer,
+    oidcClientId: "archipel-test",
+  });
+  t.mock.method(store, "createSession", () => {
+    throw new Error("sensitive-storage-detail");
+  });
+  const client = browser(origin);
+  const start = await client.request("/auth/login");
+  const authorization = new URL(start.headers.get("location")!);
+  const response = await client.request(
+    `/auth/callback?code=${idp.code(authorization)}&state=${authorization.searchParams.get("state")}`,
+  );
+  assert.equal(response.headers.get("location"), "/?signin=failed");
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].stage, "session_creation");
+  assert.equal(response.headers.get("x-request-id"), logs[0].reference);
+  assert.ok(!JSON.stringify(logs).includes("sensitive-storage-detail"));
+  assert.equal((await client.session()).user, null);
+});
+
+test("OIDC discovery failures are logged once and a later attempt retries discovery", async (t) => {
+  const idp = await provider(t),
+    logs: Record<string, unknown>[] = [];
+  t.mock.method(console, "error", (line: string) =>
+    logs.push(JSON.parse(line)),
+  );
+  const { origin } = await application(t, {
+    oidcIssuer: idp.issuer,
+    oidcClientId: "archipel-test",
+  });
+  const client = browser(origin);
+  idp.discoveryStatus(503);
+  const failed = await client.request("/auth/login");
+  assert.equal(failed.status, 500);
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].stage, "discovery");
+  assert.equal(logs[0].http_status, 503);
+  assert.equal(failed.headers.get("x-request-id"), logs[0].reference);
+  idp.discoveryStatus(200);
+  assert.equal((await client.request("/auth/login")).status, 302);
+});
+
+test("confidential client methods preserve literal secrets and invalid credentials are logged without disclosure", async (t) => {
+  for (const authentication of [
+    "client_secret_basic",
+    "client_secret_post",
+  ] as const) {
+    await t.test(authentication, async (t) => {
+      const secret = "test$#'\"`:secret\\with-spaces",
+        logs: Record<string, unknown>[] = [];
+      t.mock.method(console, "error", (line: string) =>
+        logs.push(JSON.parse(line)),
+      );
+      const idp = await provider(t, {}, { authentication, secret });
+      const { origin } = await application(t, {
+        oidcIssuer: idp.issuer,
+        oidcClientId: "archipel-test",
+        oidcAuthMethod: authentication,
+        oidcSecret: secret,
+      });
+      const client = browser(origin);
+      const start = await client.request("/auth/login"),
+        authorization = new URL(start.headers.get("location")!);
+      const callback = `/auth/callback?code=${idp.code(authorization)}&state=${authorization.searchParams.get("state")}`;
+      assert.equal(
+        (await client.request(callback)).headers.get("location"),
+        "/",
+      );
+      assert.equal(logs.length, 0);
+      const wrong = await application(t, {
+        oidcIssuer: idp.issuer,
+        oidcClientId: "archipel-test",
+        oidcAuthMethod: authentication,
+        oidcSecret: "incorrect-secret",
+      });
+      const badClient = browser(wrong.origin),
+        badStart = await badClient.request("/auth/login"),
+        badAuthorization = new URL(badStart.headers.get("location")!);
+      const failed = await badClient.request(
+        `/auth/callback?code=${idp.code(badAuthorization)}&state=${badAuthorization.searchParams.get("state")}`,
+      );
+      assert.equal(failed.headers.get("location"), "/?signin=failed");
+      assert.equal(logs.at(-1)?.stage, "token_exchange");
+      assert.equal(logs.at(-1)?.oauth_error, "invalid_client");
+      assert.ok(!JSON.stringify(logs).includes(secret));
+      assert.ok(!JSON.stringify(logs).includes("incorrect-secret"));
+    });
+  }
 });
 
 test("FedIdP-style claims reach only the admin review queue until membership is approved", async (t) => {
