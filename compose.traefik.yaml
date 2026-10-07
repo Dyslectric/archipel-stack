@@ -1,0 +1,11 @@
+# Use with compose.yaml and compose.proxy.yaml. TLS terminates at Traefik.
+services:
+  archipel:
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: ${PROXY_NETWORK:?Set PROXY_NETWORK}
+      traefik.http.routers.archipel.rule: "Host(`${TRAEFIK_HOST:?Set TRAEFIK_HOST}`)"
+      traefik.http.routers.archipel.entrypoints: ${TRAEFIK_ENTRYPOINT:-websecure}
+      traefik.http.routers.archipel.tls: "true"
+      traefik.http.routers.archipel.service: archipel
+      traefik.http.services.archipel.loadbalancer.server.port: "8788"

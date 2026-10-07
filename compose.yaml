@@ -1,0 +1,47 @@
+services:
+  archipel:
+    build: .
+    restart: unless-stopped
+    init: true
+    env_file:
+      - path: .env.container
+        format: raw
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "8788"
+      DEV_AUTH: "false"
+      DATABASE_PATH: /app/data/archipel.sqlite
+      BASE_URL: ${BASE_URL:-http://127.0.0.1:8788}
+      TRUSTED_PROXY: ${TRUSTED_PROXY:-}
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_AUTH_METHOD: ${OIDC_AUTH_METHOD:-none}
+      ADMIN_SUBJECTS: ${ADMIN_SUBJECTS:-}
+      REGISTRATION_MODE: ${REGISTRATION_MODE:-open}
+    volumes:
+      - archipel-data:/app/data
+    expose:
+      - "8788"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8788/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  archipel-data:

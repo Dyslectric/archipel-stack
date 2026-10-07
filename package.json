@@ -1,0 +1,37 @@
+{
+  "name": "archipel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "setup": "node --import tsx scripts/setup.ts",
+    "dev": "npm run build:client && DEV_AUTH=true node --env-file-if-exists=.env --import tsx src/server.ts",
+    "start": "node --env-file-if-exists=.env --import tsx src/server.ts",
+    "build:client": "vite build",
+    "check": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "test:browser": "playwright test",
+    "identities": "node --env-file-if-exists=.env --import tsx scripts/identities.ts",
+    "build": "npm run check && npm run build:client",
+    "build:server": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "express": "5.2.1",
+    "express-rate-limit": "8.7.0",
+    "gemoji": "8.1.0",
+    "helmet": "8.3.0",
+    "ipaddr.js": "2.2.0",
+    "openid-client": "6.8.8"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.0",
+    "@types/express": "^5.0.0",
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.0.0"
+  }
+}

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+build/
+data/
+.env
+.env.*
+!.env.example
+*.sqlite*
+test-results/
+playwright-report/
+.browser-data/
+core.*

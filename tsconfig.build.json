@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "build",
+    "rootDir": ".",
+    "sourceMap": true
+  },
+  "include": ["src/**/*.ts", "scripts/identities.ts"]
+}

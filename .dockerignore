@@ -1,0 +1,12 @@
+node_modules
+dist
+build
+data
+.git
+.env
+.env.*
+!.env.example
+test-results
+playwright-report
+.browser-data
+core.*

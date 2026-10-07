@@ -1,0 +1,725 @@
+import { test, type TestContext } from "node:test";
+import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Store, Problem } from "../src/store.js";
+import { createApp } from "../src/app.js";
+import { loadConfig } from "../src/config.js";
+import { Federation } from "../src/federation.js";
+import {
+  peerUrl,
+  publicAddress,
+  signedHeaders,
+  peerRequest,
+} from "../src/federation-net.js";
+
+const permissions = {
+  federation_send: true,
+  federation_receive: true,
+  federation_subscribe: true,
+  federation_post: true,
+};
+const image =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
+async function instance(t: TestContext) {
+  const directory = mkdtempSync(join(tmpdir(), "archipel-federation-"));
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const config = loadConfig({
+    DEV_AUTH: "true",
+    BASE_URL: origin,
+    DATABASE_PATH: join(directory, "db.sqlite"),
+  });
+  const store = new Store(join(directory, "db.sqlite"), origin);
+  const app = createApp(config, store);
+  let liveApp = app,
+    offline = false;
+  server.on("request", (req, res) => {
+    if (offline) {
+      res.writeHead(503).end();
+    } else liveApp(req, res);
+  });
+  const fed = app.locals.federation as Federation;
+  const alice = store.loginIdentity(
+    "urn:archipel:development",
+    "alice",
+    "alice",
+    [],
+    true,
+  );
+  const bob = store.loginIdentity("urn:archipel:development", "bob", "bob", []);
+  fed.setEnabled(alice, true);
+  fed.setPermissions(alice, alice.id, permissions);
+  fed.setPermissions(alice, bob.id, permissions);
+  const result = {
+    server,
+    origin,
+    config,
+    store,
+    fed,
+    alice: store.user(alice.id),
+    bob: store.user(bob.id),
+    offline(value: boolean) {
+      offline = value;
+    },
+    restart() {
+      result.store.close();
+      result.store = new Store(config.databasePath, origin);
+      liveApp = createApp(config, result.store);
+      result.fed = liveApp.locals.federation as Federation;
+    },
+  };
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    result.store.close();
+    rmSync(directory, { recursive: true });
+  });
+  return result;
+}
+async function drain(...instances: Awaited<ReturnType<typeof instance>>[]) {
+  for (let step = 0; step < 5; step++)
+    for (const i of instances) await i.fed.tick();
+  for (const i of instances) {
+    const failed = i.store.db
+      .prepare(
+        "SELECT d.status,d.error,o.purpose FROM federation_deliveries d JOIN federation_outgoing o ON o.id=d.activity_id WHERE d.status IN ('failed','pending')",
+      )
+      .all();
+    assert.deepEqual(failed, [], JSON.stringify(failed));
+  }
+}
+function channel(i: Awaited<ReturnType<typeof instance>>, extra = {}) {
+  const c = i.store.createChannel(i.alice, {
+    name: "general",
+    description: "Federated conversation",
+    mode: "timeline",
+    visibility: "public",
+    admission: "open",
+    ...extra,
+  });
+  i.fed.setChannel(i.alice, c.id, true);
+  return i.store.channel(c.id);
+}
+
+test("two real instances subscribe, exchange signed messages, edit, delete, and deduplicate", async (t) => {
+  const a = await instance(t),
+    b = await instance(t);
+  const home = channel(a);
+  a.store.post(a.alice, home.id, { body: "Before joining" });
+  const sub = await b.fed.subscribe(
+    b.bob,
+    `#general@${new URL(a.origin).host}`,
+  );
+  await drain(a, b);
+  assert.equal(b.store.role(sub.channel.id, b.bob.id), "member");
+  assert.equal(
+    b.store.messages(b.bob, sub.channel.id)[0].body,
+    "Before joining",
+  );
+  a.store.post(a.alice, home.id, { body: "Hello from home" });
+  await drain(a, b);
+  assert.equal(
+    b.store.messages(b.bob, sub.channel.id).at(-1)?.body,
+    "Hello from home",
+  );
+  await b.fed.remotePost(b.bob, sub.channel.id, { body: "Hello from remote" });
+  await drain(a, b);
+  const remote = b.store.messages(b.bob, sub.channel.id).at(-1)!;
+  assert.equal(remote.body, "Hello from remote");
+  assert.equal(remote.author_id, b.bob.id);
+  assert.equal(
+    a.store.messages(a.alice, home.id).at(-1)?.body,
+    "Hello from remote",
+  );
+  const homeCopy = a.store.messages(a.alice, home.id).at(-1)!;
+  const session = a.store.createSession(a.bob.id);
+  a.fed.setPermissions(a.alice, a.bob.id, {
+    ...permissions,
+    federation_receive: false,
+  });
+  assert.equal(
+    (
+      await fetch(`${a.origin}/objects/messages/${homeCopy.id}`, {
+        headers: { cookie: `archipel=${session.token}` },
+      })
+    ).status,
+    403,
+  );
+  assert.equal(
+    a.store
+      .messages(a.store.user(a.bob.id), home.id)
+      .some((m) => m.id === homeCopy.id),
+    false,
+  );
+  await b.fed.editRemote(b.bob, remote.id, {
+    body: "Edited from remote",
+    expected_edited_at: null,
+  });
+  await drain(a, b);
+  assert.equal(
+    a.store.messages(a.alice, home.id).at(-1)?.body,
+    "Edited from remote",
+  );
+  assert.equal(b.store.message(remote.id).body, "Edited from remote");
+  const outgoing = b.store.db
+    .prepare(
+      "SELECT * FROM federation_outgoing WHERE purpose='post' ORDER BY created_at DESC LIMIT 1",
+    )
+    .get() as { activity: string; signer: string };
+  const url = new URL(`${a.origin}/federation/inbox`);
+  await peerRequest(
+    url,
+    b.config,
+    signedHeaders(
+      url,
+      "POST",
+      outgoing.signer,
+      b.fed.keys().private_key,
+      outgoing.activity,
+    ),
+    outgoing.activity,
+  );
+  assert.equal(a.store.messages(a.alice, home.id).length, 3);
+  b.fed.deleteRemote(b.bob, remote.id);
+  await drain(a, b);
+  assert.ok(a.store.messages(a.alice, home.id).at(-1)?.deleted_at);
+  assert.ok(b.store.message(remote.id).deleted_at);
+  b.fed.unsubscribe(b.bob, sub.channel.id);
+  await drain(a, b);
+  assert.equal(b.store.role(sub.channel.id, b.bob.id), null);
+});
+
+test("private channels wait for home approval and block queued content after access is revoked", async (t) => {
+  const a = await instance(t),
+    b = await instance(t);
+  const home = channel(a, { visibility: "members", admission: "allowlist" });
+  a.store.post(a.alice, home.id, { body: "Restricted history" });
+  const sub = await b.fed.subscribe(b.bob, a.fed.channelActor(home));
+  await drain(a, b);
+  assert.equal(b.store.role(sub.channel.id, b.bob.id), null);
+  assert.throws(() => b.store.messages(b.bob, sub.channel.id), Problem);
+  const follower = b.fed.userActor(b.bob);
+  a.fed.decideFollow(a.alice, home.id, follower, "accepted");
+  await drain(a, b);
+  assert.equal(
+    b.store.messages(b.bob, sub.channel.id)[0].body,
+    "Restricted history",
+  );
+  a.store.post(a.alice, home.id, { body: "Queued secret" });
+  a.fed.decideFollow(a.alice, home.id, follower, "blocked");
+  await drain(a, b);
+  assert.equal(
+    b.store.db
+      .prepare("SELECT COUNT(*) AS n FROM messages WHERE body='Queued secret'")
+      .get()?.n,
+    0,
+  );
+  assert.equal(b.store.role(sub.channel.id, b.bob.id), null);
+});
+
+test("all four user controls are enforced for direct messages, subscriptions, remote posting and reads", async (t) => {
+  const a = await instance(t),
+    b = await instance(t),
+    home = channel(a);
+  const denied = {
+    ...permissions,
+    federation_send: false,
+    federation_receive: false,
+    federation_subscribe: false,
+    federation_post: false,
+  };
+  b.fed.setPermissions(b.alice, b.bob.id, denied);
+  await assert.rejects(
+    b.fed.subscribe(b.bob, a.fed.channelActor(home)),
+    Problem,
+  );
+  await assert.rejects(
+    b.fed.sendDirect(b.bob, a.fed.userActor(a.bob), "Denied"),
+    Problem,
+  );
+  assert.throws(
+    () => b.fed.setPermissions(b.bob, b.bob.id, permissions),
+    Problem,
+  );
+  b.fed.setPermissions(b.alice, b.bob.id, permissions);
+  const sub = await b.fed.subscribe(
+    b.store.user(b.bob.id),
+    a.fed.channelActor(home),
+  );
+  await drain(a, b);
+  b.fed.setPermissions(b.alice, b.bob.id, {
+    ...permissions,
+    federation_post: false,
+  });
+  await assert.rejects(
+    b.fed.remotePost(b.bob, sub.channel.id, { body: "Denied post" }),
+    Problem,
+  );
+  b.fed.setPermissions(b.alice, b.bob.id, permissions);
+  await b.fed.sendDirect(b.bob, a.fed.userActor(a.bob), "Private hello");
+  await drain(a, b);
+  assert.equal(a.fed.directMessages(a.bob)[0].body, "Private hello");
+  a.fed.setPermissions(a.alice, a.bob.id, {
+    ...permissions,
+    federation_receive: false,
+  });
+  assert.deepEqual(a.fed.directMessages(a.store.user(a.bob.id)), []);
+  await b.fed.sendDirect(b.bob, a.fed.userActor(a.bob), "Cannot receive");
+  await b.fed.tick();
+  assert.equal(
+    a.store.db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM direct_messages WHERE body='Cannot receive'",
+      )
+      .get()?.n,
+    0,
+  );
+  const local = b.store.createChannel(b.bob, {
+    name: "local-chat",
+    mode: "timeline",
+    visibility: "public",
+    admission: "open",
+  });
+  b.fed.setPermissions(b.alice, b.bob.id, denied);
+  b.store.post(b.store.user(b.bob.id), local.id, { body: "Local still works" });
+  assert.equal(
+    b.store.messages(b.store.user(b.bob.id), local.id)[0].body,
+    "Local still works",
+  );
+});
+
+test("queued deliveries persist and recheck disabled users and blocked instances before a retry", async (t) => {
+  const a = await instance(t),
+    b = await instance(t);
+  await b.fed.sendDirect(
+    b.bob,
+    a.fed.userActor(a.bob),
+    "Cancelled before send",
+  );
+  b.fed.setPermissions(b.alice, b.bob.id, {
+    ...permissions,
+    federation_send: false,
+  });
+  await b.fed.tick();
+  assert.equal(
+    b.store.db
+      .prepare(
+        "SELECT status FROM federation_deliveries ORDER BY id DESC LIMIT 1",
+      )
+      .get()?.status,
+    "cancelled",
+  );
+  assert.deepEqual(a.fed.directMessages(a.bob), []);
+  b.fed.setPermissions(b.alice, b.bob.id, permissions);
+  await b.fed.sendDirect(b.bob, a.fed.userActor(a.bob), "Blocked peer");
+  b.fed.block(b.alice, { kind: "instance", target: a.origin, blocked: true });
+  await b.fed.tick();
+  assert.equal(
+    b.store.db
+      .prepare(
+        "SELECT status FROM federation_deliveries ORDER BY id DESC LIMIT 1",
+      )
+      .get()?.status,
+    "cancelled",
+  );
+});
+
+test("personal uploads and adopted remote emoji are copied, scoped, renamed and frozen in older messages", async (t) => {
+  const a = await instance(t),
+    b = await instance(t);
+  a.store.addEmoji(a.alice, { name: "island", image });
+  const adopted = (await b.fed.adoptEmoji(b.bob, {
+    instance: a.origin,
+    source_name: "island",
+    name: "my_island",
+  }))!;
+  assert.equal(
+    adopted.source_url,
+    `${a.origin}/federation/emojis/${a.store.emojis()[0].id}/image`,
+  );
+  assert.deepEqual(
+    Buffer.from(b.store.emojiImage(adopted.id).image),
+    Buffer.from(image, "base64"),
+  );
+  const local = b.store.createChannel(b.bob, {
+    name: "personal",
+    mode: "timeline",
+    visibility: "public",
+    admission: "open",
+  });
+  const posted = b.store.post(b.bob, local.id, { body: "Saved :my_island:" });
+  b.store.renamePersonalEmoji(b.bob, adopted.id, "new_island");
+  assert.equal(
+    JSON.parse(b.store.message(posted.id).emoji_tags)[0].name,
+    "my_island",
+  );
+  assert.equal(b.store.personalEmojis(b.bob)[0].name, "new_island");
+  assert.deepEqual(b.store.personalEmojis(b.alice), []);
+  assert.throws(
+    () => b.store.renamePersonalEmoji(b.alice, adopted.id, "stolen"),
+    Problem,
+  );
+  const upload = b.store.adoptEmoji(b.bob, "my_upload", image, "local-upload")!;
+  assert.equal(b.store.personalEmojis(b.bob).length, 2);
+  assert.throws(
+    () => b.store.adoptEmoji(b.bob, "my_upload", image, "local-upload"),
+    Problem,
+  );
+  b.store.removePersonalEmoji(b.bob, upload.id);
+});
+
+test("production federation rejects unsafe URL schemes and private/reserved targets", () => {
+  const config = loadConfig({ BASE_URL: "https://chat.example" });
+  for (const address of [
+    "127.0.0.1",
+    "10.0.0.1",
+    "192.168.1.1",
+    "169.254.169.254",
+    "::1",
+    "::ffff:127.0.0.1",
+    "fc00::1",
+    "fe80::1",
+  ])
+    assert.equal(publicAddress(address), false, address);
+  assert.equal(publicAddress("8.8.8.8"), true);
+  for (const url of [
+    "http://example.org",
+    "https://127.0.0.1",
+    "https://[::1]",
+    "https://10.0.0.1",
+    "https://name:secret@example.org",
+    "file:///etc/passwd",
+    "https://example.org/#fragment",
+  ])
+    assert.throws(() => peerUrl(url, config), Problem, url);
+});
+
+test("user and channel handles resolve separately even when their local names match", async (t) => {
+  const a = await instance(t),
+    b = await instance(t);
+  const home = channel(a, { name: "bob" });
+  assert.equal(
+    (await b.fed.resolve(`bob@${new URL(a.origin).host}`)).id,
+    a.fed.userActor(a.bob),
+  );
+  assert.equal(
+    (await b.fed.resolve(`#bob@${new URL(a.origin).host}`)).id,
+    a.fed.channelActor(home),
+  );
+});
+
+test("message origin remains verifiable across a three-instance channel relay", async (t) => {
+  const a = await instance(t),
+    b = await instance(t),
+    c = await instance(t),
+    home = channel(a, { mode: "threaded" });
+  const first = await b.fed.subscribe(b.bob, a.fed.channelActor(home));
+  const second = await c.fed.subscribe(c.bob, a.fed.channelActor(home));
+  await drain(a, b, c);
+  await b.fed.remotePost(b.bob, first.channel.id, {
+    title: "Remote thread",
+    body: "From the real origin",
+  });
+  await drain(a, b, c);
+  const seen = c.store.messages(c.bob, second.channel.id)[0];
+  assert.equal(seen.body, "From the real origin");
+  assert.equal(
+    c.store.user(seen.author_id).remote_actor,
+    b.fed.userActor(b.bob),
+  );
+  await c.fed.remotePost(c.bob, second.channel.id, {
+    body: "Third instance reply",
+    parent_id: seen.id,
+  });
+  await drain(a, b, c);
+  assert.equal(
+    b.store.messages(b.bob, first.channel.id).at(-1)?.parent_id,
+    b.store.messages(b.bob, first.channel.id)[0].id,
+  );
+});
+
+test("signed inbox rejects unsigned, stale, altered and author-forged requests and conflicting activity IDs", async (t) => {
+  const a = await instance(t),
+    b = await instance(t);
+  await b.fed.sendDirect(
+    b.bob,
+    a.fed.userActor(a.bob),
+    "Authenticated original",
+  );
+  const row = b.store.db
+    .prepare("SELECT * FROM federation_outgoing WHERE purpose='direct'")
+    .get() as { activity: string; signer: string };
+  const url = new URL(`${a.origin}/federation/inbox`);
+  async function request(body: string, headers: Record<string, string> = {}) {
+    return fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/activity+json", ...headers },
+      body,
+    });
+  }
+  assert.equal((await request(row.activity)).status, 401);
+  assert.equal(
+    (
+      await request(
+        row.activity,
+        signedHeaders(
+          url,
+          "POST",
+          row.signer,
+          b.fed.keys().private_key,
+          row.activity,
+          new Date(Date.now() - 10 * 60000).toUTCString(),
+        ),
+      )
+    ).status,
+    401,
+  );
+  const altered = JSON.parse(row.activity);
+  altered.object.content = "Forged body";
+  assert.equal(
+    (
+      await request(
+        JSON.stringify(altered),
+        signedHeaders(
+          url,
+          "POST",
+          row.signer,
+          b.fed.keys().private_key,
+          row.activity,
+        ),
+      )
+    ).status,
+    401,
+  );
+  assert.equal(
+    (
+      await request(
+        JSON.stringify(altered),
+        signedHeaders(
+          url,
+          "POST",
+          row.signer,
+          b.fed.keys().private_key,
+          JSON.stringify(altered),
+        ),
+      )
+    ).status,
+    401,
+  );
+  await drain(a, b);
+  const conflict = JSON.stringify({
+    ...JSON.parse(row.activity),
+    extra: "conflicting activity",
+  });
+  assert.equal(
+    (
+      await request(
+        conflict,
+        signedHeaders(
+          url,
+          "POST",
+          row.signer,
+          b.fed.keys().private_key,
+          conflict,
+        ),
+      )
+    ).status,
+    409,
+  );
+  assert.equal(a.fed.directMessages(a.bob).length, 1);
+});
+
+test("network retries and signing keys survive restart and deliver when the peer recovers", async (t) => {
+  const a = await instance(t),
+    b = await instance(t);
+  await b.fed.sendDirect(b.bob, a.fed.userActor(a.bob), "Survives an outage");
+  const key = b.fed.keys().public_key;
+  a.offline(true);
+  await b.fed.tick();
+  assert.equal(
+    b.store.db.prepare("SELECT status FROM federation_deliveries").get()
+      ?.status,
+    "pending",
+  );
+  assert.equal(
+    b.store.db.prepare("SELECT attempts FROM federation_deliveries").get()
+      ?.attempts,
+    1,
+  );
+  b.restart();
+  assert.equal(b.fed.keys().public_key, key);
+  assert.equal(
+    b.store.db.prepare("SELECT status FROM federation_deliveries").get()
+      ?.status,
+    "pending",
+  );
+  a.offline(false);
+  b.store.db.prepare("UPDATE federation_deliveries SET next_attempt=0").run();
+  await drain(a, b);
+  assert.equal(a.fed.directMessages(a.bob)[0].body, "Survives an outage");
+});
+
+test("later deliveries wait for an earlier retry to preserve conversation order", async (t) => {
+  const a = await instance(t),
+    b = await instance(t);
+  await b.fed.sendDirect(b.bob, a.fed.userActor(a.bob), "First in order");
+  a.offline(true);
+  await b.fed.tick();
+  a.offline(false);
+  await b.fed.sendDirect(b.bob, a.fed.userActor(a.bob), "Second in order");
+  await b.fed.tick();
+  assert.deepEqual(a.fed.directMessages(a.bob), []);
+  b.store.db.prepare("UPDATE federation_deliveries SET next_attempt=0").run();
+  await drain(a, b);
+  assert.deepEqual(
+    a.fed.directMessages(a.bob).map((m) => m.body),
+    ["First in order", "Second in order"],
+  );
+});
+
+test("topical federation preserves home topics and reply relationships", async (t) => {
+  const a = await instance(t),
+    b = await instance(t),
+    home = channel(a, { mode: "topical" });
+  const topic = a.store.createTopic(a.alice, home.id, "Planning");
+  a.store.post(a.alice, home.id, {
+    body: "Home topic root",
+    topic_id: topic.id,
+  });
+  const sub = await b.fed.subscribe(b.bob, a.fed.channelActor(home));
+  await drain(a, b);
+  const root = b.store.messages(b.bob, sub.channel.id)[0];
+  await b.fed.remotePost(b.bob, sub.channel.id, {
+    body: "Remote topical reply",
+    topic_id: root.topic_id,
+    parent_id: root.id,
+  });
+  await drain(a, b);
+  const reply = a.store.messages(a.alice, home.id).at(-1)!;
+  assert.equal(reply.topic_id, topic.id);
+  assert.equal(reply.parent_id, a.store.messages(a.alice, home.id)[0].id);
+  await assert.rejects(
+    b.fed.remotePost(b.bob, sub.channel.id, { body: "Missing topic" }),
+    Problem,
+  );
+});
+
+test("cached foreign channel messages are hidden when receiving is denied and revocation withdraws subscription", async (t) => {
+  const a = await instance(t),
+    b = await instance(t),
+    home = channel(a);
+  const sub = await b.fed.subscribe(b.bob, a.fed.channelActor(home));
+  await drain(a, b);
+  a.store.post(a.alice, home.id, { body: "Foreign history" });
+  await drain(a, b);
+  b.fed.setPermissions(b.alice, b.bob.id, {
+    ...permissions,
+    federation_receive: false,
+  });
+  assert.throws(
+    () => b.store.messages(b.store.user(b.bob.id), sub.channel.id),
+    Problem,
+  );
+  await drain(a, b);
+  assert.equal(a.fed.followers(a.alice, home.id).length, 0);
+});
+
+test("personal emoji travel with a federated message and use cached local image URLs at the receiver", async (t) => {
+  const a = await instance(t),
+    b = await instance(t),
+    home = channel(a);
+  a.store.adoptEmoji(a.alice, "personal_wave", image, "local-upload");
+  const sub = await b.fed.subscribe(b.bob, a.fed.channelActor(home));
+  await drain(a, b);
+  a.store.post(a.alice, home.id, { body: "Personal :personal_wave:" });
+  await drain(a, b);
+  const received = b.store.messages(b.bob, sub.channel.id).at(-1)!;
+  const tags = JSON.parse(received.emoji_tags);
+  assert.equal(tags[0].name, "personal_wave");
+  assert.match(tags[0].url, /^\/api\/emojis\//);
+  assert.deepEqual(
+    Buffer.from(b.store.emojiImage(tags[0].id).image),
+    Buffer.from(image, "base64"),
+  );
+});
+
+test("new subscriptions preserve replies to deleted parents and parents outside bounded history", async (t) => {
+  const a = await instance(t),
+    b = await instance(t),
+    home = channel(a, { mode: "threaded" });
+  const root = a.store.post(a.alice, home.id, {
+    title: "Older thread",
+    body: "Earlier root",
+  });
+  for (let index = 0; index < 105; index++)
+    a.store.post(a.alice, home.id, {
+      body: `Reply ${index}`,
+      parent_id: root.id,
+    });
+  const sub = await b.fed.subscribe(b.bob, a.fed.channelActor(home));
+  await drain(a, b);
+  const placeholder = b.store.db
+    .prepare(
+      "SELECT id FROM messages WHERE channel_id=? AND history_placeholder=1",
+    )
+    .get(sub.channel.id) as { id: string };
+  assert.ok(placeholder);
+  assert.match(
+    b.store.message(placeholder.id).body,
+    /outside the cached history/,
+  );
+  await b.fed.remotePost(b.bob, sub.channel.id, {
+    body: "Reply to the earlier parent",
+    parent_id: placeholder.id,
+  });
+  await drain(a, b);
+  assert.equal(a.store.messages(a.alice, home.id).at(-1)?.parent_id, root.id);
+  a.store.editMessage(a.alice, root.id, {
+    title: "Updated older thread",
+    body: "Root now available",
+    expected_edited_at: null,
+  });
+  await drain(a, b);
+  assert.equal(b.store.message(placeholder.id).history_placeholder, 0);
+  assert.equal(b.store.message(placeholder.id).body, "Root now available");
+  const restricted = channel(a, { name: "deleted-parent", mode: "topical" });
+  const topic = a.store.createTopic(a.alice, restricted.id, "History");
+  const deleted = a.store.post(a.alice, restricted.id, {
+    body: "Removed root",
+    topic_id: topic.id,
+  });
+  a.store.post(a.alice, restricted.id, {
+    body: "Surviving reply",
+    topic_id: topic.id,
+    parent_id: deleted.id,
+  });
+  a.store.deleteMessage(a.alice, deleted.id);
+  const second = await b.fed.subscribe(b.bob, a.fed.channelActor(restricted));
+  await drain(a, b);
+  const imported = b.store.messages(b.bob, second.channel.id);
+  assert.ok(imported[0].deleted_at);
+  assert.equal(imported[1].parent_id, imported[0].id);
+  assert.equal(imported[1].topic_id, imported[0].topic_id);
+});
+
+test("an offline peer with a backlog cannot prevent delivery to another peer", async (t) => {
+  const a = await instance(t),
+    b = await instance(t),
+    c = await instance(t);
+  await b.fed.sendDirect(b.bob, a.fed.userActor(a.bob), "Offline head");
+  a.offline(true);
+  await b.fed.tick();
+  for (let index = 0; index < 25; index++)
+    await b.fed.sendDirect(b.bob, a.fed.userActor(a.bob), `Waiting ${index}`);
+  await b.fed.sendDirect(
+    b.bob,
+    c.fed.userActor(c.bob),
+    "Independent recipient",
+  );
+  await b.fed.tick();
+  assert.equal(c.fed.directMessages(c.bob)[0].body, "Independent recipient");
+});

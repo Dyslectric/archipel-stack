@@ -1,0 +1,5 @@
+# Optional: use an existing Traefik certificate resolver.
+services:
+  archipel:
+    labels:
+      traefik.http.routers.archipel.tls.certresolver: ${TRAEFIK_CERT_RESOLVER:?Set TRAEFIK_CERT_RESOLVER}

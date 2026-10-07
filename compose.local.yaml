@@ -1,0 +1,5 @@
+# Direct loopback access, or a proxy running on the Docker host.
+services:
+  archipel:
+    ports:
+      - "127.0.0.1:${PORT:-8788}:8788"

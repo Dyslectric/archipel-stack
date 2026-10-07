@@ -1,0 +1,10 @@
+# Share the existing network with Traefik, nginx, Caddy, or another proxy.
+services:
+  archipel:
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true
+    name: ${PROXY_NETWORK:?Run npm run setup to configure PROXY_NETWORK}

@@ -1,0 +1,617 @@
+import express, {
+  type Request,
+  type Response,
+  type NextFunction,
+} from "express";
+import helmet from "helmet";
+import { rateLimit, ipKeyGenerator } from "express-rate-limit";
+import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
+import { Config } from "./config.js";
+import { Problem, Store, type User } from "./store.js";
+import { Federation } from "./federation.js";
+import { createOidc } from "./oidc.js";
+
+function cookie(req: Request, name: string) {
+  const value = (req.headers.cookie || "")
+    .split(";")
+    .map((s) => s.trim())
+    .find((s) => s.startsWith(`${name}=`))
+    ?.slice(name.length + 1);
+  return value && /^[A-Za-z0-9_-]{1,200}$/.test(value) ? value : "";
+}
+export function createApp(config: Config, store: Store) {
+  store.applyAuthPolicy(
+    config.oidcIssuer,
+    config.adminSubjects,
+    config.devAuth,
+  );
+  store.initializeRegistration(config.registrationMode);
+  const federation = new Federation(store, config);
+  const app = express();
+  app.locals.federation = federation;
+  app.set(
+    "trust proxy",
+    config.trustedProxies.length ? config.trustedProxies : false,
+  );
+  const oidc = createOidc(config, store);
+  const secure = config.baseUrl.startsWith("https:");
+  const cookieOptions = {
+    httpOnly: true,
+    sameSite: "lax" as const,
+    secure,
+    path: "/",
+  };
+  const authCookie = secure ? "__Host-archipel" : "archipel";
+  app.disable("x-powered-by");
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        directives: { "upgrade-insecure-requests": secure ? [] : null },
+      },
+      strictTransportSecurity: secure ? undefined : false,
+    }),
+  );
+  app.use(
+    ["/api/admin/emojis", "/api/personal-emojis"],
+    express.json({ limit: "360kb" }),
+  );
+  // Federation authenticates with signed requests; browser APIs keep Origin/CSRF.
+  app.use(
+    "/federation",
+    rateLimit({
+      windowMs: 60000,
+      limit: 120,
+      message: { error: "Too many federation requests." },
+    }),
+  );
+  app.post(
+    "/federation/inbox",
+    express.raw({
+      type: [
+        "application/activity+json",
+        "application/ld+json",
+        "application/json",
+      ],
+      limit: "64kb",
+    }),
+    async (req, res) => {
+      if (!Buffer.isBuffer(req.body))
+        throw new Problem(415, "Use an ActivityStreams JSON content type.");
+      await federation.receive(req, req.body);
+      res.status(202).json({ accepted: true });
+    },
+  );
+  app.use(["/federation", "/.well-known"], (_req, res, next) => {
+    res.setHeader("Cache-Control", "no-store");
+    next();
+  });
+  app.get("/.well-known/webfinger", (req, res) => {
+    federation.ensureEnabled();
+    const resource = String(req.query.resource || "");
+    const domain = new URL(config.baseUrl).host;
+    if (!resource.startsWith("acct:") || !resource.endsWith(`@${domain}`))
+      throw new Problem(404, "Unknown account.");
+    const name = resource.slice(5, -(domain.length + 1));
+    const channel = name.startsWith("#")
+      ? (store.db
+          .prepare(
+            "SELECT id FROM channels WHERE name=? AND remote_actor IS NULL AND federation_enabled=1",
+          )
+          .get(name.slice(1)) as { id: string } | undefined)
+      : undefined;
+    const localUser = store.db
+      .prepare("SELECT id FROM users WHERE username=? AND remote_actor IS NULL")
+      .get(name) as { id: string } | undefined;
+    const actor = channel
+      ? federation.publicActor("channels", channel.id)
+      : localUser
+        ? federation.publicActor("users", localUser.id)
+        : null;
+    if (!actor) throw new Problem(404, "Unknown federated account.");
+    res
+      .type("application/jrd+json")
+      .json({
+        subject: resource,
+        links: [
+          { rel: "self", type: "application/activity+json", href: actor.id },
+        ],
+      });
+  });
+  app.get("/actors/:kind/:id/outbox", async (req, res) => {
+    if (req.params.kind !== "channels")
+      throw new Problem(404, "User outboxes are private.");
+    const actor = await federation.authenticate(req);
+    const before =
+      req.query.before === undefined ? undefined : Number(req.query.before);
+    if (before !== undefined && (!Number.isSafeInteger(before) || before < 1))
+      throw new Problem(400, "Invalid history cursor.");
+    res
+      .type("application/activity+json")
+      .json(federation.history(actor, String(req.params.id), before));
+  });
+  app.get("/actors/:kind/:id", (req, res, next) => {
+    if (
+      !/application\/(activity\+json|ld\+json)/i.test(req.headers.accept || "")
+    )
+      return next();
+    if (!["users", "channels"].includes(String(req.params.kind)))
+      throw new Problem(404, "Actor not found.");
+    res
+      .setHeader("Cache-Control", "no-store")
+      .type("application/activity+json")
+      .json(
+        federation.publicActor(
+          req.params.kind as "users" | "channels",
+          String(req.params.id),
+        ),
+      );
+  });
+  app.get("/federation/emojis", (_req, res) => {
+    federation.ensureEnabled();
+    res.json({
+      emojis: store
+        .emojis()
+        .map((e) => ({
+          name: e.name,
+          url: `${config.baseUrl}/federation/emojis/${e.id}/image`,
+        })),
+    });
+  });
+  app.get("/federation/emojis/:id/image", (req, res) => {
+    federation.ensureEnabled();
+    // Only emoji owned here are exported; received cache entries stay local.
+    const image = store.db
+      .prepare(
+        "SELECT mime,image FROM custom_emojis WHERE id=? UNION ALL SELECT mime,image FROM personal_emojis WHERE id=?",
+      )
+      .get(String(req.params.id), String(req.params.id)) as
+      | { mime: string; image: Uint8Array }
+      | undefined;
+    if (!image) throw new Problem(404, "Emoji not found.");
+    res.type(image.mime).send(Buffer.from(image.image));
+  });
+  app.use(express.json({ limit: "64kb" }));
+  app.use(
+    ["/api", "/actors", "/objects"],
+    rateLimit({
+      windowMs: 60000,
+      limit: 300,
+      keyGenerator: (req) => {
+        try {
+          const session = store.session(cookie(req, authCookie));
+          if (session) return `user:${session.user.id}`;
+        } catch {
+          /* Authentication middleware reports revoked accounts. */
+        }
+        return ipKeyGenerator(req.ip || "unknown");
+      },
+      standardHeaders: "draft-8",
+      legacyHeaders: false,
+      message: { error: "Too many requests. Please try again shortly." },
+    }),
+  );
+  app.use(["/api", "/auth", "/actors", "/objects"], (_req, res, next) => {
+    res.setHeader("Cache-Control", "no-store");
+    next();
+  });
+  app.use(
+    "/auth",
+    rateLimit({
+      windowMs: 60000,
+      limit: 30,
+      message: {
+        error: "Too many sign-in attempts. Please try again shortly.",
+      },
+    }),
+  );
+  app.use((req, res, next) => {
+    if (
+      !["GET", "HEAD", "OPTIONS"].includes(req.method) &&
+      req.headers.origin !== config.baseUrl
+    )
+      return next(
+        new Problem(403, "This request must come from this instance."),
+      );
+    next();
+  });
+  app.get("/health", (_req, res) => res.json({ status: "ok" }));
+  app.get("/api/session", (req, res) => {
+    const session = store.session(cookie(req, authCookie));
+    res.json({
+      user: session ? store.profile(session.user, true) : null,
+      csrf: session?.csrf || null,
+      dev_auth: config.devAuth,
+      oidc_enabled: !!config.oidcIssuer,
+      instance: new URL(config.baseUrl).host,
+      registration_mode: store.registrationMode(),
+      federation_enabled: federation.enabled(),
+    });
+  });
+  app.post(
+    "/api/dev-login",
+    rateLimit({
+      windowMs: 60000,
+      limit: 30,
+      message: {
+        error: "Too many sign-in attempts. Please try again shortly.",
+      },
+    }),
+    (req, res) => {
+      if (!config.devAuth) throw new Problem(404, "Not found.");
+      const username = req.body?.username;
+      if (!["alice", "bob", "charlie"].includes(username))
+        throw new Problem(400, "Choose a development persona.");
+      const user = store.loginIdentity(
+        "urn:archipel:development",
+        username,
+        username,
+        [],
+        username === "alice",
+      );
+      store.logout(cookie(req, authCookie));
+      const session = store.createSession(user.id);
+      res.cookie(authCookie, session.token, {
+        ...cookieOptions,
+        maxAge: 7 * 86400000,
+      });
+      res.json({ user: store.profile(user, true), csrf: session.csrf });
+    },
+  );
+  app.get("/auth/login", async (_req, res) => {
+    const flow = await oidc.begin();
+    res.cookie("archipel-flow", flow.browser, {
+      ...cookieOptions,
+      maxAge: 10 * 60000,
+    });
+    res.redirect(flow.url);
+  });
+  app.get("/auth/callback", async (req, res) => {
+    try {
+      const user = await oidc.complete(
+        req.originalUrl.split("?")[1] || "",
+        cookie(req, "archipel-flow"),
+      );
+      store.logout(cookie(req, authCookie));
+      const session = store.createSession(user.id);
+      res.cookie(authCookie, session.token, {
+        ...cookieOptions,
+        maxAge: 7 * 86400000,
+      });
+      res.clearCookie("archipel-flow", cookieOptions);
+      res.redirect("/");
+    } catch {
+      res.clearCookie("archipel-flow", cookieOptions);
+      res.redirect("/?signin=failed");
+    }
+  });
+  app.use(["/api", "/actors", "/objects"], (req, res, next) => {
+    const session = store.session(cookie(req, authCookie));
+    if (!session) return next(new Problem(401, "Sign in to continue."));
+    res.locals.user = session.user;
+    if (
+      !["GET", "HEAD"].includes(req.method) &&
+      req.headers["x-csrf-token"] !== session.csrf
+    )
+      return next(
+        new Problem(403, "Your session changed. Refresh and try again."),
+      );
+    next();
+  });
+  const user = (res: Response) => res.locals.user as User;
+  // Unapproved identities can inspect their session and sign out, but cannot
+  // access members, messages, actor/object endpoints, or management APIs.
+  app.use(["/api", "/actors", "/objects"], (req, res, next) => {
+    if (
+      req.path === "/logout" &&
+      req.baseUrl === "/api" &&
+      req.method === "POST"
+    )
+      return next();
+    store.active(user(res).id);
+    next();
+  });
+  app.get("/api/emojis", (_req, res) =>
+    res.json(store.emojiCatalog(user(res))),
+  );
+  app.get("/api/emojis/:id/image", (req, res) => {
+    const emoji = store.emojiImage(String(req.params.id));
+    res.type(emoji.mime).send(Buffer.from(emoji.image));
+  });
+  app.get("/api/personal-emojis", (_req, res) =>
+    res.json(store.personalEmojis(user(res))),
+  );
+  app.post("/api/personal-emojis", (req, res) =>
+    res
+      .status(201)
+      .json(
+        store.adoptEmoji(
+          user(res),
+          req.body?.name,
+          req.body?.image,
+          "local-upload",
+        ),
+      ),
+  );
+  app.patch("/api/personal-emojis/:id", (req, res) =>
+    res.json(
+      store.renamePersonalEmoji(
+        user(res),
+        String(req.params.id),
+        req.body?.name,
+      ),
+    ),
+  );
+  app.delete("/api/personal-emojis/:id", (req, res) => {
+    store.removePersonalEmoji(user(res), String(req.params.id));
+    res.json({ ok: true });
+  });
+  app.get("/api/emoji-sources", async (req, res) =>
+    res.json(await federation.emojiSource(req.query.instance)),
+  );
+  app.post("/api/personal-emojis/adopt", async (req, res) =>
+    res
+      .status(201)
+      .json(await federation.adoptEmoji(user(res), req.body || {})),
+  );
+  app.get("/api/admin/federation", (_req, res) => {
+    store.requireAdmin(user(res));
+    res.json(federation.status());
+  });
+  app.patch("/api/admin/federation", (req, res) =>
+    res.json(federation.setEnabled(user(res), req.body?.enabled)),
+  );
+  app.patch("/api/admin/users/:id/federation", (req, res) =>
+    res.json(
+      federation.setPermissions(
+        user(res),
+        String(req.params.id),
+        req.body || {},
+      ),
+    ),
+  );
+  app.post("/api/admin/federation/blocks", (req, res) =>
+    res.json(federation.block(user(res), req.body || {})),
+  );
+  app.get("/api/federation/subscriptions", (_req, res) =>
+    res.json(federation.subscriptions(user(res))),
+  );
+  app.post("/api/federation/subscriptions", async (req, res) =>
+    res
+      .status(202)
+      .json(await federation.subscribe(user(res), req.body?.address)),
+  );
+  app.delete("/api/federation/subscriptions/:id", (req, res) => {
+    federation.unsubscribe(user(res), String(req.params.id));
+    res.json({ ok: true });
+  });
+  app.get("/api/federation/messages", (_req, res) =>
+    res.json(federation.directMessages(user(res))),
+  );
+  app.post("/api/federation/messages", async (req, res) =>
+    res
+      .status(202)
+      .json(
+        await federation.sendDirect(
+          user(res),
+          req.body?.address,
+          req.body?.body,
+        ),
+      ),
+  );
+  app.patch("/api/channels/:id/federation", (req, res) =>
+    res.json(
+      federation.setChannel(
+        user(res),
+        String(req.params.id),
+        req.body?.enabled,
+      ),
+    ),
+  );
+  app.get("/api/channels/:id/followers", (req, res) =>
+    res.json(federation.followers(user(res), String(req.params.id))),
+  );
+  app.patch("/api/channels/:id/followers", (req, res) => {
+    federation.decideFollow(
+      user(res),
+      String(req.params.id),
+      req.body?.actor,
+      req.body?.status,
+    );
+    res.json({ ok: true });
+  });
+  app.get("/api/admin/emojis", (_req, res) => {
+    store.requireAdmin(user(res));
+    res.json(store.emojis());
+  });
+  app.post("/api/admin/emojis", (req, res) =>
+    res.status(201).json(store.addEmoji(user(res), req.body || {})),
+  );
+  app.delete("/api/admin/emojis/:name", (req, res) => {
+    store.removeEmoji(user(res), String(req.params.name));
+    res.json({ ok: true });
+  });
+  app.get("/api/admin/settings", (_req, res) => {
+    store.requireAdmin(user(res));
+    res.json({ registration_mode: store.registrationMode() });
+  });
+  app.patch("/api/admin/settings", (req, res) =>
+    res.json(store.setRegistration(user(res), req.body?.registration_mode)),
+  );
+  app.get("/api/admin/applications", (_req, res) =>
+    res.json(store.applications(user(res))),
+  );
+  app.patch("/api/admin/applications/:id", (req, res) =>
+    res.json(
+      store.reviewApplication(
+        user(res),
+        String(req.params.id),
+        req.body?.admission_status,
+      ),
+    ),
+  );
+  app.patch("/api/messages/:id", async (req, res) =>
+    res.json(
+      await (store.channel(store.message(String(req.params.id)).channel_id)
+        .remote_actor
+        ? federation.editRemote(
+            user(res),
+            String(req.params.id),
+            req.body || {},
+          )
+        : store.editMessage(user(res), String(req.params.id), req.body || {})),
+    ),
+  );
+  app.get("/actors/users/:id", (req, res) =>
+    res.json(store.profile(store.user(String(req.params.id)))),
+  );
+  app.get("/actors/channels/:id", (req, res) =>
+    res.json(store.details(user(res), String(req.params.id))),
+  );
+  app.get("/objects/messages/:id", (req, res) => {
+    const message = store.message(String(req.params.id));
+    store.requireRead(user(res), store.channel(message.channel_id));
+    if (message.remote_object && !store.user(user(res).id).federation_receive)
+      throw new Problem(
+        403,
+        "Receiving federated messages is disabled for this account.",
+      );
+    res.json(message);
+  });
+  app.post("/api/logout", (req, res) => {
+    store.logout(cookie(req, authCookie));
+    res.clearCookie(authCookie, cookieOptions);
+    res.json({ ok: true });
+  });
+  app.get("/api/channels", (_req, res) =>
+    res.json(store.listChannels(user(res))),
+  );
+  app.post("/api/channels", (req, res) =>
+    res.status(201).json(store.createChannel(user(res), req.body || {})),
+  );
+  app.get("/api/channels/:id", (req, res) =>
+    res.json(store.details(user(res), String(req.params.id))),
+  );
+  app.post("/api/channels/:id/join", (req, res) => {
+    store.join(user(res), String(req.params.id));
+    res.json({ ok: true });
+  });
+  app.post("/api/channels/:id/leave", (req, res) => {
+    if (store.channel(String(req.params.id)).remote_actor)
+      federation.unsubscribe(user(res), String(req.params.id));
+    else store.leave(user(res), String(req.params.id));
+    res.json({ ok: true });
+  });
+  app.get("/api/channels/:id/rules", (req, res) =>
+    res.json(store.rules(user(res), String(req.params.id))),
+  );
+  app.patch("/api/channels/:id/members/:user", (req, res) => {
+    store.setMember(
+      user(res),
+      String(req.params.id),
+      String(req.params.user),
+      req.body || {},
+    );
+    res.json({ ok: true });
+  });
+  app.post("/api/channels/:id/topics", (req, res) =>
+    res
+      .status(201)
+      .json(
+        store.createTopic(user(res), String(req.params.id), req.body?.title),
+      ),
+  );
+  app.get("/api/channels/:id/messages", (req, res) => {
+    const before =
+      req.query.before === undefined ? undefined : Number(req.query.before);
+    if (before !== undefined && (!Number.isSafeInteger(before) || before < 1))
+      throw new Problem(400, "Invalid message cursor.");
+    const messages = store.messages(user(res), String(req.params.id), before);
+    res.json({
+      messages,
+      older_cursor: messages.length === 100 ? messages[0].seq : null,
+    });
+  });
+  app.post("/api/channels/:id/messages", async (req, res) =>
+    res
+      .status(201)
+      .json(
+        await (store.channel(String(req.params.id)).remote_actor
+          ? federation.remotePost(
+              user(res),
+              String(req.params.id),
+              req.body || {},
+            )
+          : store.post(user(res), String(req.params.id), req.body || {})),
+      ),
+  );
+  app.delete("/api/messages/:id", (req, res) => {
+    if (
+      store.channel(store.message(String(req.params.id)).channel_id)
+        .remote_actor
+    )
+      federation.deleteRemote(user(res), String(req.params.id));
+    else store.deleteMessage(user(res), String(req.params.id));
+    res.json({ ok: true });
+  });
+  app.get("/api/users", (_req, res) => res.json(store.directory(user(res))));
+  app.patch("/api/profile", (req, res) =>
+    res.json(store.updateProfile(user(res), req.body || {})),
+  );
+  app.patch("/api/admin/users/:id", (req, res) => {
+    store.ban(user(res), String(req.params.id), req.body?.banned);
+    res.json({ ok: true });
+  });
+  app.get("/api/admin/audit", (_req, res) => {
+    if (!user(res).admin)
+      throw new Problem(403, "Instance administrator access is required.");
+    res.json(
+      store.db
+        .prepare(
+          "SELECT a.*,u.username FROM audit a JOIN users u ON u.id=a.actor_id ORDER BY a.seq DESC LIMIT 100",
+        )
+        .all(),
+    );
+  });
+  app.use("/api", (_req, _res, next) => next(new Problem(404, "Not found.")));
+  const clientPath = fileURLToPath(new URL("../dist/client/", import.meta.url));
+  app.use(express.static(clientPath, { index: false, maxAge: 0 }));
+  app.get("/", (_req, res) => {
+    if (!existsSync(`${clientPath}/index.html`))
+      return res
+        .status(503)
+        .type("text")
+        .send("Run npm run build:client to build the browser application.");
+    res.sendFile(`${clientPath}/index.html`);
+  });
+  app.use((_req, _res, next) => next(new Problem(404, "Not found.")));
+  app.use(
+    (
+      error: Error & { type?: string },
+      _req: Request,
+      res: Response,
+      _next: NextFunction,
+    ) => {
+      const status =
+        error instanceof Problem
+          ? error.status
+          : error.type === "entity.parse.failed"
+            ? 400
+            : error.type === "entity.too.large"
+              ? 413
+              : 500;
+      if (status === 500) console.error("Request failed:", error.name);
+      res.status(status).json({
+        error:
+          error instanceof Problem
+            ? error.message
+            : status === 400
+              ? "Invalid JSON."
+              : status === 413
+                ? "Request is too large."
+                : "The request could not be completed.",
+      });
+    },
+  );
+  return app;
+}
