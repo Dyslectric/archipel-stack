@@ -1,4 +1,4 @@
-import { $, action, api, esc, go, icon, onSubmit, refreshTimes, state, when, type XmppRoom } from "./shared.js";
+import { $, action, api, avatar, clock, dayLabel, esc, full, go, icon, onSubmit, sameDay, state, type XmppRoom } from "./shared.js";
 import { chatFrame, resetChat } from "./chat.js";
 import { renderSidebar } from "./sidebar.js";
 
@@ -18,14 +18,16 @@ export async function showXmppRooms(view: HTMLElement, id?: string) {
   if (id) { await tickXmppRooms(true); return; }
   const connection = await api<{ enabled: boolean; jid?: string }>("/xmpp");
   if (token !== generation || !view.isConnected) return;
-  $("#channel-heading").innerHTML = "<h1>XMPP rooms</h1>";
+  $("#channel-heading").innerHTML = `<h1>${icon("globe")}XMPP rooms</h1>`;
   $("#composer-area").innerHTML = "";
-  $("#feed-top").innerHTML = `<section class="card xmpp-join"><h2>Join a room hosted elsewhere</h2>${connection.enabled ?
+  $("#feed-top").innerHTML = `<div class="channel-intro"><h2>${icon("globe")}Join a room hosted elsewhere</h2></div><section class="card xmpp-join">${connection.enabled ?
     `<p class="muted">You join as ${esc(connection.jid)}. Your nickname is displayed in the room.</p><form class="stack" id="xmpp-room-join">
       <label>Room address<input name="room" required maxlength="512" placeholder="jdev@muc.xmpp.org" autocomplete="off"></label>
       <label>Nickname<input name="nick" required maxlength="100" value="${esc(state.session.user!.username)}" autocomplete="off"></label>
       <p class="form-error" role="alert"></p><button>Join room</button></form>` : '<p>XMPP is not configured on this instance. Ask your administrator to enable it.</p>'}</section>`;
+  $("#rows").className = "";
   $("#rows").innerHTML = `<section class="card xmpp-join"><h2>Your rooms</h2><ul class="plain">${state.xmppRooms.map(r => `<li class="member-row"><a class="grow" href="#/xmpp/${r.id}">${esc(r.room)}</a><span class="muted small">${esc(r.state)}</span></li>`).join("") || '<li class="muted">You haven’t joined an external room yet.</li>'}</ul></section>`;
+  $("#feed-empty").innerHTML = "";
   if (connection.enabled) onSubmit($("#xmpp-room-join"), async data => {
     const room = await api<XmppRoom>("/xmpp/rooms", "POST", Object.fromEntries(data));
     state.xmppRooms = await api("/xmpp/rooms");
@@ -34,7 +36,7 @@ export async function showXmppRooms(view: HTMLElement, id?: string) {
 }
 
 function paint(room: XmppRoom) {
-  $("#channel-heading").innerHTML = `<h1><strong>${esc(room.room)}</strong></h1><p class="muted small">${esc(room.state)} · ${esc(room.nick)}${room.role !== "none" ? ` · ${esc(room.role)}` : ""}</p>`;
+  $("#channel-heading").innerHTML = `<h1>${icon("globe")}<span class="topic-name">${esc(room.room)}</span></h1><span class="desc">${esc(room.state)} · ${esc(room.nick)}${room.role !== "none" ? ` · ${esc(room.role)}` : ""}</span>`;
   $("#channel-actions").innerHTML = `<a class="button secondary" href="#/xmpp">Join another room</a><button type="button" class="secondary" id="xmpp-rejoin">${room.desired && room.state === "joined" ? "Reconnect" : "Join again"}</button>${room.desired ? '<button type="button" class="secondary" id="xmpp-leave">Leave room</button>' : ""}`;
   $("#xmpp-rejoin").addEventListener("click", () => action(async () => {
     await api("/xmpp/rooms", "POST", { room: room.room, nick: room.nick, reconnect: true });
@@ -45,7 +47,9 @@ function paint(room: XmppRoom) {
     state.xmppRooms = await api("/xmpp/rooms"); renderSidebar();
     await tickXmppRooms();
   }));
-  $("#feed-top").innerHTML = `${room.subject ? `<p class="card xmpp-subject">${esc(room.subject)}</p>` : ""}${room.blocked || room.error ? `<p class="card" role="status">${esc(room.blocked || room.error)}</p>` : ""}${more ? '<button class="secondary" id="xmpp-older">Load earlier messages</button>' : ""}`;
+  $("#feed-top").innerHTML = `${more ? '<button type="button" class="secondary small older-button" id="xmpp-older">Load earlier messages</button>' :
+    `<div class="channel-intro"><h2>${icon("globe")}${esc(room.room)}</h2><p class="muted xmpp-subject">${esc(room.subject || "A room hosted on another XMPP server.")}</p><p class="muted small">You appear as <code>${esc(room.nick)}</code></p></div>`}${
+    more && room.subject ? `<p class="muted xmpp-subject">${esc(room.subject)}</p>` : ""}${room.blocked || room.error ? `<p class="card" role="status">${esc(room.blocked || room.error)}</p>` : ""}`;
   document.querySelector("#xmpp-older")?.addEventListener("click", () => action(async () => {
     const id = selected, token = generation, before = Math.min(...[...messages.values()].map(m => m.seq));
     const page = await api<Page>(`/xmpp/rooms/${id}/messages?before=${before}`);
@@ -54,24 +58,33 @@ function paint(room: XmppRoom) {
     more = page.more; paint(page.room);
   }));
   const rows = $("#rows"), feed = $("#message-list"), bottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
-  const html = [...messages.values()].sort((a, b) => a.seq - b.seq).map(m => {
+  // The same day groups and message rows as a channel; authors are room nicknames.
+  let html = "", prev: Message | undefined;
+  for (const m of [...messages.values()].sort((a, b) => a.seq - b.seq)) {
     const nick = m.sender.slice(m.sender.indexOf("/") + 1);
     const status = m.status === "queued" ? "Queued" : m.status === "sent" ? "Awaiting room confirmation" : m.status === "failed" ? `Failed: ${m.error || "Message was rejected"}` : "";
-    return `<article class="xmpp-message"><div class="row"><strong title="${esc(m.sender)}">${esc(nick)}</strong><span class="muted small">${when(m.created_at)}</span>${status ? `<span class="muted small">${esc(status)}</span>` : ""}</div><div class="message-body">${esc(m.body)}</div></article>`;
-  }).join("");
+    const day = !prev || !sameDay(prev.created_at, m.created_at);
+    const cont = !day && prev!.sender === m.sender && new Date(m.created_at).getTime() - new Date(prev!.created_at).getTime() < 600000;
+    const time = `<time datetime="${esc(m.created_at)}" title="${esc(full(m.created_at))}">${esc(clock(m.created_at))}</time>`;
+    const note = status ? `<span class="edited">${esc(status)}</span>` : "";
+    if (day) html += `${prev ? "</div></section>" : ""}<section class="day-group"><div class="day-divider"><span>${esc(dayLabel(m.created_at))}</span></div><div class="group-body">`;
+    html += `<article class="message xmpp-message${cont ? " cont" : ""}"><div class="msg-gutter">${cont ? time : avatar({ username: m.sender, display_name: nick })}</div>
+      <div class="message-content">${cont ? "" : `<div class="message-meta"><span class="author" title="${esc(m.sender)}">${esc(nick)}</span>${time}${note}</div>`}<div class="message-body">${esc(m.body)}</div>${cont ? note : ""}</div></article>`;
+    prev = m;
+  }
+  if (prev) html += "</div></section>";
   if (rows.dataset.html !== html) rows.innerHTML = rows.dataset.html = html;
   if (bottom) feed.scrollTop = feed.scrollHeight;
-  refreshTimes(rows);
   $("#feed-empty").innerHTML = messages.size ? "" : `<p class="empty muted">${room.state === "joining" ? "Waiting for the room to accept your join…" : "No messages received yet."}</p>`;
   const area = $("#composer-area");
   const reason = room.blocked || room.post_blocked || (room.state !== "joined" ? "Join the room to send messages." : "Your room role allows reading only.");
   if (!room.can_post) {
-    if (area.dataset.permission !== reason) area.innerHTML = `<div class="composer-wrap"><p class="card muted">${esc(reason)}</p></div>`;
+    if (area.dataset.permission !== reason) area.innerHTML = `<div class="composer-wrap"><p class="card composer-hint muted">${esc(reason)}</p></div>`;
     area.dataset.permission = reason; return;
   }
   if (area.dataset.permission === "post") return;
   area.dataset.permission = "post";
-  area.innerHTML = `<div class="composer-wrap"><form class="composer" id="xmpp-composer"><textarea name="body" maxlength="8000" rows="2" aria-label="Message" placeholder="Message the room" required></textarea><p class="form-error" role="alert"></p><div class="composer-bar"><span class="grow"></span><button aria-label="Send message">${icon("send")} Send</button></div></form></div>`;
+  area.innerHTML = `<div class="composer-wrap"><form class="composer" id="xmpp-composer"><textarea name="body" maxlength="8000" rows="2" aria-label="Message" placeholder="Message ${esc(room.room)}" required></textarea><p class="form-error" role="alert"></p><div class="composer-bar"><span class="grow"></span><span class="muted small composer-hint-keys"><kbd>Enter</kbd> to send · <kbd>Shift</kbd> + <kbd>Enter</kbd> for a new line</span><button type="submit" aria-label="Send message">${icon("send")}<span>Send</span></button></div></form></div>`;
   const form = $<HTMLFormElement>("#xmpp-composer"), body = $<HTMLTextAreaElement>("textarea", form);
   onSubmit(form, async data => {
     const id = selected, token = generation;

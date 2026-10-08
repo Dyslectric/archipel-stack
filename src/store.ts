@@ -1598,6 +1598,7 @@ export class Store {
     const layout = {
       dms: section(input.dms),
       channels: section(input.channels),
+      xmpp: section(input.xmpp),
     };
     this.db
       .prepare(

@@ -41,6 +41,7 @@ let refreshBusy = false;
 // Direct conversations, what is new in each conversation, and how the sidebar is arranged.
 async function loadOverview() {
   const overview = await api<Overview>("/overview");
+  state.xmppEnabled = overview.xmpp_enabled;
   state.xmppRooms = overview.xmpp_rooms;
   state.dms = overview.dms;
   state.userBlocks = overview.user_blocks;
@@ -151,6 +152,7 @@ async function boot() {
   state.channels = [];
   state.emojis = [];
   state.dms = [];
+  state.xmppEnabled = false;
   state.xmppRooms = [];
   state.unread = {};
   state.layout = null;

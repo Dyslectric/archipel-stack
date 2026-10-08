@@ -723,6 +723,7 @@ test("a sidebar layout is kept per member and cleaned on the way in", () => {
       items: ["a"],
       groups: [{ id: "g1", name: "Work", collapsed: false, items: ["b"] }],
     },
+    xmpp: { collapsed: false, items: [], groups: [] },
   });
   assert.deepEqual(store.overview(alice).layout, saved);
   assert.equal(store.overview(bob).layout, null);

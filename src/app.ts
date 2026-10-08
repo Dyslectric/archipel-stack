@@ -503,7 +503,7 @@ export function createApp(config: Config, store: Store) {
     );
     res.status(202).json({ peer: sent.peer, queued: true });
   });
-  app.get("/api/overview", (_req, res) => res.json({ ...store.overview(user(res)), xmpp_rooms: xmpp.remoteRooms.list(user(res)) }));
+  app.get("/api/overview", (_req, res) => res.json({ ...store.overview(user(res)), xmpp_enabled: !!config.xmppDomain, xmpp_rooms: xmpp.remoteRooms.list(user(res)) }));
   app.post("/api/user-blocks", (req, res) =>
     res.json(store.setUserBlock(user(res), req.body?.peer, req.body?.blocked)),
   );

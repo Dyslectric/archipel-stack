@@ -52,7 +52,7 @@ export interface Conversation {
   unread?: number;
   blocked?: string | null;
 }
-// How the reader arranged one half of the sidebar: loose conversations, then named groups.
+// How the reader arranged one section of the sidebar: loose conversations, then named groups.
 export interface SideGroup {
   id: string;
   name: string;
@@ -64,9 +64,10 @@ export interface SideSection {
   items: string[];
   groups: SideGroup[];
 }
-export type SideKind = "dms" | "channels";
+export type SideKind = "dms" | "channels" | "xmpp";
 export type Layout = Record<SideKind, SideSection>;
 export interface Overview {
+  xmpp_enabled: boolean;
   xmpp_rooms: XmppRoom[];
   dms: Conversation[];
   unread: Record<string, number>;
@@ -113,6 +114,7 @@ export const state = {
   channels: [] as Channel[],
   emojis: [] as CustomEmoji[],
   dms: [] as Conversation[],
+  xmppEnabled: false,
   xmppRooms: [] as XmppRoom[],
   // New messages per conversation: a channel's id, or dm:<peer>.
   unread: {} as Record<string, number>,

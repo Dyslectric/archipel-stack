@@ -17,22 +17,25 @@ import {
   type SideGroup,
   type SideKind,
   type SideSection,
+  type XmppRoom,
 } from "./shared.js";
 import { chatChannel, chatTopic, sortedTopics } from "./chat.js";
 
-// The sidebar: direct messages, then channels. Each half folds away, and its conversations can be
+// The sidebar: direct messages, channels, then XMPP rooms. Each section folds away, and its conversations can be
 // put in named groups and reordered, by dragging or from the menu on each row. The arrangement is
 // kept with the account (state.layout), so it follows the reader to other browsers.
 const titles: Record<SideKind, string> = {
   dms: "Direct messages",
   channels: "Channels",
+  xmpp: "XMPP rooms",
 };
+const kinds = Object.keys(titles) as SideKind[];
 let html = "",
   saving = 0;
 let drag: { type: "item" | "group"; kind: SideKind; id: string } | null = null;
 
 const kindOf = (id: string): SideKind =>
-  id.startsWith("dm:") ? "dms" : "channels";
+  id.startsWith("dm:") ? "dms" : id.startsWith("xmpp:") ? "xmpp" : "channels";
 // What is new, leaving out the conversation on screen: that one is being read.
 const unread = (id: string) =>
   chatChannel()?.id === id ? 0 : state.unread[id] || 0;
@@ -52,13 +55,16 @@ function conversations(): Conversation[] {
     ? [open, ...state.dms]
     : state.dms;
 }
+const joinedRooms = () => state.xmppRooms.filter((r) => r.desired);
 function available(kind: SideKind) {
   return kind === "dms"
     ? conversations().map((c) => `dm:${c.peer}`)
-    : state.channels.filter((c) => c.role).map((c) => c.id);
+    : kind === "xmpp"
+      ? joinedRooms().map((r) => `xmpp:${r.id}`)
+      : state.channels.filter((c) => c.role).map((c) => c.id);
 }
 // The saved arrangement with every current conversation somewhere in it: new direct messages
-// go on top, newly joined channels at the end.
+// go on top, newly joined channels and rooms at the end.
 function placed(kind: SideKind): SideSection {
   const saved = state.layout?.[kind];
   const section: SideSection = {
@@ -78,8 +84,9 @@ function placed(kind: SideKind): SideSection {
   return section;
 }
 function save(kind: SideKind, section: SideSection) {
-  const other: SideKind = kind === "dms" ? "channels" : "dms";
-  const layout = { [kind]: section, [other]: placed(other) } as Layout;
+  const layout = Object.fromEntries(
+    kinds.map((k) => [k, k === kind ? section : placed(k)]),
+  ) as Layout;
   state.layout = layout;
   renderSidebar();
   saving++;
@@ -189,12 +196,27 @@ function dmRow(c: Conversation) {
     link: `<a class="channel-link dm-link${on ? " on" : ""}" draggable="false" href="${esc(dmHref(c.peer))}"${on ? ' aria-current="page"' : ""} title="@${esc(c.username)}">${avatar(c, "small")}<span class="grow">${esc(c.display_name)}</span>${c.remote ? `<span class="mode-tag">${icon("globe")}</span>` : ""}${count(unread(`dm:${c.peer}`))}</a>`,
   };
 }
+function roomRow(r: XmppRoom) {
+  const on = location.hash === `#/xmpp/${r.id}`;
+  return {
+    name: r.room,
+    extra: "",
+    link: `<a class="channel-link${on ? " on" : ""}" draggable="false" href="#/xmpp/${r.id}"${on ? ' aria-current="page"' : ""} title="${esc(r.room)}">${icon("globe")}<span class="grow">${esc(r.room)}</span>${r.state !== "joined" ? `<span class="mode-tag">${esc(r.state)}</span>` : ""}</a>`,
+  };
+}
+const empty: Record<SideKind, string> = {
+  dms: "Nobody yet. Start a conversation with the + above.",
+  channels: "Channels you join appear here.",
+  xmpp: "Rooms you join on other servers appear here.",
+};
 function sectionHtml(kind: SideKind) {
   const section = placed(kind);
   const rows = new Map(
     kind === "dms"
       ? conversations().map((c) => [`dm:${c.peer}`, dmRow(c)] as const)
-      : state.channels
+      : kind === "xmpp"
+        ? joinedRooms().map((r) => [`xmpp:${r.id}`, roomRow(r)] as const)
+        : state.channels
           .filter((c) => c.role)
           .map((c) => [c.id, channelRow(c)] as const),
   );
@@ -216,7 +238,7 @@ function sectionHtml(kind: SideKind) {
     items(section.items) ||
     (rows.size
       ? ""
-      : `<p class="muted small side-empty">${kind === "dms" ? "Nobody yet. Start a conversation with the + above." : "Channels you join appear here."}</p>`);
+      : `<p class="muted small side-empty">${empty[kind]}</p>`);
   const groups = section.groups
     .map(
       (g) =>
@@ -230,7 +252,7 @@ function sectionHtml(kind: SideKind) {
       : "";
   return `<section class="side-section" data-section="${kind}"><div class="side-head"><button type="button" class="side-toggle" data-fold="" aria-expanded="${!section.collapsed}">${icon("chevron-down", "chev")}<h2 class="grow">${titles[kind]}</h2>${section.collapsed ? news(everything) : ""}</button>
     <button type="button" class="icon-button" data-new-group aria-label="New group in ${titles[kind].toLowerCase()}" title="New group">${icon("folder-plus")}</button>
-    ${kind === "dms" ? `<button type="button" class="icon-button" data-new-dm aria-label="New direct message" title="New direct message">${icon("plus")}</button>` : `<a class="icon-button" href="#/channels/new" aria-label="Create channel" title="Create channel">${icon("plus")}</a>`}</div>
+    ${kind === "dms" ? `<button type="button" class="icon-button" data-new-dm aria-label="New direct message" title="New direct message">${icon("plus")}</button>` : kind === "xmpp" ? `<a class="icon-button" href="#/xmpp" aria-label="Join a room" title="Join a room">${icon("plus")}</a>` : `<a class="icon-button" href="#/channels/new" aria-label="Create channel" title="Create channel">${icon("plus")}</a>`}</div>
     ${section.collapsed ? "" : `${looking}<div class="side-items" data-list="">${loose}</div>${groups}`}</section>`;
 }
 export function renderSidebar() {
@@ -242,8 +264,11 @@ export function renderSidebar() {
   }
   const list = document.querySelector("#channel-list");
   if (!list || drag) return;
-  const next = sectionHtml("dms") + sectionHtml("channels") +
-    (state.xmppRooms.some(r => r.desired) ? `<section class="side-section"><div class="side-heading">XMPP rooms</div>${state.xmppRooms.filter(r => r.desired).map(r => `<a class="channel-link${location.hash === `#/xmpp/${r.id}` ? " on" : ""}" href="#/xmpp/${r.id}" title="${esc(r.room)}">${icon("globe")}<span class="grow">${esc(r.room)}</span></a>`).join("")}</section>` : "");
+  // Instances without XMPP have no rooms section.
+  const next = kinds
+    .filter((k) => k !== "xmpp" || state.xmppEnabled || joinedRooms().length)
+    .map(sectionHtml)
+    .join("");
   if (next === html && list.childElementCount) return;
   list.innerHTML = html = next;
 }

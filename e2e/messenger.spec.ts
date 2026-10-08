@@ -947,6 +947,13 @@ test("external XMPP room browser flow joins, renders safe content, posts and fol
   await expect(page.locator("#channel-heading")).toContainText("browser-test@muc.remote.example");
   await expect(page.locator("#channel-heading")).toContainText("joining");
   const roomId = page.url().split("/xmpp/")[1];
+  // The room is a row of its own sidebar section, organised like channels and direct messages.
+  const rooms = page.locator('[data-section="xmpp"]');
+  await expect(rooms.locator(".channel-link.on")).toContainText("browser-test@muc.remote.example");
+  await rooms.getByRole("button", { name: "XMPP rooms" }).click();
+  await expect(rooms.locator(".channel-link")).toHaveCount(0);
+  await rooms.getByRole("button", { name: "XMPP rooms" }).click();
+  await expect(rooms.locator(".channel-link")).toHaveCount(1);
   const adapterHeaders = { Authorization: "Bearer browser-test-bridge-secret-with-43-characters-minimum" };
   const sync = await (await page.request.post("/internal/xmpp/remote-rooms/sync", { headers: adapterHeaders, data: {} })).json();
   const occupant = sync.desired.find((r: { room: string }) => r.room === "browser-test@muc.remote.example");

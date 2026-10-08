@@ -559,7 +559,5 @@ dialog.dialog form { margin-top: 16px; }
   * { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
 }
 /* External room conversations keep the same readable feed and compose frame. */
-.xmpp-join { margin: 1rem; }
-.xmpp-message { padding: .8rem 0; border-bottom: 1px solid var(--line); }
+.xmpp-join { margin: 12px 0; }
 .xmpp-subject { white-space: pre-wrap; overflow-wrap: anywhere; }
-.xmpp-rows { padding: 0 1rem; }
