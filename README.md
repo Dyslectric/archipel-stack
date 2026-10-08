@@ -67,8 +67,9 @@ hold identity and object continuity. To back up a running instance, use SQLite's
 backup facilities; to copy files directly, stop the server first and copy the
 whole data directory. Do not copy only a live WAL database's main file.
 
-For XMPP, supply an account domain during setup and provide certificates for it
-and `channels.<domain>` before starting. Setup includes the Prosody service; users
+For XMPP, supply an account domain during setup. Setup can obtain certificates
+for it and `channels.<domain>` through ACME or an existing Traefik resolver, and
+prints the DNS records to publish. Setup includes the Prosody service; users
 connect through **Settings → XMPP clients**. Archipel retains its OIDC, policy,
 archive and ActivityPub services while Prosody handles XMPP streams and routing.
 

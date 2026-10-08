@@ -1,11 +1,12 @@
 # Use with compose.yaml and compose.proxy.yaml. TLS terminates at Traefik.
+# Router and service names carry the instance name, so several instances can share one Traefik.
 services:
   archipel:
     labels:
-      traefik.enable: "true"
-      traefik.docker.network: ${PROXY_NETWORK:?Set PROXY_NETWORK}
-      traefik.http.routers.archipel.rule: "Host(`${TRAEFIK_HOST:?Set TRAEFIK_HOST}`) && !PathPrefix(`/internal/`)"
-      traefik.http.routers.archipel.entrypoints: ${TRAEFIK_ENTRYPOINT:-websecure}
-      traefik.http.routers.archipel.tls: "true"
-      traefik.http.routers.archipel.service: archipel
-      traefik.http.services.archipel.loadbalancer.server.port: "8788"
+      - traefik.enable=true
+      - traefik.docker.network=${PROXY_NETWORK:?Set PROXY_NETWORK}
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME:?Set COMPOSE_PROJECT_NAME}.rule=Host(`${TRAEFIK_HOST:?Set TRAEFIK_HOST}`) && !PathPrefix(`/internal/`)
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}.tls=true
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}.service=${COMPOSE_PROJECT_NAME}
+      - traefik.http.services.${COMPOSE_PROJECT_NAME}.loadbalancer.server.port=8788

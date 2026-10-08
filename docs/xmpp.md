@@ -35,9 +35,11 @@ rooms use a chosen nickname, subject to the hosting room's rules.
 
 ## Join a room hosted elsewhere
 
-Open **Channels → Join an XMPP room** (or the same link in the conversation
-sidebar). Enter a bare room address, such as `jdev@muc.xmpp.org`, and a nickname.
-The room appears in the sidebar. Archipel shows the join state, room subject,
+Use the **+** beside **XMPP rooms** in the conversation sidebar (or **Channels →
+Join an XMPP room**). Enter a bare room address, such as `jdev@muc.xmpp.org`, and
+a nickname. The room appears under **XMPP rooms**, which folds, groups and
+reorders like the channel and direct-message sections; a room that is not
+currently joined shows its state beside its name. Archipel shows the room subject,
 nickname and role, and displays errors such as nickname conflicts or a required
 invitation. Use **Leave room** to stop participating; saved history stays private
 to your account. Use **Join again** after an error or removal.
@@ -81,15 +83,19 @@ channels or the personal direct-message archive.
    such as `chat.example.org`. Setup adds `compose.xmpp.yaml` and generates a
    random bridge secret in `.env.container`. Re-running setup preserves that
    secret. Keep this file private. The client STARTTLS port defaults to 5222 and
-   the federation port to 5269; setup prompts for both when XMPP is enabled.
+   the federation port to 5269; setup prompts for both when XMPP is enabled and
+   offers the next free ports when another service on the machine holds them.
+   Setup also asks for the SRV target and how certificates are obtained, then
+   prints the exact DNS records to publish.
 2. Set up A/AAAA records for that domain and `channels.chat.example.org`, pointing
    to the server. Publish `_xmpp-client._tcp.chat.example.org` and
    `_xmpp-server._tcp.chat.example.org` SRV records using your configured client
    and federation ports (defaults 5222 and 5269).
    Publish a server SRV record for `channels.chat.example.org` as well. The SRV
    target must be a DNS host, not an IP literal.
-3. Obtain certificates covering `chat.example.org` and
-   `channels.chat.example.org`. Put the full certificate chains and matching
+3. Let setup obtain certificates (see [Certificates](#certificates)), or choose
+   `manual` and obtain certificates covering `chat.example.org` and
+   `channels.chat.example.org` yourself. Put the full certificate chains and matching
    unencrypted private keys in the configured `XMPP_CERTS_PATH`, default
    `./data/xmpp-certs`. Use Prosody's `domain.crt` / `domain.key` filenames.
    A single certificate with both names can be named `chat.example.org.crt`
@@ -121,6 +127,93 @@ For a manually configured Archipel process, set `XMPP_DOMAIN` and
 Mount the supplied modules under `/etc/prosody/archipel-modules`. Optional
 `XMPP_CA_FILE` can select a private PKI trust anchor for Prosody; public servers
 normally use system certificate roots.
+
+### Certificates
+
+Setup asks **XMPP certificates (manual / acme / traefik)**. Both automatic
+choices issue one certificate naming the account domain and
+`channels.<XMPP_DOMAIN>`, keep it renewed, and reload Prosody when it changes.
+Prosody starts without a certificate and picks the first one up within a minute
+of it being issued; until then clients and other servers cannot connect.
+
+- **`acme`** adds a small [lego](https://go-acme.github.io/lego/) service
+  (`compose.xmpp-acme.yaml`) that requests the certificate from Let's Encrypt.
+  Setup asks for a contact email and for your agreement to the certificate
+  authority's terms of service, then for the challenge:
+  - `dns` proves control through your DNS provider's API and works behind any
+    proxy or CDN. Give lego's provider code (for example `cloudflare`) and the
+    credentials that provider documents, as `NAME=value` pairs
+    (`CLOUDFLARE_DNS_API_TOKEN=...`). They are kept in `.env.acme`, readable only
+    by the certificate service. Use a token limited to editing that DNS zone.
+  - `http` answers on this machine's port 80 (`compose.xmpp-acme-http.yaml`).
+    Both names must resolve directly to the machine. It is offered in
+    `container` mode only, because a proxy already owns port 80 in the others.
+
+  Follow issuance with `docker compose logs -f xmpp-acme`. A failed request is
+  retried hourly. Set `XMPP_ACME_SERVER=letsencrypt-staging` in `.env` to
+  rehearse against the staging authority; its certificates are not trusted by
+  other servers.
+- **`traefik`** reuses the certificate resolver already configured for the web
+  router (`compose.xmpp-traefik-certs.yaml`). A label asks Traefik to issue the
+  two XMPP names, and Prosody's container reads the result from Traefik's
+  `acme.json`. Setup asks for that file's path on the host; for a named Docker
+  volume this is under `/var/lib/docker/volumes/<volume>/_data/`. The resolver
+  must be able to validate both names: with an HTTP or TLS challenge,
+  `channels.<XMPP_DOMAIN>` needs a DNS record that reaches Traefik. The store is
+  mounted read-only and read as root before Prosody drops privileges; the
+  Prosody process itself cannot read Traefik's other keys.
+- **`manual`** keeps the previous behaviour: you place the files in
+  `XMPP_CERTS_PATH` and reload Prosody after renewing them.
+
+### Behind Cloudflare or another HTTP proxy
+
+XMPP is not HTTP. A proxied (orange-cloud) Cloudflare record, or any CDN or web
+proxy address, does not forward ports 5222 and 5269, so clients and other servers
+cannot reach Prosody through it. Keep the web hostname proxied if you wish, and
+publish a separate DNS-only record for the machine, such as `xmpp.example.org`.
+Point every XMPP SRV record's target at that name. The account domain stays
+`chat.example.org`: SRV changes where connections go, not the identity, and the
+certificate must still name the account domain and `channels.<XMPP_DOMAIN>`,
+not the SRV target. Without SRV records, other servers connect to the account
+domain's own address on port 5269 and time out at the proxy; room joins then
+typically end with "The room did not answer the join request".
+
+Setup asks for this name as the **DNS name of this machine for XMPP SRV
+records**, stores it as `XMPP_SRV_TARGET`, and prints the three SRV records with
+your ports filled in. A web proxy's certificates are not used by Prosody unless
+you choose the `traefik` source above; the `acme` source with a `dns` challenge
+works while the web names stay proxied.
+
+### Several instances on one machine
+
+Each instance is its own clone with its own instance name (see
+[deployment](deployment.md#several-instances-on-one-machine)) and runs its own
+Prosody. Give every instance its own pair of ports
+and let SRV records carry them; no TCP proxy is needed. Setup proposes ports that
+nothing on the machine is listening on, so configure and start the first instance
+before running setup for the second:
+
+```dotenv
+# instance one                # instance two
+XMPP_DOMAIN=one.example.org   XMPP_DOMAIN=two.example.org
+XMPP_CLIENT_PORT=5222         XMPP_CLIENT_PORT=5223
+XMPP_SERVER_PORT=5269         XMPP_SERVER_PORT=5270
+```
+
+```text
+_xmpp-client._tcp.one.example.org.          SRV 0 5 5222 xmpp.example.org.
+_xmpp-server._tcp.one.example.org.          SRV 0 5 5269 xmpp.example.org.
+_xmpp-server._tcp.channels.one.example.org. SRV 0 5 5269 xmpp.example.org.
+_xmpp-client._tcp.two.example.org.          SRV 0 5 5223 xmpp.example.org.
+_xmpp-server._tcp.two.example.org.          SRV 0 5 5270 xmpp.example.org.
+_xmpp-server._tcp.channels.two.example.org. SRV 0 5 5270 xmpp.example.org.
+```
+
+Open all four ports in the firewall. Each instance obtains its own
+certificates; with the `acme` source and an `http` challenge only one instance
+can hold port 80, so use `dns` or `traefik` for the others. The instances exchange direct messages with each other like any
+two servers, including when they share an address. Rooms on another Archipel
+instance cannot be joined yet (see the profile above).
 
 ### Custom listener ports
 

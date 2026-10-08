@@ -1,0 +1,36 @@
+# Optional: obtain and renew Prosody's certificates with ACME (lego). Use with compose.xmpp.yaml.
+# DNS-01 provider credentials are read from .env.acme, never a Compose label.
+services:
+  prosody:
+    entrypoint: ["sh", "/etc/prosody/certs.sh"]
+    command: ["prosody", "-F"]
+    environment:
+      XMPP_CERT_SOURCE: acme
+      XMPP_CERTS_PATH: /etc/prosody/issued-certs
+    volumes:
+      - ./prosody/certs.sh:/etc/prosody/certs.sh:ro
+      - xmpp-acme:/acme:ro
+  xmpp-acme:
+    image: goacme/lego:v5.5.2@sha256:1944e8c36055beec47c7de6f15202b41128be75eea0ffa257f0c14d93c5155fd
+    restart: unless-stopped
+    init: true
+    entrypoint: ["sh", "/acme.sh"]
+    env_file:
+      - path: .env.acme
+        format: raw
+    environment:
+      LEGO_PATH: /acme
+      LEGO_DOMAINS: ${XMPP_DOMAIN:?Set XMPP_DOMAIN},channels.${XMPP_DOMAIN}
+      LEGO_EMAIL: ${XMPP_ACME_EMAIL:?Set XMPP_ACME_EMAIL}
+      LEGO_ACCEPT_TOS: ${XMPP_ACME_ACCEPT_TOS:-false}
+      LEGO_SERVER: ${XMPP_ACME_SERVER:-}
+      LEGO_DNS: ${XMPP_ACME_DNS_PROVIDER:-}
+      LEGO_HTTP: ${XMPP_ACME_HTTP:-false}
+    volumes:
+      - ./prosody/acme.sh:/acme.sh:ro
+      - xmpp-acme:/acme
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  xmpp-acme:

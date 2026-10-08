@@ -69,6 +69,71 @@ class SetupTests(unittest.TestCase):
             with self.subTest(domain=domain), self.assertRaisesRegex(ValueError, "XMPP_DOMAIN"):
                 setup.collect_setup({"XMPP_DOMAIN": domain}, defaults)
 
+    def test_xmpp_ports_skip_ones_another_instance_holds_unless_already_chosen(self):
+        busy = {5222, 5223, 5269}.__contains__
+        second = setup.collect_setup({"XMPP_DOMAIN": "two.example.org"}, defaults, in_use=busy)
+        self.assertEqual((second["XMPP_CLIENT_PORT"], second["XMPP_SERVER_PORT"]), ("5224", "5270"))
+        kept = setup.collect_setup({"XMPP_DOMAIN": "one.example.org", "XMPP_CLIENT_PORT": "5222", "XMPP_SERVER_PORT": "5269"}, defaults, in_use=busy)
+        self.assertEqual((kept["XMPP_CLIENT_PORT"], kept["XMPP_SERVER_PORT"]), ("5222", "5269"))
+
+    def test_xmpp_srv_records_follow_the_ports_and_dns_only_target(self):
+        settings = setup.collect_setup({"XMPP_DOMAIN": "two.example.org", "XMPP_CLIENT_PORT": "5223", "XMPP_SERVER_PORT": "5270", "XMPP_SRV_TARGET": "xmpp.example.org"}, defaults)
+        self.assertEqual(setup.xmpp_dns_records(settings), [
+            "_xmpp-client._tcp.two.example.org. SRV 0 5 5223 xmpp.example.org.",
+            "_xmpp-server._tcp.two.example.org. SRV 0 5 5270 xmpp.example.org.",
+            "_xmpp-server._tcp.channels.two.example.org. SRV 0 5 5270 xmpp.example.org.",
+        ])
+        self.assertEqual(setup.collect_setup({"XMPP_DOMAIN": "chat.example.org"}, defaults)["XMPP_SRV_TARGET"], "chat.example.org")
+        for target in ("203.0.113.7", "Xmpp.example.org", "xmpp example"):
+            with self.subTest(target=target), self.assertRaisesRegex(ValueError, "XMPP_SRV_TARGET"):
+                setup.collect_setup({"XMPP_DOMAIN": "chat.example.org", "XMPP_SRV_TARGET": target}, defaults)
+
+    def test_xmpp_acme_certificates_need_consent_and_keep_dns_credentials_private(self):
+        acme = {"XMPP_DOMAIN": "chat.example.org", "XMPP_CERT_SOURCE": "acme", "XMPP_ACME_EMAIL": "admin@example.org",
+                "XMPP_ACME_ACCEPT_TOS": "true", "XMPP_ACME_DNS_PROVIDER": "cloudflare", "XMPP_ACME_DNS_CREDENTIALS": "CLOUDFLARE_DNS_API_TOKEN=to$ken#1"}
+        settings = setup.collect_setup({**PROXY, **acme}, defaults, "traefik")
+        self.assertIn("compose.xmpp-acme.yaml", settings["COMPOSE_FILE"])
+        self.assertNotIn("compose.xmpp-acme-http.yaml", settings["COMPOSE_FILE"])
+        self.assertEqual((settings["XMPP_ACME_CHALLENGE"], settings["XMPP_ACME_HTTP"]), ("dns", "false"))
+        with tempfile.TemporaryDirectory() as directory:
+            result = setup.write_setup(directory, settings)
+            self.assertIn(Path(directory).resolve() / ".env.acme", result["files"])
+            self.assertEqual(setup.parse_raw_env((Path(directory) / ".env.acme").read_text()), {"CLOUDFLARE_DNS_API_TOKEN": "to$ken#1"})
+            self.assertNotIn("to$ken", (Path(directory) / ".env").read_text().replace("$$", "$"))
+            self.assertNotIn("to$ken", (Path(directory) / ".env.container").read_text())
+        with self.assertRaisesRegex(ValueError, "terms of service"):
+            setup.collect_setup({**acme, "XMPP_ACME_ACCEPT_TOS": ""}, defaults)
+        with self.assertRaisesRegex(ValueError, "XMPP_ACME_EMAIL"):
+            setup.collect_setup({**acme, "XMPP_ACME_EMAIL": ""}, defaults)
+        with self.assertRaisesRegex(ValueError, "XMPP_ACME_DNS_PROVIDER"):
+            setup.collect_setup({**acme, "XMPP_ACME_DNS_PROVIDER": ""}, defaults)
+        for credentials in ("token", "lower=value", "LEGO_SERVER=https://ca.example"):
+            with self.subTest(credentials=credentials), self.assertRaisesRegex(ValueError, "XMPP_ACME_DNS_CREDENTIALS"):
+                setup.collect_setup({**acme, "XMPP_ACME_DNS_CREDENTIALS": credentials}, defaults)
+        http = setup.collect_setup({**acme, "XMPP_ACME_CHALLENGE": "http"}, defaults)
+        self.assertIn("compose.xmpp-acme-http.yaml", http["COMPOSE_FILE"])
+        self.assertEqual((http["XMPP_ACME_HTTP"], http["XMPP_ACME_DNS_PROVIDER"], http["XMPP_ACME_DNS_CREDENTIALS"]), ("true", "", ""))
+        with self.assertRaisesRegex(ValueError, "port 80"):
+            setup.collect_setup({**PROXY, **acme, "XMPP_ACME_CHALLENGE": "http"}, defaults, "traefik")
+
+    def test_xmpp_can_reuse_the_traefik_resolver_and_its_certificate_store(self):
+        traefik = {**PROXY, "TRAEFIK_CERT_RESOLVER": "letsencrypt", "XMPP_DOMAIN": "chat.example.org", "XMPP_CERT_SOURCE": "traefik"}
+        def store(label, value, secret=False):
+            return "/srv/traefik/letsencrypt/acme.json" if label == "Host path of Traefik's acme.json" else value
+        settings = setup.collect_setup(traefik, store, "traefik")
+        self.assertIn("compose.xmpp-traefik-certs.yaml", settings["COMPOSE_FILE"])
+        self.assertEqual((settings["XMPP_TRAEFIK_ACME_DIR"], settings["XMPP_TRAEFIK_ACME_NAME"]), ("/srv/traefik/letsencrypt", "acme.json"))
+        restored = setup.collect_setup(settings, defaults, "traefik")
+        self.assertEqual((restored["XMPP_TRAEFIK_ACME_DIR"], restored["XMPP_TRAEFIK_ACME_NAME"]), ("/srv/traefik/letsencrypt", "acme.json"))
+        with self.assertRaisesRegex(ValueError, "acme.json"):
+            setup.collect_setup(traefik, defaults, "traefik")
+        with self.assertRaisesRegex(ValueError, "certificate resolver"):
+            setup.collect_setup({**traefik, "TRAEFIK_CERT_RESOLVER": ""}, store, "traefik")
+        with self.assertRaisesRegex(ValueError, "Traefik mode"):
+            setup.collect_setup({"XMPP_DOMAIN": "chat.example.org", "XMPP_CERT_SOURCE": "traefik"}, store)
+        with self.assertRaisesRegex(ValueError, "XMPP_CERT_SOURCE"):
+            setup.collect_setup({"XMPP_DOMAIN": "chat.example.org", "XMPP_CERT_SOURCE": "certbot"}, defaults)
+
     def test_default_is_loopback_container_without_development_auth(self):
         settings = setup.collect_setup({}, defaults)
         self.assertEqual(settings["SETUP_MODE"], "container")
@@ -91,6 +156,20 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(settings["TRAEFIK_ENTRYPOINT"], "https")
         self.assertEqual(settings["COMPOSE_FILE"], os.pathsep.join(("compose.yaml", "compose.proxy.yaml", "compose.traefik.yaml", "compose.acme.yaml")))
         self.assertEqual(setup.parse_trusted_proxies(settings["TRUSTED_PROXY"]), ["172.20.0.2"])
+
+    def test_instances_sharing_a_machine_get_their_own_names(self):
+        self.assertEqual(setup.collect_setup({}, defaults)["COMPOSE_PROJECT_NAME"], "archipel")
+        self.assertEqual(setup.collect_setup({"COMPOSE_PROJECT_NAME": "archipel2"}, defaults)["COMPOSE_PROJECT_NAME"], "archipel2")
+        self.assertEqual(setup.project_name("Archipel Two.prod"), "archipeltwoprod")
+        for name in ("", "Two", "a b", "-two", "a.b"):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "COMPOSE_PROJECT_NAME"):
+                setup.validate_setup({**setup.collect_setup({}, defaults), "COMPOSE_PROJECT_NAME": name})
+        with tempfile.TemporaryDirectory(prefix="Second Instance ") as directory:
+            env = {**os.environ, "SETUP_MODE": "container"}
+            env.pop("COMPOSE_PROJECT_NAME", None)
+            subprocess.run([sys.executable, str(ROOT / "scripts" / "setup.py"), "--non-interactive", "--directory", directory], env=env, check=True, capture_output=True)
+            written = setup.parse_env((Path(directory) / ".env").read_text())["COMPOSE_PROJECT_NAME"]
+            self.assertEqual(written, setup.project_name(Path(directory).resolve().name))
 
     def test_generic_proxy_external_network_and_host_loopback(self):
         external = setup.collect_setup(PROXY, defaults, "proxy")
@@ -258,6 +337,12 @@ class ComposeTests(unittest.TestCase):
                         self.assertEqual(service["ports"][0]["host_ip"], "127.0.0.1")
                     if mode == "traefik":
                         self.assertEqual(service["labels"]["traefik.http.routers.archipel.tls.certresolver"], "letsencrypt")
+                        second = subprocess.run([*command, "config", "--format", "json"], cwd=directory, env={**env, "COMPOSE_PROJECT_NAME": "archipel2"}, capture_output=True, text=True)
+                        self.assertEqual(second.returncode, 0, second.stderr)
+                        labels = json.loads(second.stdout)["services"]["archipel"]["labels"]
+                        self.assertEqual(labels["traefik.http.routers.archipel2.service"], "archipel2")
+                        self.assertEqual(labels["traefik.http.services.archipel2.loadbalancer.server.port"], "8788")
+                        self.assertFalse([key for key in labels if ".archipel." in key])
             settings = setup.collect_setup({"XMPP_DOMAIN": "chat.example.org", "XMPP_CLIENT_PORT": "55222", "XMPP_SERVER_PORT": "55269"}, defaults)
             setup.write_setup(directory, settings)
             env = {key: value for key, value in os.environ.items() if key not in (*settings, "COMPOSE_FILE", "COMPOSE_PROJECT_NAME")}
@@ -268,6 +353,39 @@ class ComposeTests(unittest.TestCase):
                 self.assertEqual(services[service]["environment"]["XMPP_CLIENT_PORT"], "55222")
                 self.assertEqual(services[service]["environment"]["XMPP_SERVER_PORT"], "55269")
             self.assertEqual({(p["published"], p["target"]) for p in services["prosody"]["ports"]}, {("55222", 55222), ("55269", 55269)})
+            config = lambda: subprocess.run([*command, "config", "--format", "json"], cwd=directory, capture_output=True, text=True,
+                env={key: value for key, value in os.environ.items() if key not in (*settings, "COMPOSE_FILE", "COMPOSE_PROJECT_NAME")})
+            settings = setup.collect_setup({"XMPP_DOMAIN": "chat.example.org", "XMPP_CERT_SOURCE": "acme", "XMPP_ACME_EMAIL": "admin@example.org",
+                "XMPP_ACME_ACCEPT_TOS": "true", "XMPP_ACME_DNS_PROVIDER": "cloudflare", "XMPP_ACME_DNS_CREDENTIALS": "CLOUDFLARE_DNS_API_TOKEN=to$ken"}, defaults)
+            setup.write_setup(directory, settings)
+            result = config()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            services = json.loads(result.stdout)["services"]
+            issuer = services["xmpp-acme"]["environment"]
+            self.assertEqual(issuer["LEGO_DOMAINS"], "chat.example.org,channels.chat.example.org")
+            self.assertEqual((issuer["LEGO_DNS"], issuer["LEGO_HTTP"], issuer["LEGO_ACCEPT_TOS"]), ("cloudflare", "false", "true"))
+            self.assertEqual(issuer["CLOUDFLARE_DNS_API_TOKEN"].replace("$$", "$"), "to$ken")
+            self.assertNotIn("ports", services["xmpp-acme"])
+            self.assertNotIn("CLOUDFLARE_DNS_API_TOKEN", services["prosody"]["environment"])
+            self.assertEqual(services["prosody"]["environment"]["XMPP_CERT_SOURCE"], "acme")
+            self.assertEqual(services["prosody"]["entrypoint"], ["sh", "/etc/prosody/certs.sh"])
+            settings = setup.collect_setup({**settings, "XMPP_ACME_CHALLENGE": "http"}, defaults)
+            setup.write_setup(directory, settings)
+            result = config()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["services"]["xmpp-acme"]["ports"][0]["target"], 80)
+            settings = setup.collect_setup({**PROXY, "TRAEFIK_CERT_RESOLVER": "letsencrypt", "XMPP_DOMAIN": "chat.example.org", "XMPP_CERT_SOURCE": "traefik",
+                "XMPP_TRAEFIK_ACME_DIR": "/srv/traefik", "XMPP_TRAEFIK_ACME_NAME": "acme.json"}, defaults, "traefik")
+            setup.write_setup(directory, settings)
+            result = config()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            services = json.loads(result.stdout)["services"]
+            labels = services["archipel"]["labels"]
+            self.assertEqual(labels["traefik.http.routers.archipel-xmpp-certs.tls.domains[0].main"], "chat.example.org")
+            self.assertEqual(labels["traefik.http.routers.archipel-xmpp-certs.tls.domains[0].sans"], "channels.chat.example.org")
+            self.assertEqual(labels["traefik.http.routers.archipel-xmpp-certs.tls.certresolver"], "letsencrypt")
+            self.assertEqual(services["prosody"]["environment"]["XMPP_TRAEFIK_ACME_FILE"], "/traefik/acme.json")
+            self.assertIn(("/srv/traefik", "/traefik", True), {(v["source"], v["target"], v.get("read_only", False)) for v in services["prosody"]["volumes"]})
 
 
 if __name__ == "__main__":

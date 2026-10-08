@@ -14,9 +14,21 @@ Client secrets are hidden while typing and omitted from the printed summary.
 Setup configures deployment; it does not start containers or change your proxy.
 
 Setup also asks for an optional XMPP account domain. Supplying it adds a pinned
-Prosody service and keeps a generated bridge secret in `.env.container`. Provide
-XMPP TLS certificates, DNS, and TCP ports before starting that service; web proxy
-TLS does not configure XMPP TLS. See [Prosody deployment](xmpp.md).
+Prosody service and keeps a generated bridge secret in `.env.container`. Setup
+proposes free XMPP ports, can obtain the XMPP certificates through ACME or an
+existing Traefik resolver, and prints the DNS SRV records to publish. Web proxy
+TLS does not configure XMPP TLS by itself. See [Prosody deployment](xmpp.md).
+
+### Several instances on one machine
+
+Clone the project once per instance and run setup in each clone. Setup asks for
+an **instance name**, stored as `COMPOSE_PROJECT_NAME`; it defaults to the
+directory's name, which is what Compose already uses. The name prefixes the
+instance's containers and volumes and names its Traefik routers and services, so
+instances behind one Traefik do not collide. Give each instance its own name,
+public URL and, in `container` mode, host port. Do not rename a running instance:
+Compose would start it on new, empty volumes. XMPP ports and DNS for several
+instances are covered in [Prosody deployment](xmpp.md#several-instances-on-one-machine).
 
 Choose one of three modes. Setup defaults to `container`; `--mode local` is a
 compatibility alias for that same loopback Docker deployment.
@@ -79,6 +91,11 @@ Setup selects the Compose overlays using `COMPOSE_FILE` in `.env`:
 - `compose.local.yaml`: loopback host port for direct access or a proxy on the host.
 - `compose.traefik.yaml`: HTTPS router, selected network, and backend port labels.
 - `compose.acme.yaml`: optional certificate resolver label.
+- `compose.xmpp.yaml`: Prosody, when an XMPP account domain is set.
+- `compose.xmpp-acme.yaml`, `compose.xmpp-acme-http.yaml`: optional ACME client
+  for Prosody's certificates, and its port 80 listener for HTTP challenges.
+- `compose.xmpp-traefik-certs.yaml`: optional reuse of Traefik's resolver and
+  certificate store for Prosody.
 
 Compose does not create an external network. It must exist before startup, as
 described in [Docker's network documentation](https://docs.docker.com/reference/compose-file/networks/#external).

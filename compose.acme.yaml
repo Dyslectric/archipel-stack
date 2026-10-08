@@ -2,4 +2,4 @@
 services:
   archipel:
     labels:
-      traefik.http.routers.archipel.tls.certresolver: ${TRAEFIK_CERT_RESOLVER:?Set TRAEFIK_CERT_RESOLVER}
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME:?Set COMPOSE_PROJECT_NAME}.tls.certresolver=${TRAEFIK_CERT_RESOLVER:?Set TRAEFIK_CERT_RESOLVER}

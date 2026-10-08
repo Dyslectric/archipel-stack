@@ -1,0 +1,6 @@
+# Optional, with compose.xmpp-acme.yaml: answer HTTP-01 challenges on the host's port 80.
+# Both XMPP names must resolve to this machine and nothing else may hold the port.
+services:
+  xmpp-acme:
+    ports:
+      - "${XMPP_BIND_ADDRESS:-0.0.0.0}:80:80"

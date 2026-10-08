@@ -1,0 +1,25 @@
+# Optional: have the existing Traefik resolver issue Prosody's certificates and read them
+# from Traefik's acme.json. Use with compose.xmpp.yaml and compose.traefik.yaml.
+services:
+  archipel:
+    labels:
+      # Requests the certificate only; the router itself serves nothing.
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME:?Set COMPOSE_PROJECT_NAME}-xmpp-certs.rule=Host(`channels.${XMPP_DOMAIN:?Set XMPP_DOMAIN}`)
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-xmpp-certs.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-xmpp-certs.service=noop@internal
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-xmpp-certs.tls=true
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-xmpp-certs.tls.certresolver=${TRAEFIK_CERT_RESOLVER:?Set TRAEFIK_CERT_RESOLVER}
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-xmpp-certs.tls.domains[0].main=${XMPP_DOMAIN}
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-xmpp-certs.tls.domains[0].sans=channels.${XMPP_DOMAIN}
+  prosody:
+    entrypoint: ["sh", "/etc/prosody/certs.sh"]
+    command: ["prosody", "-F"]
+    environment:
+      XMPP_CERT_SOURCE: traefik
+      XMPP_CERTS_PATH: /etc/prosody/issued-certs
+      XMPP_TRAEFIK_ACME_FILE: /traefik/${XMPP_TRAEFIK_ACME_NAME:-acme.json}
+    volumes:
+      - ./prosody/certs.sh:/etc/prosody/certs.sh:ro
+      - ./prosody/traefik-certs.lua:/etc/prosody/traefik-certs.lua:ro
+      # The directory, not the file: a replaced acme.json stays visible.
+      - ${XMPP_TRAEFIK_ACME_DIR:?Set XMPP_TRAEFIK_ACME_DIR}:/traefik:ro

@@ -1,0 +1,3 @@
+# Container scripts must keep Unix line endings on every checkout.
+*.sh text eol=lf
+*.lua text eol=lf
