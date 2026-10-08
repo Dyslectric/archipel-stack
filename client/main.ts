@@ -66,7 +66,6 @@ function renderShell() {
     instance = esc(s.instance);
   app.innerHTML = `<div class="app"><a class="skip-link" href="#view">Skip to content</a><header class="top"><div class="top-inner">
     <button type="button" id="mobile-menu" class="icon-button" aria-label="Show channels" title="Show or hide channels and direct messages">${icon("sidebar")}</button>
-    <a class="brand" href="#/" aria-label="Archipel home">${icon("logo", "brand-mark")}<span>Archipel</span></a>
     <nav class="primary" aria-label="Main">
       <a class="nav-item" data-nav="chat" href="#/" title="Chat">${icon("chat")}<span class="label">Chat</span></a>
       <a class="nav-item" data-nav="channels" href="#/channels" id="browse" title="Channels">${icon("compass")}<span class="label">Channels</span></a>
@@ -77,9 +76,7 @@ function renderShell() {
     <details class="menu account-menu" id="account-menu"><summary id="profile" title="Your account, theme and sign out"></summary><div class="menu-panel">
       <div class="menu-section"><div class="menu-label">@${esc(s.user!.username)}${s.dev_auth ? " · local development" : ""}</div>
         <a class="menu-item" href="#/settings/personal/profile">${icon("user")}<span class="grow">Profile</span></a>
-        <a class="menu-item" href="#/settings/personal/emoji">${icon("smile")}<span class="grow">Your emoji</span></a>
-        <a class="menu-item" href="#/settings/federation/remote">${icon("globe")}<span class="grow">Federated conversations</span></a>
-        ${s.user!.admin ? `<a class="menu-item" href="#/settings/instance/membership">${icon("shield")}<span class="grow">Instance administration</span></a>` : ""}</div>
+        <a class="menu-item" href="#/settings">${icon("settings")}<span class="grow">All settings</span></a></div>
       <div class="menu-section"><div class="menu-label">Theme</div>${themeSeg()}</div>
       <div class="menu-section"><button type="button" class="menu-item" id="sign-out-menu">${icon("logout")}<span class="grow">Sign out</span></button></div>
     </div></details></div></header><div id="view"></div></div>`;

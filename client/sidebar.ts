@@ -173,7 +173,9 @@ async function newGroup(kind: SideKind, firstItem?: string) {
 const silenced = (id: string) =>
   state.prefs[id]?.notify === false
     ? `<span class="mode-tag" title="Notifications off">${icon("bell-off")}</span>`
-    : "";
+    : state.prefs[id]?.notify === "mentions"
+      ? `<span class="mode-tag" title="Notifies on mentions only">${icon("at")}</span>`
+      : "";
 function channelRow(c: Channel) {
   const open = chatChannel(),
     narrow = chatTopic(),
@@ -258,8 +260,7 @@ function sectionHtml(kind: SideKind) {
       ? `<div class="side-label">Looking at</div><div class="side-row">${channelRow(chatChannel()!).link}</div><div class="side-label">Joined</div>`
       : "";
   return `<section class="side-section" data-section="${kind}"><div class="side-head"><button type="button" class="side-toggle" data-fold="" aria-expanded="${!section.collapsed}">${icon("chevron-down", "chev")}<h2 class="grow">${titles[kind]}</h2>${section.collapsed ? news(everything) : ""}</button>
-    <button type="button" class="icon-button" data-new-group aria-label="New group in ${titles[kind].toLowerCase()}" title="New group">${icon("folder-plus")}</button>
-    ${kind === "dms" ? `<button type="button" class="icon-button" data-new-dm aria-label="New direct message" title="New direct message">${icon("plus")}</button>` : kind === "xmpp" ? `<a class="icon-button" href="#/xmpp" aria-label="Join a room" title="Join a room">${icon("plus")}</a>` : `<a class="icon-button" href="#/channels/new" aria-label="Create channel" title="Create channel">${icon("plus")}</a>`}</div>
+    <button type="button" class="icon-button" data-section-menu aria-haspopup="menu" aria-label="Add or organise ${titles[kind].toLowerCase()}" title="Add or organise">${icon("plus")}</button></div>
     ${section.collapsed ? "" : `${looking}<div class="side-items" data-list="">${loose}</div>${groups}`}</section>`;
 }
 export function renderSidebar() {
@@ -283,6 +284,18 @@ export function renderSidebar() {
 // ---- menus ----
 const item = (name: string, label: string, ico: string, on = false) =>
   `<button type="button" class="menu-item${on ? " on" : ""}" role="menuitem" data-do="${esc(name)}">${icon(ico)}<span class="grow">${esc(label)}</span>${on ? icon("check") : ""}</button>`;
+function sectionMenu(button: HTMLElement, kind: SideKind) {
+  const link = (href: string, label: string, ico: string) =>
+    `<a class="menu-item" role="menuitem" href="${href}">${icon(ico)}<span class="grow">${label}</span></a>`;
+  const add = kind === "dms"
+    ? `<button type="button" class="menu-item" role="menuitem" data-new-dm>${icon("pencil")}<span class="grow">New direct message</span></button>`
+    : kind === "xmpp" ? link("#/xmpp", "Join an XMPP room", "globe")
+    : `${state.session.user?.create_channels ? link("#/channels/new", "Create channel", "plus") : ""}${link("#/channels", "Browse channels", "compass")}${link("#/settings/federation/remote", "Join a channel on another server", "globe")}`;
+  const panel = popup(button, `<div class="menu-section" role="menu">${add}</div><div class="menu-section" role="menu">${item("group", "New group…", "folder-plus")}</div>`);
+  panel?.addEventListener("click", (e) => {
+    if ((e.target as Element).closest('[data-do="group"]')) void newGroup(kind);
+  });
+}
 function itemMenu(button: HTMLElement) {
   const id = button.closest<HTMLElement>("[data-item]")!.dataset.item!,
     kind = kindOf(id),
@@ -441,6 +454,8 @@ export function wireSidebar(list: HTMLElement) {
     let hit: HTMLElement | null;
     if ((hit = at.closest<HTMLElement>("[data-fold]")))
       fold(sectionOf(hit)!, hit.dataset.fold!);
+    else if ((hit = at.closest<HTMLElement>("[data-section-menu]")))
+      sectionMenu(hit, sectionOf(hit)!);
     else if ((hit = at.closest<HTMLElement>("[data-new-group]")))
       void newGroup(sectionOf(hit)!);
     else if ((hit = at.closest<HTMLElement>("[data-item-menu]"))) itemMenu(hit);

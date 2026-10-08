@@ -14,6 +14,7 @@ async function createChannel(
 ) {
   await page.locator("#browse").click();
   await page.getByLabel("Channel name").fill(name);
+  await page.locator(".create-options > summary").click();
   await page
     .getByLabel("Description", { exact: true })
     .fill("A place to gather.");
@@ -45,7 +46,8 @@ const section = (page: Page, name: string) =>
     .getByRole("link", { name, exact: true })
     .click();
 async function channelSettings(page: Page, name: string) {
-  await page.getByRole("link", { name: "Channel settings" }).click();
+  await page.getByRole("button", { name: "Channel options" }).click();
+  await page.getByRole("menuitem", { name: "Channel settings" }).click();
   await section(page, name);
 }
 async function send(page: Page, value: string) {
@@ -73,6 +75,94 @@ async function replyUnder(page: Page, message: Locator, value: string) {
     page.locator(".message-body").filter({ hasText: value }),
   ).toBeVisible();
 }
+
+test("channel defaults, in-chat options and message menus work on desktop and mobile", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1400, height: 850 });
+  await login(page);
+  await page.locator("#browse").click();
+  await expect(page.getByLabel("Conversation style")).toBeHidden();
+  await page.getByLabel("Channel name").fill("calm-start");
+  await page.locator("#new-channel").getByRole("button", { name: "Create channel" }).click();
+  await expect(page.locator("#channel-heading strong")).toHaveText("calm-start");
+  const id = new URL(page.url()).hash.split("/")[2];
+  const channel = await (await page.request.get(`/api/channels/${id}`)).json();
+  expect([channel.mode, channel.visibility, channel.admission, channel.show_members, channel.hide_handles])
+    .toEqual(["timeline", "public", "open", 1, 0]);
+  await send(page, "A simpler place to talk.");
+  const draft = page.getByRole("textbox", { name: "Message", exact: true });
+  await draft.fill("Keep this draft while I change notifications.");
+  const options = page.getByRole("button", { name: "Channel options" });
+  await options.click();
+  await expect(page.locator(".popup")).toContainText("Owner · People on this instance");
+  await page.getByRole("menuitem", { name: "Only when mentioned or replied to" }).click();
+  await expect(page.locator('#channel-actions [data-pref-menu]')).toHaveAttribute("title", /mentions only/);
+  await expect(draft).toHaveValue("Keep this draft while I change notifications.");
+  await expect(page).toHaveURL(new RegExp(`#/c/${id}$`));
+  await expect(page.locator('.channel-link .mode-tag[title="Notifies on mentions only"]')).toBeVisible();
+  await options.click();
+  await page.keyboard.press("End");
+  await expect(page.getByRole("menuitem", { name: "Channel settings" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".popup")).toHaveCount(0);
+  await expect(options).toBeFocused();
+  await page.reload();
+  await expect(page.locator('#channel-actions [data-pref-menu]')).toHaveAttribute("title", /mentions only/);
+  const message = page.locator("article.message").filter({ hasText: "A simpler place to talk." });
+  await message.hover();
+  await expect(message.getByRole("button", { name: "Reply to alice" })).toContainText("Reply");
+  await message.getByRole("button", { name: "More message actions" }).click();
+  await expect(page.getByRole("menuitem", { name: "Copy text" })).toBeVisible();
+  await page.getByRole("menuitem", { name: "Edit message" }).click();
+  await message.getByLabel("Edited message").fill("Edited from the message menu.");
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await expect(message).toHaveCount(0);
+  await expect(page.locator(".message-body")).toHaveText("Edited from the message menu.");
+  await options.click();
+  await page.screenshot({ path: testInfo.outputPath("ux-desktop.png"), animations: "disabled" });
+  await page.keyboard.press("Escape");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.reload();
+  await expect(page.locator("#sidebar")).toBeHidden();
+  expect(await page.locator("#sidebar").evaluate((el) => getComputedStyle(el).transitionDuration)).toBe("0s");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  for (const selector of ["#mobile-menu", "#channel-options", "#choose-emoji", "#attach-file"]) {
+    const box = await page.locator(selector).boundingBox();
+    expect(box!.width).toBeGreaterThanOrEqual(44);
+    expect(box!.height).toBeGreaterThanOrEqual(44);
+  }
+  await page.getByRole("button", { name: "Show channels" }).click();
+  await expect(page.locator("#sidebar")).toBeVisible();
+  await page.locator('[data-section=channels] [data-section-menu]').click();
+  await expect(page.getByRole("menuitem", { name: "Browse channels", exact: true })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "New group…" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#sidebar")).toBeHidden();
+  await page.screenshot({ path: testInfo.outputPath("ux-mobile.png"), animations: "disabled" });
+  await options.click();
+  await page.getByRole("menuitem", { name: "Of everything new", exact: true }).click();
+});
+
+test("topics inherit mentions-only notifications and keep their own overrides", async ({ page }) => {
+  await login(page);
+  await createChannel(page, "mentions-topics", "topical");
+  await page.getByRole("button", { name: "Channel options" }).click();
+  await page.getByRole("menuitem", { name: "Only when mentioned or replied to" }).click();
+  await page.getByLabel("Topic", { exact: true }).fill("Updates");
+  await send(page, "Topic updates.");
+  const topicMenu = page.locator(".recipient-bar [data-pref-menu]");
+  await topicMenu.click();
+  await expect(page.getByRole("menuitem", { name: "As the channel does (mentions only)" })).toHaveClass(/on/);
+  await page.getByRole("menuitem", { name: "Of everything new here", exact: true }).click();
+  await topicMenu.click();
+  await expect(page.getByRole("menuitem", { name: "Of everything new here", exact: true })).toHaveClass(/on/);
+  await page.getByRole("menuitem", { name: "As the channel does (mentions only)" }).click();
+  await topicMenu.click();
+  await expect(page.getByRole("menuitem", { name: "As the channel does (mentions only)" })).toHaveClass(/on/);
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Channel options" }).click();
+  await page.getByRole("menuitem", { name: "Of everything new", exact: true }).click();
+});
 
 test("two independent browsers exchange messages and retain history after reload", async ({
   page,
@@ -265,6 +355,7 @@ test("private invitation and a subsequent block change the other browser’s acc
     await expect(bob.locator(".browse-channel")).toHaveCount(1);
   }).toPass();
   await bob.locator(".browse-name").click();
+  await agree(bob, "Join channel");
   await expect(bob.locator("#channel-heading strong")).toHaveText(
     "quiet-island",
   );
@@ -288,10 +379,7 @@ test("private invitation and a subsequent block change the other browser’s acc
 });
 
 async function openAdmin(page: Page, name = "Membership") {
-  await page.locator("#profile").click();
-  await page
-    .getByRole("link", { name: "Instance administration", exact: true })
-    .click();
+  await page.locator("[data-nav=settings]").click();
   await section(page, name);
   await expect(
     page.getByRole("heading", { name, exact: true, level: 1 }),
@@ -370,9 +458,8 @@ test("an author edits a message while another browser receives its edited marker
     .locator(".message")
     .filter({ hasText: "Original message." });
   await article.hover();
-  await article
-    .getByRole("button", { name: "Edit message", exact: true })
-    .click();
+  await article.getByRole("button", { name: "More message actions" }).click();
+  await page.getByRole("menuitem", { name: "Edit message", exact: true }).click();
   await article
     .getByRole("textbox", { name: "Edited message", exact: true })
     .fill("Updated :heart: <img src=x onerror=evil()>");
@@ -476,11 +563,8 @@ test("mobile layout supports profile changes and sign-out", async ({
 });
 
 async function openPersonalEmoji(page: Page) {
-  await page.locator("#profile").click();
-  await page
-    .locator("#account-menu")
-    .getByRole("link", { name: "Your emoji", exact: true })
-    .click();
+  await page.locator("[data-nav=settings]").click();
+  await section(page, "Your emoji");
   await expect(
     page.getByRole("heading", { name: "Your emoji", exact: true }),
   ).toBeVisible();
@@ -604,11 +688,8 @@ async function grantFederation(page: Page, user: string) {
   await expect(page.locator("#toast")).toContainText("Role changed");
   await openChat(page);
 }
-async function openFederated(page: Page, name = "Remote channels") {
-  await page.locator("#profile").click();
-  await page
-    .getByRole("link", { name: "Federated conversations", exact: true })
-    .click();
+async function openFederated(page: Page, name = "Channels on other servers") {
+  await page.locator("[data-nav=settings]").click();
   await section(page, name);
 }
 
@@ -681,10 +762,15 @@ test("two browser instances federate a channel and a direct message with admin-c
   await expect(remotePicture).toHaveCount(0);
   await openChat(page);
   await send(bob, "Remote greeting.");
+  // It is shaded in place, with no popup, until the home instance has sent it back.
+  await expect(bob.locator(".message.queued")).toContainText("Remote greeting.");
+  await expect(bob.locator("#toast")).not.toContainText("queued");
+  await expect(bob.locator(".message.queued")).toHaveCount(0);
+  await expect(bob.locator(".message-body").filter({ hasText: "Remote greeting." })).toHaveCount(1);
   await expect(
     page.locator(".message-body").filter({ hasText: "Remote greeting." }),
   ).toBeVisible();
-  await openFederated(bob, "Direct messages");
+  await openFederated(bob, "Messages to other servers");
   await bob
     .getByLabel("Remote user address", { exact: true })
     .fill("alice@127.0.0.1:8790");
@@ -697,7 +783,7 @@ test("two browser instances federate a channel and a direct message with admin-c
   await expect(bob.locator("#federated-direct-list")).toContainText(
     "A federated private hello.",
   );
-  await openFederated(page, "Direct messages");
+  await openFederated(page, "Messages to other servers");
   await expect(page.locator("#federated-direct-list")).toContainText(
     "A federated private hello.",
   );

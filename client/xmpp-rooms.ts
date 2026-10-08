@@ -87,7 +87,7 @@ function paint(room: XmppRoom) {
     const own = m.sender === `${room.room}/${room.nick}`, who = { username: m.sender_jid || m.sender, display_name: nick };
     const name = own ? `<span class="author" title="${esc(m.sender)}">${esc(nick)}</span>`
       : `${nameButton(who, `xmpp:${m.sender_jid || m.sender}`)}${m.sender_jid ? ` <span class="handle">${esc(m.sender_jid)}</span>` : ""}`;
-    html += `<article class="message xmpp-message${cont ? " cont" : ""}"><div class="msg-gutter">${cont ? time : avatar(who)}</div>
+    html += `<article class="message xmpp-message${cont ? " cont" : ""}${status ? ` queued${m.status === "failed" ? " failed" : ""}` : ""}"><div class="msg-gutter">${cont ? time : avatar(who)}</div>
       <div class="message-content">${cont ? "" : `<div class="message-meta">${name}${time}${note}</div>`}<div class="message-body${m.blocked ? " faded" : " markdown"}">${m.blocked ? esc(m.body) : richHtml(m.body)}</div>${cont ? note : ""}</div>${
         room.can_post && !m.blocked ? `<div class="message-actions"><button type="button" class="icon-button quote-button" data-quote="${esc(m.id)}" aria-label="Quote ${esc(nick)}" title="Quote">${icon("quote")}</button></div>` : ""}</article>`;
     prev = m;

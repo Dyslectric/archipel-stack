@@ -98,7 +98,7 @@ export interface Overview {
 // A topic or thread with no choice of its own (null) follows its channel.
 export interface Pref {
   hidden: boolean;
-  notify: boolean | null;
+  notify: boolean | "mentions" | null;
 }
 export interface XmppRoom {
   id: string; room: string; nick: string; desired: boolean; state: string;
@@ -121,7 +121,8 @@ export interface Message {
   deleted_at: string | null;
   edited_at: string | null;
   emojis?: CustomEmoji[];
-  queued?: boolean;
+  queued?: boolean; // still on its way to another instance
+  failed?: string; // why it never got there
   author_actor_url?: string | null;
   history_placeholder?: number;
   hidden_thread?: boolean; // in a thread the reader hid
@@ -230,6 +231,7 @@ const paths: Record<string, string> = {
   paperclip:
     '<path d="m21 12-8.6 8.6a5 5 0 0 1-7-7L14 5a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.5a1.7 1.7 0 0 1-2.4-2.4l8-7.9"/>',
   sidebar: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>',
+  at: '<circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/>',
   bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
   "bell-off":
     '<path d="M8.7 3A6 6 0 0 1 18 8a21.3 21.3 0 0 0 .6 5M17 17H3s3-2 3-9a4.67 4.67 0 0 1 .3-1.7M10.3 21a1.94 1.94 0 0 0 3.4 0M2 2l20 20"/>',
@@ -457,9 +459,15 @@ export function channelShares(c: Channel) {
     readers = c.visibility === "members" ? "to its members" : "to everyone who can read it",
     few = "only to its owner, its moderators and the members they allow";
   return [
-    `Your display name, <strong>${esc(user.display_name)}</strong>, and profile picture, on what you write, ${readers}.`,
-    `Your handle, <strong>@${esc(user.username)}</strong>, ${c.hide_handles ? few : readers}.`,
-    `That you are a member, ${c.show_members ? readers : few}.`,
+    ...(!c.hide_handles && c.show_members
+      ? [
+          `Your display name, <strong>${esc(user.display_name)}</strong>, your handle, <strong>@${esc(user.username)}</strong>, your profile picture and that you are a member, ${readers}.`,
+        ]
+      : [
+          `Your display name, <strong>${esc(user.display_name)}</strong>, and profile picture, on what you write, ${readers}.`,
+          `Your handle, <strong>@${esc(user.username)}</strong>, ${c.hide_handles ? few : readers}.`,
+          `That you are a member, ${c.show_members ? readers : few}.`,
+        ]),
     c.show_members ? socialsLine(readers) : socialsLine(few),
     c.federation_enabled
       ? `This channel is federated: what you write goes, with your name and your address <strong>@${esc(user.username)}@${esc(state.session.instance)}</strong>, to the instances and XMPP servers of the people following it.`
@@ -493,6 +501,8 @@ export function promptDialog(
 }
 // A small panel floating by the thing that opened it; one at a time, gone on a click elsewhere or Escape.
 let closePopup: (() => void) | null = null;
+export const roleLabel = (role: string | null | undefined) =>
+  role === "owner" ? "Owner" : role === "moderator" ? "Moderator" : role === "member" ? "Member" : "Not a member";
 export function popup(anchor: HTMLElement, html: string) {
   const wasOpen = anchor.getAttribute("aria-expanded") === "true";
   closePopup?.();
@@ -506,15 +516,21 @@ export function popup(anchor: HTMLElement, html: string) {
     width = panel.offsetWidth,
     height = panel.offsetHeight;
   panel.style.left = `${Math.max(8, Math.min(box.left, innerWidth - width - 8))}px`;
-  panel.style.top = `${box.bottom + height + 8 > innerHeight && box.top > height + 8 ? box.top - height - 4 : box.bottom + 4}px`;
+  panel.style.top = `${Math.max(8, Math.min(innerHeight - height - 8,
+    box.bottom + height + 8 > innerHeight && box.top > height + 8 ? box.top - height - 4 : box.bottom + 4))}px`;
   const away = (e: Event) => {
     const at = e.target as Node;
     if (
       e instanceof KeyboardEvent
         ? e.key === "Escape"
         : !panel.contains(at) && !anchor.contains(at)
-    )
+    ) {
       close();
+      if (e instanceof KeyboardEvent) {
+        e.preventDefault();
+        anchor.focus();
+      }
+    }
   };
   const close = () => {
     panel.remove();
@@ -531,6 +547,16 @@ export function popup(anchor: HTMLElement, html: string) {
   // Whatever is chosen in it, the panel has done its job.
   panel.addEventListener("click", (e) => {
     if ((e.target as Element).closest("button, a")) close();
+  });
+  panel.addEventListener("keydown", (e) => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+    const choices = [...panel.querySelectorAll<HTMLElement>("button:not(:disabled), a[href]")];
+    if (!choices.length) return;
+    e.preventDefault();
+    const index = choices.indexOf(document.activeElement as HTMLElement);
+    const next = e.key === "Home" ? 0 : e.key === "End" ? choices.length - 1
+      : (index + (e.key === "ArrowDown" ? 1 : -1) + choices.length) % choices.length;
+    choices[next].focus();
   });
   panel.querySelector<HTMLElement>("button, a")?.focus();
   return panel;

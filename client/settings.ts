@@ -24,6 +24,7 @@ import {
   toast,
   when,
   refreshTimes,
+  roleLabel,
   type Channel,
   type CustomEmoji,
   type Session,
@@ -61,7 +62,7 @@ interface Section {
 }
 const groups = {
   personal: "Personal",
-  federation: "Federation",
+  federation: "Other servers",
   channel: "Channel",
   instance: "Instance",
 };
@@ -136,13 +137,15 @@ async function drawDirectMessages(root: ParentNode = document) {
       direction: string;
       created_at: string;
       emojis: CustomEmoji[];
+      queued?: boolean;
+      failed?: string;
     }[]
   >("/federation/messages");
   const html = messages.length
     ? messages
         .map(
           (m) =>
-            `<li class="direct-message"><div class="meta small"><span class="pill ${m.direction === "incoming" ? "new" : ""}">${m.direction === "incoming" ? "From" : "To"}</span> <span class="author">${esc(m.peer)}</span> · ${when(m.created_at)}</div><div class="message-body">${emojiHtml(m.body, m.emojis)}</div></li>`,
+            `<li class="direct-message${m.queued ? ` queued${m.failed ? " failed" : ""}` : ""}"><div class="meta small"><span class="pill ${m.direction === "incoming" ? "new" : ""}">${m.direction === "incoming" ? "From" : "To"}</span> <span class="author">${esc(m.peer)}</span> · ${when(m.created_at)}${m.queued ? ` · <span role="status" class="${m.failed ? "bad-text" : ""}" title="${esc(m.failed || "Waiting for the other server")}">${m.failed ? "Not delivered" : "Sending…"}</span>` : ""}</div><div class="message-body">${emojiHtml(m.body, m.emojis)}</div></li>`,
         )
         .join("")
     : '<li class="muted">No federated direct messages.</li>';
@@ -271,7 +274,7 @@ const sections: Section[] = [
           target: string;
           kind: "channel" | "dm" | "topic" | "thread";
           hidden: boolean;
-          notify: boolean | null;
+          notify: boolean | "mentions" | null;
           channel: { id: string; name: string } | null;
           title: string | null;
         }[]
@@ -296,7 +299,7 @@ const sections: Section[] = [
         card(
           "Your choices",
           prefs.length
-            ? `<ul class="plain">${prefs.map((p) => `<li class="member-row"><div class="grow">${place(p)}<div class="small">${p.hidden ? '<span class="pill warn">Hidden</span> ' : ""}${p.notify === false ? '<span class="pill">Never notifies</span>' : p.notify ? '<span class="pill new">Always notifies</span>' : ""}</div></div><button type="button" class="secondary small" data-reset-pref="${esc(p.target)}">Reset</button></li>`).join("")}</ul>`
+            ? `<ul class="plain">${prefs.map((p) => `<li class="member-row"><div class="grow">${place(p)}<div class="small">${p.hidden ? '<span class="pill warn">Hidden</span> ' : ""}${p.notify === false ? '<span class="pill">Never notifies</span>' : p.notify === "mentions" ? '<span class="pill">Mentions only</span>' : p.notify ? '<span class="pill new">Always notifies</span>' : ""}</div></div><button type="button" class="secondary small" data-reset-pref="${esc(p.target)}">Reset</button></li>`).join("")}</ul>`
             : '<p class="muted">Nothing is hidden, and every channel and direct conversation you are in notifies you.</p>',
           "Change what notifies you from the bell at the top of a conversation, and hide or silence a topic or thread from the button beside it. Hidden topics and threads leave the channel, your inbox and the counts of what is new.",
         );
@@ -422,7 +425,7 @@ const sections: Section[] = [
   {
     group: "federation",
     key: "remote",
-    label: "Remote channels",
+    label: "Channels on other servers",
     about: "Channels hosted on other instances that you follow from here.",
     icon: "globe",
     async draw(el, ctx) {
@@ -483,7 +486,7 @@ const sections: Section[] = [
   {
     group: "federation",
     key: "direct",
-    label: "Direct messages",
+    label: "Messages to other servers",
     about: "Private messages with people on other instances.",
     icon: "chat",
     async draw(el) {
@@ -508,7 +511,6 @@ const sections: Section[] = [
         await api("/federation/messages", "POST", Object.fromEntries(data));
         $<HTMLTextAreaElement>("textarea", form).value = "";
         await drawDirectMessages();
-        toast("Direct message queued for delivery.");
       });
       await drawDirectMessages(el);
     },
@@ -609,7 +611,7 @@ const sections: Section[] = [
       el.innerHTML =
         card(
           `${channelIcon(c)} ${esc(c.name)}`,
-          `<dl class="info"><dt>Address</dt><dd><code>${esc(address)}</code></dd><dt>Description</dt><dd>${esc(c.description || "None")}</dd><dt>Conversation style</dt><dd>${modeLabel(c.mode)}</dd><dt>Who can read</dt><dd>${c.visibility === "members" ? "Members only" : "Everyone on this instance"}</dd><dt>Who can join</dt><dd>${c.admission === "allowlist" ? "Invited users only" : "Anyone on this instance"}</dd><dt>Members</dt><dd><a href="#/settings/channel/members/${c.id}">${c.member_count}</a></dd><dt>Your role</dt><dd>${esc(c.role || "Not a member")}</dd><dt>Federation</dt><dd>${c.remote_actor ? "Hosted on another instance" : c.federation_enabled ? "Federated" : "Local only"}</dd></dl><p><a class="button secondary" href="#/c/${c.id}">${icon("chat")} Open channel</a></p>`,
+          `<dl class="info"><dt>Address</dt><dd><code>${esc(address)}</code></dd><dt>Description</dt><dd>${esc(c.description || "None")}</dd><dt>Conversation style</dt><dd>${modeLabel(c.mode)}</dd><dt>Who can read</dt><dd>${c.visibility === "members" ? "Members only" : "Everyone on this instance"}</dd><dt>Who can join</dt><dd>${c.admission === "allowlist" ? "Invited users only" : "Anyone on this instance"}</dd><dt>Members</dt><dd><a href="#/settings/channel/members/${c.id}">${c.member_count}</a></dd><dt>Your role</dt><dd>${roleLabel(c.role)}</dd><dt>Shared with</dt><dd>${c.remote_actor ? "Hosted on another server" : c.federation_enabled ? "Members here and on other servers" : "People on this instance"}</dd></dl><p><a class="button secondary" href="#/c/${c.id}">${icon("chat")} Open channel</a></p>`,
         ) +
         (c.role && c.role !== "owner"
           ? card(
@@ -718,7 +720,7 @@ const sections: Section[] = [
           .map((u) =>
             person(
               u,
-              `<span class="pill ${u.role === "owner" ? "kept" : u.role === "moderator" ? "new" : ""}">${esc(u.role)}</span>${moderating && u.role === "member" && ((!c.show_members && u.see_members) || (c.hide_handles && u.see_handles)) ? ` <span class="pill good">Sees ${[!c.show_members && u.see_members ? "members" : "", c.hide_handles && u.see_handles ? "handles" : ""].filter(Boolean).join(" and ")}</span>` : ""}${u.verified_socials.length ? `<details class="socials"><summary>Shared socials</summary>${socialsHtml(u.verified_socials)}</details>` : ""}`,
+              `<span class="pill ${u.role === "owner" ? "kept" : u.role === "moderator" ? "new" : ""}">${roleLabel(u.role)}</span>${moderating && u.role === "member" && ((!c.show_members && u.see_members) || (c.hide_handles && u.see_handles)) ? ` <span class="pill good">Sees ${[!c.show_members && u.see_members ? "members" : "", c.hide_handles && u.see_handles ? "handles" : ""].filter(Boolean).join(" and ")}</span>` : ""}${u.verified_socials.length ? `<details class="socials"><summary>Shared socials</summary>${socialsHtml(u.verified_socials)}</details>` : ""}`,
               moderating && u.role !== "owner"
                 ? `${grants(u)}${promoting ? `<button type="button" class="small secondary" data-member="${u.id}" data-role="${u.role === "moderator" ? "member" : "moderator"}">${u.role === "moderator" ? "Make member" : "Make moderator"}</button>` : ""}<button type="button" class="small secondary bad-text" data-member="${u.id}" data-remove>Remove</button>`
                 : "",

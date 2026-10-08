@@ -141,8 +141,12 @@ test("personal remote blocks reject incoming messages and cancel queued sends un
   const aPeer = `${a.origin}/actors/users/${a.bob.id}`;
   const bPeer = `${b.origin}/actors/users/${b.bob.id}`;
   await a.fed.sendDirect(a.bob, bPeer, "Queued before block");
+  assert.equal((a.store.directHistory(a.bob, bPeer).messages[0] as { queued?: boolean }).queued, true);
+  assert.equal(a.fed.directMessages(a.bob)[0].queued, true);
   a.store.setUserBlock(a.bob, bPeer, true);
   await a.fed.tick();
+  assert.equal((a.store.directHistory(a.bob, bPeer).messages[0] as { failed?: string }).failed, "You blocked this user.");
+  assert.equal(a.fed.directMessages(a.bob)[0].failed, "You blocked this user.");
   assert.deepEqual(b.fed.directMessages(b.bob), []);
   await assert.rejects(() => a.fed.sendDirect(a.bob, bPeer, "Blocked outgoing"), (e: unknown) => e instanceof Problem && e.status === 403);
   await b.fed.sendDirect(b.bob, aPeer, "Blocked incoming");
@@ -155,6 +159,39 @@ test("personal remote blocks reject incoming messages and cancel queued sends un
   await b.fed.tick();
   assert.ok(a.fed.directMessages(a.bob).some((m) => m.body === "After unblock"));
   assert.ok(b.fed.directMessages(b.bob).some((m) => m.body === "Reply after unblock"));
+  const delivered = a.store.directHistory(a.bob, bPeer).messages.find(m => m.body === "Reply after unblock")!;
+  assert.equal("queued" in delivered, false);
+});
+
+test("pending channel posts preserve topics and parents, expose failures only to their author, and disappear on echo", async (t) => {
+  const a = await instance(t), b = await instance(t);
+  for (const mode of ["timeline", "topical", "threaded"]) {
+    const home = channel(a, { name: `pending-${mode}`, mode });
+    const topic = mode === "topical" ? a.store.createTopic(a.alice, home.id, "Updates") : null;
+    a.store.post(a.alice, home.id, {
+      body: `Root in ${mode}`, ...(topic ? { topic_id: topic.id } : {}),
+      ...(mode === "threaded" ? { title: "A thread" } : {}),
+    });
+    const sub = await b.fed.subscribe(b.bob, a.fed.channelActor(home));
+    await drain(a, b);
+    const parent = b.store.messages(b.bob, sub.channel.id)[0];
+    const waiting = await b.fed.remotePost(b.bob, sub.channel.id, {
+      body: `Reply in ${mode}`, parent_id: parent.id,
+      ...(parent.topic_id ? { topic_id: parent.topic_id } : {}),
+    });
+    assert.equal(waiting.parent_id, parent.id);
+    assert.equal(waiting.topic_id, parent.topic_id);
+    assert.deepEqual(b.fed.pendingPosts(b.bob, sub.channel.id), [waiting]);
+    for (const status of ["failed", "cancelled"]) {
+      b.store.db.prepare("UPDATE federation_deliveries SET status=?,error='Peer refused the message' WHERE activity_id IN (SELECT id FROM federation_outgoing WHERE channel_id=? AND purpose='post')").run(status, sub.channel.id);
+      assert.equal(b.fed.pendingPosts(b.bob, sub.channel.id)[0].failed, "Peer refused the message");
+      assert.deepEqual(b.fed.pendingPosts(b.alice, sub.channel.id), []);
+    }
+    b.store.db.prepare("UPDATE federation_deliveries SET status='pending',error=NULL WHERE activity_id IN (SELECT id FROM federation_outgoing WHERE channel_id=? AND purpose='post')").run(sub.channel.id);
+    await drain(a, b);
+    assert.deepEqual(b.fed.pendingPosts(b.bob, sub.channel.id), []);
+    assert.equal(b.store.messages(b.bob, sub.channel.id).filter(m => m.body === `Reply in ${mode}`).length, 1);
+  }
 });
 
 test("profile pictures are exported, cached and updated for federated direct conversations", async t => {
@@ -266,8 +303,14 @@ test("two real instances subscribe, exchange signed messages, edit, delete, and 
     b.store.messages(b.bob, sub.channel.id).at(-1)?.body,
     "Hello from home",
   );
-  await b.fed.remotePost(b.bob, sub.channel.id, { body: "Hello from remote" });
+  const waiting = await b.fed.remotePost(b.bob, sub.channel.id, { body: "Hello from remote" });
+  // Until the home instance sends it back, the author sees it as a message still being sent.
+  assert.equal(waiting.queued, true);
+  assert.deepEqual(b.fed.pendingPosts(b.bob, sub.channel.id), [waiting]);
+  assert.deepEqual(b.fed.pendingPosts(b.alice, sub.channel.id), []);
+  assert.ok(!b.store.messages(b.bob, sub.channel.id).some(m => m.body === "Hello from remote"));
   await drain(a, b);
+  assert.deepEqual(b.fed.pendingPosts(b.bob, sub.channel.id), []);
   const remote = b.store.messages(b.bob, sub.channel.id).at(-1)!;
   assert.equal(remote.body, "Hello from remote");
   assert.equal(remote.author_id, b.bob.id);

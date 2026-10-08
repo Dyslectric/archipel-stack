@@ -7,6 +7,7 @@ export type PrefKind = "channel" | "dm" | "topic" | "thread";
 let saving = 0;
 export const isHidden = (target: string) => !!state.prefs[target]?.hidden;
 // Whether something new there notifies: its own choice, else its channel's, else it does.
+// "mentions" is only what names the reader or answers them.
 export const notifies = (target: string, channelId?: string) =>
   state.prefs[target]?.notify ??
   (channelId ? state.prefs[channelId]?.notify : null) ??
@@ -41,10 +42,14 @@ export function prefItems(kind: PrefKind, target: string, channelId?: string) {
     part = kind === "topic" || kind === "thread";
   return `<div class="menu-section" role="menu"><div class="menu-label">Notify me</div>${
     part
-      ? item("inherit", `As the channel does (${notifies(channelId!) ? "on" : "off"})`, "hash", own === null) +
+      ? item("inherit", `As the channel does (${{ true: "on", false: "off", mentions: "mentions only" }[String(notifies(channelId!))]})`, "hash", own === null) +
         item("on", "Of everything new here", "bell", own === true) +
+        item("mentions", "Only when mentioned or replied to", "at", own === "mentions") +
         item("off", "Never", "bell-off", own === false)
-      : item("on", "Of everything new", "bell", own !== false) +
+      : item("on", "Of everything new", "bell", own === null || own === true) +
+        (kind === "channel"
+          ? item("mentions", "Only when mentioned or replied to", "at", own === "mentions")
+          : "") +
         item("off", "Never", "bell-off", own === false)
   }</div>${
     part
@@ -66,13 +71,15 @@ export function pickPref(e: Event, target: string, changed: () => void) {
       ? { notify: null }
       : name === "on"
         ? { notify: true }
-        : name === "off"
-          ? { notify: false }
-          : name === "hide"
-            ? { hidden: true }
-            : name === "show"
-              ? { hidden: false }
-              : null;
+        : name === "mentions"
+          ? { notify: "mentions" }
+          : name === "off"
+            ? { notify: false }
+            : name === "hide"
+              ? { hidden: true }
+              : name === "show"
+                ? { hidden: false }
+                : null;
   if (!change) return;
   action(async () => {
     const done = setPref(target, change);

@@ -25,6 +25,9 @@ export default defineConfig({
       reuseExistingServer: false,
       env: {
         PORT: "8790",
+        // A suite shares these throwaway instances and exercises many accounts at once.
+        RATE_LIMIT_API: "3000",
+        RATE_LIMIT_AUTH: "300",
         HOST: "127.0.0.1",
         BASE_URL: "http://127.0.0.1:8790",
         XMPP_DOMAIN: "chat.example",
@@ -35,11 +38,14 @@ export default defineConfig({
       },
     },
     {
-      command: "DEV_AUTH=true node --import tsx src/server.ts",
+      command: "node --import tsx src/server.ts",
       url: "http://127.0.0.1:8791/health",
       reuseExistingServer: false,
       env: {
         PORT: "8791",
+        RATE_LIMIT_API: "3000",
+        RATE_LIMIT_AUTH: "300",
+        DEV_AUTH: "true",
         HOST: "127.0.0.1",
         BASE_URL: "http://127.0.0.1:8791",
         DATABASE_PATH: join(
@@ -51,5 +57,5 @@ export default defineConfig({
       },
     },
   ],
-  globalTeardown: "./e2e/teardown.ts",
+  reporter: [["list"], ["./e2e/teardown.ts"]],
 });

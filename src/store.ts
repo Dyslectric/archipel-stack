@@ -44,6 +44,8 @@ export interface Channel {
   hide_handles: number; // members see names without the handles behind them
   created_at: string;
 }
+const notifyChoice = (n: number | null) =>
+  n === null ? null : n === 2 ? ("mentions" as const) : !!n;
 export interface Message {
   seq: number;
   id: string;
@@ -64,6 +66,7 @@ export interface Message {
 }
 interface DirectRow {
   seq: number;
+  id: string;
   peer: string;
   direction: "incoming" | "outgoing";
   body: string;
@@ -1957,10 +1960,22 @@ export class Store {
       emojis: this.liveEmojis(row.emoji_tags),
     };
   }
+  // Shared by the conversation view and the list of messages to other servers.
+  directDeliveryStates(user: User, peer: string | null = null) {
+    const me = this.active(user.id);
+    const rows = this.db.prepare(
+      "SELECT json_extract(o.activity,'$.object.id') AS id,d.status,d.error FROM federation_deliveries d JOIN federation_outgoing o ON o.id=d.activity_id WHERE o.user_id=? AND (? IS NULL OR d.recipient=?) AND o.purpose='direct' AND d.status IN ('pending','failed','cancelled')",
+    ).all(me.id, peer, peer) as unknown as { id: string; status: string; error: string | null }[];
+    return new Map(rows.map(d => [d.id, {
+      queued: true,
+      ...(d.status !== "pending" ? { failed: d.error || "Delivery failed." } : {}),
+    }]));
+  }
   directHistory(user: User, peerValue: unknown, before?: number) {
     const me = this.active(user.id),
       info = this.peerInfo(text(peerValue, "Recipient", 2048), me),
       access = this.directAccess(me, info.peer);
+    const waiting = this.directDeliveryStates(me, info.peer);
     const messages = (
       this.db
         .prepare(
@@ -1975,7 +1990,10 @@ export class Store {
         ) as unknown as DirectRow[]
     )
       .reverse()
-      .map((row) => this.directInfo(me, info, row));
+      .map((row) => ({
+        ...this.directInfo(me, info, row),
+        ...(row.direction === "outgoing" ? waiting.get(row.id) : {}),
+      }));
     return {
       conversation: { ...info, blocked: access.blocked },
       messages,
@@ -2162,6 +2180,7 @@ export class Store {
   }
 
   // ---- what a reader hid, and what may notify them ----
+  // notify is kept as 1, 0 or 2: everything, nothing, or only what mentions the reader.
   prefs(user: User) {
     return Object.fromEntries(
       (
@@ -2176,7 +2195,7 @@ export class Store {
         }[]
       ).map((p) => [
         p.target,
-        { hidden: !!p.hidden, notify: p.notify === null ? null : !!p.notify },
+        { hidden: !!p.hidden, notify: notifyChoice(p.notify) },
       ]),
     );
   }
@@ -2218,7 +2237,7 @@ export class Store {
           target: p.target,
           kind,
           hidden: !!p.hidden,
-          notify: p.notify === null ? null : !!p.notify,
+          notify: notifyChoice(p.notify),
           channel: p.channel_id
             ? { id: p.channel_id, name: p.channel_name! }
             : null,
@@ -2242,14 +2261,18 @@ export class Store {
     if (
       input.notify !== undefined &&
       input.notify !== null &&
+      input.notify !== "mentions" &&
       typeof input.notify !== "boolean"
     )
       throw new Problem(400, "Choose whether it notifies you.");
     if (input.hidden === undefined && input.notify === undefined)
       throw new Problem(400, "Choose a change.");
     let channelId: string | null = null;
-    if (target.startsWith("dm:")) this.peerInfo(target.slice(3));
-    else {
+    if (target.startsWith("dm:")) {
+      this.peerInfo(target.slice(3));
+      if (input.notify === "mentions")
+        throw new Problem(400, "A direct conversation notifies you or it doesn't.");
+    } else {
       if (target.startsWith("topic:")) {
         const topic = this.db
           .prepare("SELECT channel_id FROM topics WHERE id=?")
@@ -2279,7 +2302,9 @@ export class Store {
             ? (old?.notify ?? null)
             : input.notify === null
               ? null
-              : Number(input.notify);
+              : input.notify === "mentions"
+                ? 2
+                : Number(input.notify);
       // Nothing out of the ordinary needs no row: a whole conversation notifies unless told not to.
       if (!hidden && (notify === null || (whole && notify === 1)))
         this.db
@@ -2349,7 +2374,7 @@ export class Store {
       (part ? this.pref(user.id, part)?.notify : null) ??
       this.pref(user.id, channel.id)?.notify ??
       1;
-    if (!notify) return null;
+    if (!notify || (notify === 2 && !this.mentions(user, message))) return null;
     const topic = message.topic_id
       ? (
           this.db
@@ -2364,6 +2389,21 @@ export class Store {
       from: this.messageFor(user, this.message(message.id)).display_name as string | null,
       url: `/#/c/${channel.id}${message.topic_id ? `/t/${message.topic_id}` : ""}`,
     };
+  }
+  // Whether a message is meant for this reader in particular: it names their handle, or
+  // answers something they wrote.
+  private mentions(user: User, message: Message) {
+    const name = user.username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`(^|[^\\w@.-])@${name}(?![\\w@-]|\\.[\\w-])`, "i").test(message.body))
+      return true;
+    return (
+      !!message.parent_id &&
+      (
+        this.db
+          .prepare("SELECT author_id FROM messages WHERE id=?")
+          .get(message.parent_id) as { author_id: string } | undefined
+      )?.author_id === user.id
+    );
   }
   // The same for a direct message that arrived.
   directNotice(row: { seq: number; user_id: string; peer: string }) {

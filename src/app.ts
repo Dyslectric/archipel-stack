@@ -798,6 +798,10 @@ export function createApp(config: Config, store: Store) {
     res.json({
       messages,
       older_cursor: messages.length === 100 ? messages[0].seq : null,
+      pending:
+        before === undefined
+          ? federation.pendingPosts(user(res), String(req.params.id))
+          : [],
     });
   });
   app.post("/api/channels/:id/messages", async (req, res) =>

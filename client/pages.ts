@@ -69,17 +69,19 @@ export function renderAdmission() {
 
 // Every channel this account can see, and a form to start one.
 export function showChannels(view: HTMLElement, create: boolean) {
-  view.innerHTML = `<div class="page"><div class="page-inner directory"><div class="feed-head"><div><h1>Channels</h1><p class="muted small">Everything you can see on ${esc(state.session.instance)}. Remote channels are under <a href="#/settings/federation/remote">Federation</a>.</p></div></div>
+  view.innerHTML = `<div class="page"><div class="page-inner directory"><div class="feed-head"><div><h1>Channels</h1><p class="muted small">Everything you can see on ${esc(state.session.instance)}. Find <a href="#/settings/federation/remote">channels on other servers</a>.</p></div></div>
     <div class="layout"><section><label class="search-field">${icon("search")}<input type="search" id="channel-search" placeholder="Search channels" aria-label="Search channels"></label><ul class="plain browse-list" id="browse-list"></ul></section>
     <aside><section class="card"><h2>Federated channels</h2><p class="muted">Follow a channel hosted on another Archipel instance.</p><a class="button secondary" href="#/settings/federation/remote">Join a federated channel</a></section><section class="card"><h2>XMPP rooms</h2><p class="muted">Join a conversation hosted on another XMPP server.</p><a class="button secondary" href="#/xmpp">Join an XMPP room</a></section>${state.session.user!.create_channels ? "" : '<section class="card"><h2>Create a channel</h2><p class="muted">Your role does not allow creating channels.</p></section>'}<section class="card" id="new-channel" ${state.session.user!.create_channels ? "" : "hidden"}><h2>Create a channel</h2><form class="stack">
       <label>Channel name<span class="input-prefix"><span>#</span><input name="name" required minlength="2" maxlength="40" pattern="[a-zA-Z0-9][a-zA-Z0-9_\\-]{1,39}" placeholder="general" autocomplete="off"></span></label>
+      <p class="muted small" id="create-summary">A running conversation anyone on this instance can read and join.</p>
+      <details class="create-options"><summary>More options</summary><div class="stack">
       <label>Description<textarea name="description" maxlength="500" rows="2" placeholder="What is it for?"></textarea></label>
       <label>Conversation style<select name="mode"><option value="timeline">Timeline: one running conversation</option><option value="topical">Topics: messages grouped by subject</option><option value="threaded">Threads: posts with nested replies</option></select></label>
       <label>Who can read?<select name="visibility"><option value="public">Everyone on this instance</option><option value="members">Members only</option></select></label>
       <label>Who can join?<select name="admission"><option value="open">Anyone on this instance</option><option value="allowlist">Invited users only</option></select></label>
-      <label class="check"><input type="checkbox" name="show_members" checked> Show members the list of who is in the channel</label>
+      <label class="check"><input type="checkbox" name="show_members" checked> Show the member list</label>
       <label class="check"><input type="checkbox" name="hide_handles"> Hide handles, leaving only display names</label>
-      <p class="form-error" role="alert"></p><button>Create channel</button></form></section></aside></div></div></div>`;
+      </div></details><p class="form-error" role="alert"></p><button>Create channel</button></form></section></aside></div></div></div>`;
   const list = $("#browse-list"),
     search = $<HTMLInputElement>("#channel-search");
   function draw() {
@@ -117,6 +119,11 @@ export function showChannels(view: HTMLElement, create: boolean) {
     });
   });
   const form = $<HTMLFormElement>("#new-channel form");
+  form.addEventListener("change", () => {
+    const data = new FormData(form);
+    const style = data.get("mode") === "threaded" ? "Posts with nested replies" : data.get("mode") === "topical" ? "Messages grouped by topic" : "A running conversation";
+    $("#create-summary", form).textContent = `${style}. ${data.get("visibility") === "members" ? "Members can read" : "Anyone on this instance can read"}; ${data.get("admission") === "allowlist" ? "joining requires an invitation" : "anyone here can join"}.`;
+  });
   onSubmit(form, async (data) => {
     const channel = await api<Channel>(
       "/channels",

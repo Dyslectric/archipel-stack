@@ -1002,7 +1002,7 @@ export class Federation {
     return this.store.peerInfo(peer.id);
   }
   directMessages(user: User): Doc[] {
-    this.store.active(user.id);
+    const waiting = this.store.directDeliveryStates(user);
     return this.store.db
       .prepare(
         "SELECT * FROM direct_messages WHERE user_id=? AND (direction='outgoing' OR ?=1) ORDER BY seq DESC LIMIT 100",
@@ -1022,6 +1022,7 @@ export class Federation {
       })
       .map((message) => ({
         ...message,
+        ...(message.direction === "outgoing" ? waiting.get(String(message.id)) : {}),
         emojis: JSON.parse(String(message.emoji_tags)),
       }));
   }
@@ -1101,7 +1102,89 @@ export class Federation {
         user.id,
         id,
       );
-      return { queued: true, object_url: objectId };
+      return this.pendingPost(user, id, note, null);
+    });
+  }
+  // A post on its way to the channel's home, shaped like the message it will come back as.
+  private pendingPost(user: User, channelId: string, note: Doc, failed: string | null) {
+    const parent = note.inReplyTo
+      ? (this.store.db
+          .prepare(
+            "SELECT id FROM messages WHERE channel_id=? AND (remote_object=? OR (? LIKE ? AND id=?))",
+          )
+          .get(
+            channelId,
+            note.inReplyTo,
+            note.inReplyTo,
+            `${this.config.baseUrl}/objects/messages/%`,
+            String(note.inReplyTo).split("/").at(-1) || "",
+          ) as { id: string } | undefined)
+      : undefined;
+    const topic = note.topic
+      ? (this.store.db
+          .prepare("SELECT id FROM topics WHERE remote_id=? AND channel_id=?")
+          .get(String(note.topic.id), channelId) as { id: string } | undefined)
+      : undefined;
+    const title = typeof note.name === "string" ? note.name : null;
+    return {
+      ...this.store.messageInfo({
+        seq: 0,
+        id: `queued-${String(note.id).split("/").at(-1)}`,
+        channel_id: channelId,
+        author_id: user.id,
+        body: String(note.content),
+        title,
+        topic_id: topic?.id ?? null,
+        parent_id: parent?.id ?? null,
+        created_at: String(note.published),
+        deleted_at: null,
+        edited_at: null,
+        remote_object: String(note.id),
+        emoji_tags: JSON.stringify(
+          this.store.messageEmojiTags(user, String(note.content) + (title || "")),
+        ),
+        history_placeholder: 0,
+        username: user.username,
+        display_name: user.display_name,
+      }),
+      queued: true,
+      ...(failed === null ? {} : { failed }),
+    };
+  }
+  /** The reader's own posts to a remote channel that its home has not sent back yet. */
+  pendingPosts(user: User, channelId: string) {
+    const channel = this.store.channel(channelId);
+    if (!channel.remote_actor) return [];
+    // One that was delivered but never came back, or that failed, is not shown forever.
+    const rows = this.store.db
+      .prepare(
+        "SELECT o.activity,d.status,d.error FROM federation_deliveries d JOIN federation_outgoing o ON o.id=d.activity_id WHERE d.recipient=? AND o.channel_id=? AND o.user_id=? AND o.purpose='post' AND (d.status='pending' OR (d.status='sent' AND o.created_at>?) OR (d.status IN ('failed','cancelled') AND o.created_at>?)) ORDER BY d.id",
+      )
+      .all(
+        channel.remote_actor,
+        channelId,
+        user.id,
+        Date.now() - 3600000,
+        Date.now() - 86400000,
+      ) as unknown as { activity: string; status: string; error: string | null }[];
+    return rows.flatMap((row) => {
+      const activity = JSON.parse(row.activity) as Doc,
+        note = activity.object as Doc;
+      if (
+        activity.type !== "Create" ||
+        this.store.db
+          .prepare("SELECT 1 FROM messages WHERE remote_object=?")
+          .get(String(note.id))
+      )
+        return [];
+      return [
+        this.pendingPost(
+          user,
+          channelId,
+          note,
+          (row.status === "failed" || row.status === "cancelled") ? row.error || "Delivery failed." : null,
+        ),
+      ];
     });
   }
   async editRemote(user: User, id: string, input: Doc) {

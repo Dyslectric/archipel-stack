@@ -860,6 +860,45 @@ test("owners rename and delete channels; deletion removes the conversation witho
   assert.equal(store.createChannel(alice, channelInput({ name: "lobby" })).name, "lobby");
   store.close();
 });
+test("mentions-only notifications match handles and replies, with topic overrides and ordinary unread counts", () => {
+  const { store, alice, bob } = fixture();
+  const channel = store.createChannel(alice, channelInput({ mode: "topical" }));
+  store.join(bob, channel.id);
+  const topic = store.createTopic(alice, channel.id, "News");
+  assert.deepEqual(store.setPref(bob, { target: channel.id, notify: "mentions" }), {
+    [channel.id]: { hidden: false, notify: "mentions" },
+  });
+  assert.equal(store.prefList(bob)[0].notify, "mentions");
+  for (const [body, expected] of [
+    ["Hello @bob", true], ["(@BoB), can you help?", true], ["Thanks @bob.", true],
+    ["Hello everyone", false], ["Hello @bobby", false], ["Hello @bob-other", false],
+    ["mail@bob.example", false], ["Hello @bob@elsewhere.example", false], ["Hello @bob.example", false],
+  ] as const) {
+    const message = store.post(alice, channel.id, { body, topic_id: topic.id });
+    assert.equal(!!store.channelNotice(bob.id, message), expected, body);
+  }
+  const own = store.post(bob, channel.id, { body: "A question", topic_id: topic.id });
+  const answer = store.post(alice, channel.id, { body: "An answer", parent_id: own.id, topic_id: topic.id });
+  assert.ok(store.channelNotice(bob.id, answer));
+  assert.equal(store.channelNotice(bob.id, own), null);
+  assert.equal(store.overview(bob).unread[channel.id], 10);
+  const ordinary = store.post(alice, channel.id, { body: "General news", topic_id: topic.id });
+  store.setPref(bob, { target: `topic:${topic.id}`, notify: true });
+  assert.ok(store.channelNotice(bob.id, ordinary));
+  store.setPref(bob, { target: `topic:${topic.id}`, notify: "mentions" });
+  assert.equal(store.channelNotice(bob.id, ordinary), null);
+  assert.equal(store.prefs(bob)[`topic:${topic.id}`].notify, "mentions");
+  store.setPref(bob, { target: `topic:${topic.id}`, notify: null });
+  assert.ok(store.channelNotice(bob.id, answer));
+  store.setPref(bob, { target: `topic:${topic.id}`, hidden: true });
+  assert.equal(store.channelNotice(bob.id, answer), null);
+  denied(() => store.setPref(bob, { target: `dm:${alice.id}`, notify: "mentions" }), 400);
+  denied(() => store.setPref(bob, { target: channel.id, notify: "invalid" }), 400);
+  store.setPref(bob, { target: channel.id, notify: true });
+  assert.equal(store.prefs(bob)[channel.id], undefined);
+  store.close();
+});
+
 test("hidden topics and threads leave what is new, and each part of a channel decides whether it notifies", () => {
   const { store, alice, bob, charlie } = fixture();
   const topical = store.createChannel(alice, channelInput({ name: "topics", mode: "topical" }));

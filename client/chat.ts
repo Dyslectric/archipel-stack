@@ -19,8 +19,11 @@ import {
   icon,
   modeLabel,
   nameButton,
+  popup,
+  promptDialog,
   refreshTimes,
   richHtml,
+  roleLabel,
   sameDay,
   shareDialog,
   state,
@@ -35,11 +38,12 @@ import { closePicker, togglePicker } from "./picker.js";
 import { renderSidebar, wireSidebar } from "./sidebar.js";
 import { attachButton, pickFiles, quoteInto } from "./attach.js";
 import { markdownText } from "./markdown.js";
-import { isHidden, notifies, prefMenu, type PrefKind } from "./prefs.js";
+import { isHidden, notifies, pickPref, prefItems, prefMenu, type PrefKind } from "./prefs.js";
 
 interface Page {
   messages: Message[];
   older_cursor: number | null;
+  pending?: Message[];
 }
 // A piece of the conversation: its markup, and what goes in its [data-kids] element.
 interface Node {
@@ -50,6 +54,7 @@ interface Node {
 
 let current: Channel | null = null,
   messages: Message[] = [],
+  pending: Message[] = [], // written here, still on their way to the channel's home instance
   olderCursor: number | null = null;
 let narrow: string | null = null, // the topic being read on its own
   reply: Message | null = null,
@@ -71,6 +76,7 @@ export const chatTopic = () => narrow;
 export function resetChat() {
   current = null;
   messages = [];
+  pending = [];
   generation++;
   renderMembers();
 }
@@ -123,6 +129,9 @@ function markSeen() {
   });
 }
 const me = () => state.session.user!;
+// What is on the page: the conversation, then what is still being sent to it.
+const everything = () => (pending.length ? [...messages, ...pending] : messages);
+const signature = () => JSON.stringify([messages, pending]);
 const threaded = () => current?.mode === "threaded";
 const topicOf = (id: string | null) =>
   current?.topics?.find((t) => t.id === id);
@@ -151,9 +160,6 @@ export function chatFrame(view: HTMLElement) {
   if (view.querySelector(".workspace")) return;
   view.innerHTML = `<div class="workspace"><aside class="sidebar" id="sidebar" aria-label="Conversations">
       <nav id="channel-list" aria-label="Your conversations"></nav>
-      <a class="side-foot" href="#/channels">${icon("compass")}<span>Browse all channels</span></a>
-      <a class="side-foot" href="#/settings/federation/remote">${icon("globe")}<span>Join a federated channel</span></a>
-      <a class="side-foot" href="#/xmpp">${icon("globe")}<span>Join an XMPP room</span></a>
       <button type="button" class="side-foot" data-new-dm>${icon("pencil")}<span>New direct message</span></button>
       <div class="side-resize" id="side-resize" role="separator" aria-orientation="vertical" aria-label="Sidebar width" aria-valuemin="180" aria-valuemax="520" tabindex="0" title="Drag to resize. Double-click to reset."></div></aside>
       <main class="conversation" id="main"><header class="channel-header"><div id="channel-heading"></div><div class="header-actions" id="channel-actions"></div></header>
@@ -170,6 +176,7 @@ export function chatFrame(view: HTMLElement) {
       pref = at.closest<HTMLElement>("[data-pref-menu]");
     if (at.closest("#members")) toggleMembers();
     else if (pref) openPrefMenu(pref);
+    else if (at.closest("#channel-options")) openChannelOptions(at.closest<HTMLElement>("#channel-options")!);
   });
   $("#member-panel").addEventListener("click", (e) => {
     if ((e.target as Element).closest("[data-close-members]")) toggleMembers();
@@ -223,6 +230,7 @@ async function selectChannel(id: string, topicId?: string) {
   if (generation !== token) return;
   current = detail;
   messages = page.messages;
+  pending = page.pending || [];
   olderCursor = page.older_cursor;
   reply = editing = null;
   narrow = topicOf(topicId || null) ? topicId! : null;
@@ -230,7 +238,7 @@ async function selectChannel(id: string, topicId?: string) {
   seen.clear();
   showHidden = false;
   marked = 0;
-  lastSignature = JSON.stringify(messages);
+  lastSignature = signature();
   localStorage.setItem("archipel-channel", id);
   markSeen();
   paint();
@@ -363,10 +371,11 @@ export function sortedTopics() {
 // notification and hiding choices. It shows what was chosen.
 function prefButton(kind: PrefKind, target: string, name: string, cls = "") {
   const part = kind === "topic" || kind === "thread",
-    quiet = !notifies(target, part ? current!.id : undefined),
-    ico = isHidden(target) ? "eye-off" : quiet ? "bell-off" : part ? "more" : "bell",
+    choice = notifies(target, part ? current!.id : undefined),
+    quiet = !choice,
+    ico = isHidden(target) ? "eye-off" : quiet ? "bell-off" : part ? "more" : choice === "mentions" ? "at" : "bell",
     label = `${part ? "Notifications and hiding" : "Notifications"} for ${name}`;
-  return `<button type="button" class="icon-button pref-button${cls ? ` ${cls}` : ""}" data-pref-menu="${esc(target)}" data-pref-kind="${kind}" aria-haspopup="menu" aria-label="${esc(label)}" title="${esc(label)}${isHidden(target) ? " (hidden)" : quiet ? " (off)" : ""}">${icon(ico)}</button>`;
+  return `<button type="button" class="icon-button pref-button${cls ? ` ${cls}` : ""}" data-pref-menu="${esc(target)}" data-pref-kind="${kind}" aria-haspopup="menu" aria-label="${esc(label)}" title="${esc(label)}${isHidden(target) ? " (hidden)" : quiet ? " (off)" : choice === "mentions" ? " (mentions only)" : ""}">${icon(ico)}</button>`;
 }
 function openPrefMenu(button: HTMLElement) {
   prefMenu(
@@ -386,9 +395,10 @@ function openPrefMenu(button: HTMLElement) {
 // The messages of threads the reader hid. A thread is hidden with its first message; replies
 // whose thread began before this page say so themselves.
 function hiddenThreads() {
-  const byId = new Map(messages.map((m) => [m.id, m]));
+  const all = everything(),
+    byId = new Map(all.map((m) => [m.id, m]));
   return new Set(
-    messages.filter((m) => {
+    all.filter((m) => {
       let first = m;
       for (let up = byId.get(m.parent_id || ""); up; up = byId.get(up.parent_id || ""))
         first = up;
@@ -410,16 +420,45 @@ function renderHeader() {
   $("#channel-heading").innerHTML =
     `<h1>${channelIcon(c)}<strong>${esc(c.name)}</strong>${topic ? `${icon("chevron-right", "sep")}<span class="topic-name">${esc(topic.title)}</span>` : ""}</h1>${topic && isHidden(`topic:${topic.id}`) ? '<span class="pill warn">Hidden</span>' : ""}<span class="pill">${modeLabel(c.mode)}</span>${c.remote_actor ? '<span class="pill new">Remote</span>' : c.federation_enabled ? '<span class="pill new">Federated</span>' : ""}${c.bridge_room ? `<span class="pill new" title="Bridged with the XMPP room ${esc(c.bridge_room)}">Bridged</span>` : ""}${c.mirror ? `<span class="pill new">${c.mirror === "writable" ? "Fork" : "Mirror"}</span>` : ""}${c.description ? `<span class="desc muted small">${esc(c.description)}</span>` : ""}`;
   $("#channel-actions").innerHTML =
-    `${!c.role ? "" : topic ? prefButton("topic", `topic:${topic.id}`, topic.title) : prefButton("channel", c.id, `#${c.name}`)}${c.sees_members ? `<button type="button" class="act" id="members" aria-pressed="${membersOpen()}" title="Show or hide the members of #${esc(c.name)}">${icon("people")}<span>${c.member_count} member${c.member_count === 1 ? "" : "s"}</span></button>` : ""}<a class="icon-button" href="#/settings/channel/overview/${c.id}" aria-label="Channel settings" title="Channel settings">${icon("settings")}</a>`;
+    `${!c.role ? "" : topic ? prefButton("topic", `topic:${topic.id}`, topic.title) : prefButton("channel", c.id, `#${c.name}`)}${c.sees_members ? `<button type="button" class="act" id="members" aria-pressed="${membersOpen()}" title="Show or hide the members of #${esc(c.name)}">${icon("people")}<span>${c.member_count} member${c.member_count === 1 ? "" : "s"}</span></button>` : ""}<button type="button" class="icon-button" id="channel-options" aria-haspopup="menu" aria-label="Channel options" title="Channel options">${icon("more")}</button>`;
+}
+function openChannelOptions(button: HTMLElement) {
+  const c = current!;
+  const owning = !c.remote_actor && (c.role === "owner" || me().admin);
+  const panel = popup(button, `<div class="menu-section channel-menu-about"><strong>#${esc(c.name)}</strong>${c.description ? `<p class="muted small">${esc(c.description)}</p>` : ""}<p class="muted small">${roleLabel(c.role)} · ${c.remote_actor ? "Hosted on another server" : c.federation_enabled ? "Shared with other servers" : "People on this instance"}</p></div>${c.role ? prefItems("channel", c.id) : ""}<div class="menu-section" role="menu">${owning ? `<button type="button" class="menu-item" role="menuitem" data-rename-channel>${icon("pencil")}<span class="grow">Rename channel…</span></button>` : ""}<a class="menu-item" role="menuitem" href="#/settings/channel/overview/${c.id}">${icon("settings")}<span class="grow">Channel settings</span></a>${c.role && c.role !== "owner" ? `<button type="button" class="menu-item bad-text" role="menuitem" data-leave-channel>${icon("logout")}<span class="grow">Leave channel…</span></button>` : ""}</div>`);
+  panel?.addEventListener("click", (e) => {
+    pickPref(e, c.id, () => redrawChat(false, true));
+    if ((e.target as Element).closest("[data-rename-channel]")) action(async () => {
+      const name = await promptDialog("Rename channel", "Channel name", c.name, "Rename channel");
+      if (!name || name === c.name) return;
+      await api(`/channels/${c.id}`, "PATCH", { name });
+      state.channels = await api<Channel[]>("/channels");
+      await refreshCurrent();
+    });
+    else if ((e.target as Element).closest("[data-leave-channel]")) action(async () => {
+      if (!(await confirmDialog(`Leave #${c.name}?`, "You'll stop seeing it in your channels.", "Leave channel"))) return;
+      await api(`/channels/${c.id}/leave`, "POST", {});
+      state.channels = await api<Channel[]>("/channels");
+      if (current?.id === c.id) resetChat();
+      go("#/channels");
+    });
+  });
 }
 
 // ---- messages ----
 const excerpt = (body: string) =>
   body.length > 90 ? `${body.slice(0, 90)}…` : body;
 const edited = (m: Message) =>
-  m.edited_at && !m.deleted_at
-    ? `<span class="edited" title="${esc(full(m.edited_at))}">(edited)</span>`
-    : "";
+  m.queued
+    ? m.failed
+      ? `<span class="edited queued-note bad-text" role="status" title="${esc(m.failed)}">Not delivered</span>`
+      : '<span class="edited queued-note" role="status">Sending…</span>'
+    : m.edited_at && !m.deleted_at
+      ? `<span class="edited" title="${esc(full(m.edited_at))}">(edited)</span>`
+      : "";
+// Shaded until the other instance has it; nothing can be done to it before then.
+const queuedClass = (m: Message) =>
+  m.queued ? ` queued${m.failed ? " failed" : ""}` : "";
 function bodyHtml(m: Message, cls = "") {
   if (editing === m.id && !m.deleted_at)
     return `<form class="stack inline-form picker-host" data-edit-form="${m.id}">${m.title !== null ? `<input name="title" maxlength="160" value="${esc(m.title)}" aria-label="Thread title" required>` : ""}<textarea name="body" rows="3" maxlength="8000" aria-label="Edited message" required>${esc(m.body)}</textarea><p class="form-error" role="alert"></p><div class="row"><button class="small">Save changes</button><button type="button" class="small secondary" data-cancel-edit>Cancel</button><button type="button" class="icon-button" data-emoji-for aria-label="Choose emoji" title="Emoji">${icon("smile")}</button>${attachButton("data-attach-for")}</div></form>`;
@@ -440,6 +479,37 @@ const author = (m: Message) =>
   nameButton(m, m.history_placeholder ? undefined : m.author_actor_url) +
   (m.author_actor_url?.startsWith("xmpp:") ? ' <span class="pill new">XMPP</span>' : "");
 
+function editMessage(id: string) {
+  editing = id;
+  render();
+  const area = document.querySelector<HTMLTextAreaElement>(`[data-edit-form="${id}"] textarea`);
+  area?.focus();
+  area?.setSelectionRange(area.value.length, area.value.length);
+}
+function removeMessage(id: string) {
+  action(async () => {
+    if (!(await confirmDialog("Remove this message?", "It will be replaced with a removed-message marker. Replies stay in the conversation.", "Remove message"))) return;
+    await api(`/messages/${id}`, "DELETE");
+    await refreshCurrent();
+  });
+}
+function messageMenu(button: HTMLElement) {
+  const m = messages.find((m) => m.id === button.dataset.messageMenu);
+  if (!m || m.queued || m.deleted_at) return;
+  const token = generation;
+  const item = (key: string, label: string, ico: string) => `<button type="button" class="menu-item" role="menuitem" data-message-action="${key}">${icon(ico)}<span class="grow">${label}</span></button>`;
+  const panel = popup(button, `<div class="menu-section" role="menu">${item("copy", "Copy text", "quote")}${mine(m) ? item("edit", "Edit message", "pencil") : ""}${removable(m) ? item("remove", "Remove message", "trash") : ""}</div>`);
+  panel?.addEventListener("click", (e) => {
+    if (generation !== token) return;
+    const name = (e.target as Element).closest<HTMLElement>("[data-message-action]")?.dataset.messageAction;
+    if (name === "edit") editMessage(m.id);
+    else if (name === "remove") removeMessage(m.id);
+    else if (name === "copy") action(async () => {
+      await navigator.clipboard.writeText(m.body);
+      toast("Message copied.");
+    });
+  });
+}
 function chatMessage(m: Message, cont: boolean) {
   const parent = m.parent_id
     ? messages.find((p) => p.id === m.parent_id)
@@ -450,21 +520,16 @@ function chatMessage(m: Message, cont: boolean) {
       ? `<div class="reply-context">${icon("reply")}<span>Reply to an earlier message</span></div>`
       : "";
   const time = `<time datetime="${esc(m.created_at)}" title="${esc(full(m.created_at))}">${esc(clock(m.created_at))}</time>`;
-  const tools = [
+  const tools = m.queued ? "" : [
     repliable(m)
-      ? `<button type="button" class="icon-button reply-button" data-reply="${m.id}" aria-label="Reply to ${esc(m.display_name)}" title="Reply">${icon("reply")}</button>`
+      ? `<button type="button" class="act reply-button" data-reply="${m.id}" aria-label="Reply to ${esc(m.display_name)}" title="Reply">${icon("reply")}<span>Reply</span></button>`
       : "",
     canPost() && !m.deleted_at
-      ? `<button type="button" class="icon-button quote-button" data-quote="${m.id}" aria-label="Quote ${esc(m.display_name)}" title="Quote">${icon("quote")}</button>`
+      ? `<button type="button" class="act quote-button" data-quote="${m.id}" aria-label="Quote ${esc(m.display_name)}" title="Quote">${icon("quote")}<span>Quote</span></button>`
       : "",
-    mine(m)
-      ? `<button type="button" class="icon-button edit-button" data-edit="${m.id}" aria-label="Edit message" title="Edit">${icon("pencil")}</button>`
-      : "",
-    removable(m)
-      ? `<button type="button" class="icon-button delete-button" data-delete="${m.id}" aria-label="Remove message" title="Remove">${icon("trash")}</button>`
-      : "",
+    !m.deleted_at ? `<button type="button" class="icon-button" data-message-menu="${m.id}" aria-label="More message actions" aria-haspopup="menu" title="More">${icon("more")}</button>` : "",
   ].join("");
-  return `<article class="message${cont ? " cont" : ""}${m.deleted_at ? " deleted" : ""}" id="m-${m.id}"><div class="msg-gutter">${cont ? time : avatar(m)}</div>
+  return `<article class="message${cont ? " cont" : ""}${m.deleted_at ? " deleted" : ""}${queuedClass(m)}" id="m-${m.id}"><div class="msg-gutter">${cont ? time : avatar(m)}</div>
     <div class="message-content">${cont ? "" : `<div class="message-meta">${author(m)}${handleTag(m.username)}${time}${edited(m)}</div>`}${context}${bodyHtml(m)}${cont ? edited(m) : ""}</div>${tools ? `<div class="message-actions">${tools}</div>` : ""}</article>`;
 }
 // Consecutive messages from one person within ten minutes share a header, as in Zulip.
@@ -510,6 +575,7 @@ function chatNodes(list: Message[]): Node[] {
 
 // Threads look like ThreadBNC's: the post in a card, its replies folded on coloured rails below.
 function threadActions(m: Message) {
+  if (m.queued) return "";
   const parts = [
     canPost() && !m.deleted_at
       ? `<details class="reply-box"><summary aria-label="Reply to ${esc(m.display_name)}">${icon("reply")} Reply</summary><form class="stack inline-form picker-host" data-reply-form="${m.id}"><textarea name="body" rows="3" maxlength="8000" required aria-label="Reply" placeholder="Reply to ${esc(m.display_name)}"></textarea><p class="form-error" role="alert"></p><div class="row"><button class="small">Reply</button><button type="button" class="icon-button" data-emoji-for aria-label="Choose emoji" title="Emoji">${icon("smile")}</button>${attachButton("data-attach-for")}<span class="muted">Ctrl + Enter to send</span></div></form></details>`
@@ -524,7 +590,7 @@ function threadActions(m: Message) {
   return parts ? `<div class="obj-actions small">${parts}</div>` : "";
 }
 const byline = (m: Message) =>
-  `${author(m)} ${handleTag(m.username)} ·${when(m.created_at)}${m.edited_at && !m.deleted_at ? ` · ${edited(m)}` : ""}`;
+  `${author(m)} ${handleTag(m.username)} ·${when(m.created_at)}${edited(m) ? ` · ${edited(m)}` : ""}`;
 function threadNodes(list: Message[]): Node[] {
   const ids = new Set(list.map((m) => m.id)),
     children = new Map<string, Message[]>();
@@ -538,7 +604,7 @@ function threadNodes(list: Message[]): Node[] {
     const n = count(m);
     return {
       key: m.id,
-      html: `<details open class="comment message d${depth % 8}" id="m-${m.id}" data-depth="${depth}"><summary class="meta small message-meta"><span class="fold" aria-hidden="true">${icon("chevron-down")}</span>${byline(m)}<span class="collapsed-note">${n ? `${replies(n)} hidden` : "collapsed"}</span></summary>
+      html: `<details open class="comment message d${depth % 8}${queuedClass(m)}" id="m-${m.id}" data-depth="${depth}"><summary class="meta small message-meta"><span class="fold" aria-hidden="true">${icon("chevron-down")}</span>${byline(m)}<span class="collapsed-note">${n ? `${replies(n)} hidden` : "collapsed"}</span></summary>
         <button type="button" class="bar" title="Collapse this thread" aria-label="Collapse this thread"></button>
         <div class="content">${bodyHtml(m, "md")}${threadActions(m)}<div class="replies" data-kids></div></div></details>`,
       kids: (children.get(m.id) || []).map((child) => comment(child, depth + 1)),
@@ -557,7 +623,7 @@ function threadNodes(list: Message[]): Node[] {
       const n = count(m);
       return {
         key: `t-${m.id}`,
-        html: `<section class="thread card${isHidden(`thread:${m.id}`) ? " hidden-thread" : ""}"><article class="post message" id="m-${m.id}">${m.title && editing !== m.id ? `<h2 class="thread-title">${emojiHtml(m.title, m.emojis || [])}</h2>` : ""}<div class="meta small message-meta post-meta"><span class="grow">${byline(m)}${isHidden(`thread:${m.id}`) ? ' · <span class="pill warn">Hidden</span>' : ""}</span>${current!.role ? prefButton("thread", `thread:${m.id}`, m.title || "this thread") : ""}</div>${bodyHtml(m, "md")}${threadActions(m)}</article>${n ? `<details open class="thread-replies" data-key="r-${m.id}"><summary title="Show or hide every reply in this thread">${icon("chevron-down", "chev")}<span>${replies(n)}</span></summary><div class="comments" data-kids></div></details>` : '<div class="comments" data-kids></div>'}</section>`,
+        html: `<section class="thread card${isHidden(`thread:${m.id}`) ? " hidden-thread" : ""}"><article class="post message${queuedClass(m)}" id="m-${m.id}">${m.title && editing !== m.id ? `<h2 class="thread-title">${emojiHtml(m.title, m.emojis || [])}</h2>` : ""}<div class="meta small message-meta post-meta"><span class="grow">${byline(m)}${isHidden(`thread:${m.id}`) ? ' · <span class="pill warn">Hidden</span>' : ""}</span>${current!.role && !m.queued ? prefButton("thread", `thread:${m.id}`, m.title || "this thread") : ""}</div>${bodyHtml(m, "md")}${threadActions(m)}</article>${n ? `<details open class="thread-replies" data-key="r-${m.id}"><summary title="Show or hide every reply in this thread">${icon("chevron-down", "chev")}<span>${replies(n)}</span></summary><div class="comments" data-kids></div></details>` : '<div class="comments" data-kids></div>'}</section>`,
         kids: (children.get(m.id) || []).map((child) => comment(child, 0)),
       };
     });
@@ -626,14 +692,15 @@ function render(
       (m) => !m.parent_id || !away.has(m.parent_id),
     ).length;
   if (!hiddenCount) showHidden = false;
+  const all = everything();
   const shown =
     c.mode === "topical"
-      ? messages.filter((m) =>
+      ? all.filter((m) =>
           narrow ? m.topic_id === narrow : !isHidden(`topic:${m.topic_id}`),
         )
       : quiet.size && !showHidden
-        ? messages.filter((m) => !quiet.has(m))
-        : messages;
+        ? all.filter((m) => !quiet.has(m))
+        : all;
   const top = `${
     olderCursor
       ? '<button type="button" id="older-messages" class="secondary small older-button">Load earlier messages</button>'
@@ -804,12 +871,9 @@ function wireFeed() {
         (document.activeElement as HTMLElement | null)?.blur();
         closePicker();
         (form.parentElement as HTMLDetailsElement).open = false;
-        if (message.queued)
-          return toast(
-            "Message queued for delivery to the channel’s home instance.",
-          );
         collapsed.delete(form.dataset.replyForm!);
-        merge(message);
+        if (message.queued) pending = [...pending, message];
+        else merge(message);
         for (let up: Message | undefined = message; up; up = messages.find((m) => m.id === up!.parent_id))
           if (!up.parent_id) collapsed.delete(`r-${up.id}`);
         render();
@@ -833,6 +897,7 @@ function wireFeed() {
       for (const d of $$<HTMLDetailsElement>(open ? folds : "details.thread-replies", list))
         d.open = open;
     } else if ((hit = on("[data-pref-menu]"))) openPrefMenu(hit);
+    else if ((hit = on("[data-message-menu]"))) messageMenu(hit);
     else if (on("[data-show-hidden]")) {
       showHidden = !showHidden;
       render();
@@ -862,31 +927,13 @@ function wireFeed() {
       }
       quoteInto($<HTMLTextAreaElement>("#message-body"), quoted.body);
     } else if ((hit = on("[data-edit]"))) {
-      editing = hit.dataset.edit!;
-      render();
-      const area = document.querySelector<HTMLTextAreaElement>(
-        `[data-edit-form="${editing}"] textarea`,
-      );
-      area?.focus();
-      area?.setSelectionRange(area.value.length, area.value.length);
+      editMessage(hit.dataset.edit!);
     } else if ((hit = on("[data-cancel-edit]"))) {
       editing = null;
       hit.closest("form")!.remove();
       render();
     } else if ((hit = on("[data-delete]"))) {
-      const id = hit.dataset.delete!;
-      action(async () => {
-        if (
-          !(await confirmDialog(
-            "Remove this message?",
-            "It will be replaced with a removed-message marker. Replies stay in the conversation.",
-            "Remove message",
-          ))
-        )
-          return;
-        await api(`/messages/${id}`, "DELETE");
-        await refreshCurrent();
-      });
+      removeMessage(hit.dataset.delete!);
     } else if (on("#older-messages"))
       action(async () => {
         const id = current!.id,
@@ -895,7 +942,7 @@ function wireFeed() {
         if (token !== generation) return;
         messages = [...page.messages, ...messages];
         olderCursor = page.older_cursor;
-        lastSignature = JSON.stringify(messages);
+        lastSignature = signature();
         render({ anchor: true });
       });
     else if ((hit = on(".group-body > article")) && !on("a, button, form")) {
@@ -967,7 +1014,7 @@ function renderComposer(keepDraft = true) {
     ${c.mode === "threaded" ? `<input id="thread-title" class="thread-input" maxlength="160" placeholder="New thread title" aria-label="Thread title" required value="${esc(title)}">` : ""}
     ${reply ? `<div class="reply-banner small">${icon("reply")}<span>Replying to <strong>${esc(reply.display_name)}</strong></span><button type="button" id="cancel-reply" class="icon-button" aria-label="Cancel reply">${icon("x")}</button></div>` : ""}
     <textarea id="message-body" maxlength="8000" rows="1" placeholder="${esc(place)}" aria-label="Message" required>${esc(draft)}</textarea>
-    <div class="composer-bar"><button type="button" id="choose-emoji" class="icon-button" aria-label="Choose emoji" title="Emoji" aria-expanded="false">${icon("smile")}</button>${attachButton('id="attach-file"')}<span class="muted small composer-hint-keys"><kbd>Enter</kbd> to send · <kbd>Shift</kbd> + <kbd>Enter</kbd> for a new line · <span title="**bold**, *italic*, ~~struck~~, \`code\`, &gt; quote, - list, [text](link), ||spoiler||">Markdown</span></span><button id="send-message" type="submit" aria-label="Send message">${icon("send")}<span>${c.mode === "threaded" ? "Post thread" : "Send"}</span></button></div></form></div>`;
+    <div class="composer-bar"><button type="button" id="choose-emoji" class="icon-button" aria-label="Choose emoji" title="Emoji" aria-expanded="false">${icon("smile")}</button>${attachButton('id="attach-file"')}<span class="muted small composer-hint-keys" title="Shift + Enter for a new line"><kbd>Enter</kbd> to send</span><button id="send-message" type="submit" aria-label="Send message">${icon("send")}<span>${c.mode === "threaded" ? "Post thread" : "Send"}</span></button></div></form></div>`;
   const body = $<HTMLTextAreaElement>("#message-body");
   const grow = () => {
     body.style.height = "auto";
@@ -1046,8 +1093,7 @@ function renderComposer(keepDraft = true) {
         body.value = "";
         if (titleInput) titleInput.value = "";
         reply = null;
-        if (message.queued)
-          toast("Message queued for delivery to the channel’s home instance.");
+        if (message.queued) pending = [...pending, message];
         else merge(message);
         if (narrow && topicId && narrow !== topicId)
           return go(`#/c/${c.id}/t/${topicId}`);
@@ -1107,6 +1153,7 @@ export async function refreshCurrent() {
     cursor = previous.older_cursor;
   }
   messages = fresh;
+  pending = page.pending || [];
   olderCursor = cursor;
   if (!document.querySelector("#rows")) return;
   markSeen();
@@ -1119,9 +1166,9 @@ export async function refreshCurrent() {
   lastPrefs = prefs;
   if (prefsChanged && !(roleChanged || federationChanged || headerChanged || topicsChanged))
     renderHeader();
-  const signature = JSON.stringify(messages);
-  if (signature !== lastSignature || roleChanged || federationChanged || prefsChanged) {
-    lastSignature = signature;
+  const now = signature();
+  if (now !== lastSignature || roleChanged || federationChanged || prefsChanged) {
+    lastSignature = now;
     render({ animate: true });
   } else refreshTimes($("#message-list"));
   renderSidebar();
