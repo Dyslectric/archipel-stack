@@ -23,6 +23,8 @@ APP_KEYS = (
     "OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "OIDC_AUTH_METHOD",
     "ADMIN_SUBJECTS", "REGISTRATION_MODE", "XMPP_DOMAIN", "XMPP_BRIDGE_SECRET",
     "XMPP_BIND_ADDRESS", "XMPP_CERTS_PATH", "XMPP_CLIENT_PORT", "XMPP_SERVER_PORT",
+    "RATE_LIMIT_API", "RATE_LIMIT_AUTH", "RATE_LIMIT_MEDIA", "RATE_LIMIT_FEDERATION",
+    "FEDERATION_SEND_RATE", "FEDERATION_PEER_SEND_RATE",
 )
 XMPP_SETUP_KEYS = (
     "XMPP_SRV_TARGET", "XMPP_CERT_SOURCE", "XMPP_ACME_EMAIL", "XMPP_ACME_ACCEPT_TOS",
@@ -211,6 +213,14 @@ def validate_setup(settings):
     if method != "none" and not settings.get("OIDC_CLIENT_SECRET"):
         raise ValueError("OIDC_CLIENT_SECRET is required")
     parse_trusted_proxies(settings.get("TRUSTED_PROXY", ""))
+    # Empty keeps the application's default.
+    for key, low, high in (
+        ("RATE_LIMIT_API", 1, 100000), ("RATE_LIMIT_AUTH", 1, 100000), ("RATE_LIMIT_MEDIA", 1, 100000),
+        ("RATE_LIMIT_FEDERATION", 1, 100000), ("FEDERATION_SEND_RATE", 1, 1000), ("FEDERATION_PEER_SEND_RATE", 0, 100000),
+    ):
+        value = settings.get(key, "")
+        if value and (not re.fullmatch(r"[0-9]{1,6}", value) or not low <= int(value) <= high):
+            raise ValueError(f"{key} must be an integer between {low} and {high}")
     domain = settings.get("XMPP_DOMAIN", "")
     for key, default in (("XMPP_CLIENT_PORT", "5222"), ("XMPP_SERVER_PORT", "5269")):
         value = settings.get(key) or default

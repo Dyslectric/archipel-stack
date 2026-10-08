@@ -1210,3 +1210,14 @@ test("browsers that subscribed are notified of new messages until they sign out 
   assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM push_subscriptions").get()!.n, 0);
   assert.equal((await (await bob.request("/api/push")).json()).endpoint, null);
 });
+
+test("request limits follow the configured per-minute rates", async (t) => {
+  const { origin } = await application(t, { rateLimitFederation: 2, rateLimitApi: 3 });
+  const statuses = async (path: string, count: number) => {
+    const seen: number[] = [];
+    for (let n = 0; n < count; n++) seen.push((await fetch(origin + path)).status);
+    return seen;
+  };
+  assert.deepEqual((await statuses("/federation/emojis", 3)).map((s) => s === 429), [false, false, true]);
+  assert.deepEqual((await statuses("/api/session", 4)).map((s) => s === 429), [false, false, false, true]);
+});

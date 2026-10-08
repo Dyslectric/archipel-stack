@@ -25,7 +25,7 @@ const permissions = {
 };
 const image =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
-async function instance(t: TestContext) {
+async function instance(t: TestContext, env: Record<string, string> = {}) {
   const directory = mkdtempSync(join(tmpdir(), "archipel-federation-"));
   const server = createServer();
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -34,6 +34,7 @@ async function instance(t: TestContext) {
     DEV_AUTH: "true",
     BASE_URL: origin,
     DATABASE_PATH: join(directory, "db.sqlite"),
+    ...env,
   });
   const store = new Store(join(directory, "db.sqlite"), origin);
   const app = createApp(config, store);
@@ -108,6 +109,32 @@ function channel(i: Awaited<ReturnType<typeof instance>>, extra = {}) {
   i.fed.setChannel(i.alice, c.id, true);
   return i.store.channel(c.id);
 }
+
+test("delivery honours the configured overall and per-peer send rates", async (t) => {
+  const a = await instance(t, { FEDERATION_SEND_RATE: "2", FEDERATION_PEER_SEND_RATE: "3" });
+  const b = await instance(t), c = await instance(t);
+  const statuses = (origin: string) =>
+    a.store.db
+      .prepare("SELECT status,attempts FROM federation_deliveries WHERE recipient LIKE ? ORDER BY id")
+      .all(`${origin}/%`)
+      .map((d) => `${d.status}:${d.attempts}`);
+  for (let n = 0; n < 5; n++)
+    await a.fed.sendDirect(a.bob, `${b.origin}/actors/users/${b.bob.id}`, `Message ${n}`);
+  await a.fed.tick();
+  assert.deepEqual(statuses(b.origin), ["sent:1", "sent:1", "pending:0", "pending:0", "pending:0"]);
+  await a.fed.sendDirect(a.bob, `${c.origin}/actors/users/${c.bob.id}`, "Other peer");
+  await a.fed.tick();
+  // The peer allowance is spent after three; the other peer is not held behind it.
+  assert.deepEqual(statuses(b.origin), ["sent:1", "sent:1", "sent:1", "pending:0", "pending:0"]);
+  assert.deepEqual(statuses(c.origin), ["sent:1"]);
+  await a.fed.tick();
+  assert.deepEqual(statuses(b.origin), ["sent:1", "sent:1", "sent:1", "pending:0", "pending:0"]);
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() + 60001 });
+  await a.fed.tick();
+  await a.fed.tick();
+  assert.deepEqual(statuses(b.origin), ["sent:1", "sent:1", "sent:1", "sent:1", "sent:1"]);
+  assert.equal(b.fed.directMessages(b.bob).length, 5);
+});
 
 test("personal remote blocks reject incoming messages and cancel queued sends until unblocked", async (t) => {
   const a = await instance(t), b = await instance(t);

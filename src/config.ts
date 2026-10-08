@@ -17,6 +17,15 @@ export interface Config {
   xmppBridgeSecret: string;
   xmppClientPort: number;
   xmppServerPort: number;
+  /** Requests each client may make per minute. */
+  rateLimitApi: number;
+  rateLimitAuth: number;
+  rateLimitMedia: number;
+  rateLimitFederation: number;
+  /** Outbound federation deliveries per second, across all peers. */
+  federationSendRate: number;
+  /** Outbound federation deliveries per minute to one peer host; 0 is unlimited. */
+  federationPeerSendRate: number;
 }
 
 export function isLoopback(host: string) {
@@ -41,6 +50,12 @@ export function loadConfig(env = process.env): Config {
   const xmppServerPort = xmppPort("XMPP_SERVER_PORT", 5269);
   if (xmppDomain && xmppClientPort === xmppServerPort)
     throw new Error("XMPP client and server ports must differ");
+  const rate = (key: string, fallback: number, min = 1, max = 100000) => {
+    const value = env[key] || String(fallback);
+    if (!/^[0-9]{1,6}$/.test(value) || Number(value) < min || Number(value) > max)
+      throw new Error(`${key} must be an integer between ${min} and ${max}`);
+    return Number(value);
+  };
   const registrationMode = env.REGISTRATION_MODE || "open";
   if (!["open", "invite_only"].includes(registrationMode))
     throw new Error("REGISTRATION_MODE must be open or invite_only");
@@ -111,6 +126,12 @@ export function loadConfig(env = process.env): Config {
     xmppBridgeSecret,
     xmppClientPort,
     xmppServerPort,
+    rateLimitApi: rate("RATE_LIMIT_API", 300),
+    rateLimitAuth: rate("RATE_LIMIT_AUTH", 30),
+    rateLimitMedia: rate("RATE_LIMIT_MEDIA", 600),
+    rateLimitFederation: rate("RATE_LIMIT_FEDERATION", 120),
+    federationSendRate: rate("FEDERATION_SEND_RATE", 20, 1, 1000),
+    federationPeerSendRate: rate("FEDERATION_PEER_SEND_RATE", 100, 0),
     adminSubjects: (env.ADMIN_SUBJECTS || "")
       .split(",")
       .map((s) => s.trim())

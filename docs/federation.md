@@ -100,7 +100,13 @@ the selected public address is pinned to the connection. Public HTTPS is require
 in production. Local two-instance testing permits loopback HTTP only when
 development authentication is enabled on a loopback listener and base URL.
 
-The single server process runs the worker every second. Temporary errors retry
+The single server process runs the worker every second. Each run sends at most
+`FEDERATION_SEND_RATE` deliveries (default 20) across all peers, and no more
+than `FEDERATION_PEER_SEND_RATE` deliveries per minute (default 100; 0 removes
+the cap) go to any one peer host. A peer at its cap keeps its queue in order
+while other peers continue. Incoming `/federation` requests are limited to
+`RATE_LIMIT_FEDERATION` per minute per client address (default 120), so keep
+the peer send rate below the limit your peers accept. Temporary errors retry
 with exponential backoff starting at five seconds, capped at one hour, with up
 to twelve attempts. Policy failures cancel; permanent rejection and exhausted
 retries fail. Admins can inspect results; automatic replay of failed deliveries

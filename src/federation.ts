@@ -63,6 +63,7 @@ const time = () => new Date().toISOString();
 export class Federation {
   private importing = false;
   private busy = false;
+  private peerSends = new Map<string, number[]>();
   constructor(
     readonly store: Store,
     readonly config: Config,
@@ -2015,29 +2016,48 @@ export class Federation {
     }
     else throw new Problem(400, "Unknown delivery purpose.");
   }
+  // This minute's sends to the recipient's host, or null once the peer allowance is spent.
+  private peerAllowance(recipient: string) {
+    const host = URL.parse(recipient)?.host || recipient,
+      limit = this.config.federationPeerSendRate,
+      recent = (this.peerSends.get(host) || []).filter(
+        (at) => at > Date.now() - 60000,
+      );
+    this.peerSends.set(host, recent);
+    return limit && recent.length >= limit ? null : recent;
+  }
   async tick() {
     if (this.busy) return;
     this.busy = true;
     try {
-      for (let step = 0; step < 20; step++) {
-        // Preserve recipient order without allowing an offline peer to hold other peers.
-        const delivery = this.store.db
-          .prepare(
-            "SELECT d.id AS delivery_id,d.recipient,d.attempts,o.* FROM federation_deliveries d JOIN federation_outgoing o ON o.id=d.activity_id WHERE d.status='pending' AND d.next_attempt<=? AND NOT EXISTS (SELECT 1 FROM federation_deliveries earlier WHERE earlier.recipient=d.recipient AND earlier.id<d.id AND earlier.status='pending') ORDER BY d.id LIMIT 1",
-          )
-          .get(Date.now()) as
+      for (let step = 0; step < this.config.federationSendRate; step++) {
+        // Preserve recipient order without allowing an offline or rate-limited peer to hold other peers.
+        let delivery:
           | (Outgoing & {
               delivery_id: number;
               recipient: string;
               attempts: number;
             })
-          | undefined;
+          | undefined,
+          sends: number[] = [];
+        for (const row of this.store.db
+          .prepare(
+            "SELECT d.id AS delivery_id,d.recipient,d.attempts,o.* FROM federation_deliveries d JOIN federation_outgoing o ON o.id=d.activity_id WHERE d.status='pending' AND d.next_attempt<=? AND NOT EXISTS (SELECT 1 FROM federation_deliveries earlier WHERE earlier.recipient=d.recipient AND earlier.id<d.id AND earlier.status='pending') ORDER BY d.id",
+          )
+          .iterate(Date.now())) {
+          const allowance = this.peerAllowance(String(row.recipient));
+          if (!allowance) continue;
+          delivery = row as NonNullable<typeof delivery>;
+          sends = allowance;
+          break;
+        }
         if (!delivery) break;
         try {
           this.deliveryAllowed(delivery, delivery.recipient);
           const actor = await this.actor(delivery.recipient),
             url = this.allowed(actor.inbox);
           this.deliveryAllowed(delivery, delivery.recipient);
+          sends.push(Date.now());
           await peerRequest(
             url,
             this.config,

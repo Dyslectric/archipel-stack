@@ -73,7 +73,7 @@ export function createApp(config: Config, store: Store) {
     "/federation",
     rateLimit({
       windowMs: 60000,
-      limit: 120,
+      limit: config.rateLimitFederation,
       message: { error: "Too many federation requests." },
     }),
   );
@@ -197,7 +197,7 @@ export function createApp(config: Config, store: Store) {
     ["/api", "/actors", "/objects"],
     rateLimit({
       windowMs: 60000,
-      limit: 300,
+      limit: config.rateLimitApi,
       keyGenerator: (req) => {
         try {
           const session = store.session(cookie(req, authCookie));
@@ -220,7 +220,7 @@ export function createApp(config: Config, store: Store) {
     "/auth",
     rateLimit({
       windowMs: 60000,
-      limit: 30,
+      limit: config.rateLimitAuth,
       message: {
         error: "Too many sign-in attempts. Please try again shortly.",
       },
@@ -243,7 +243,7 @@ export function createApp(config: Config, store: Store) {
     "/media/:file",
     rateLimit({
       windowMs: 60000,
-      limit: 600,
+      limit: config.rateLimitMedia,
       message: { error: "Too many requests. Please try again shortly." },
     }),
     (req, res) => {
@@ -296,7 +296,7 @@ export function createApp(config: Config, store: Store) {
     "/api/dev-login",
     rateLimit({
       windowMs: 60000,
-      limit: 30,
+      limit: config.rateLimitAuth,
       message: {
         error: "Too many sign-in attempts. Please try again shortly.",
       },

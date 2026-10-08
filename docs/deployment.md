@@ -80,7 +80,10 @@ subnet is trusted to supply forwarded headers.
 
 Express only uses forwarded client IP and protocol headers when the connecting
 peer matches that list. This also makes rate limits count clients rather than
-the proxy connection. The public instance URL and OIDC callback continue to come
+the proxy connection. The per-minute limits for one client are set in `.env`
+with `RATE_LIMIT_API` (default 300, counted per signed-in user), `RATE_LIMIT_AUTH`
+(30), `RATE_LIMIT_MEDIA` (600) and `RATE_LIMIT_FEDERATION` (120); outbound
+federation pacing is described in [federation.md](federation.md). The public instance URL and OIDC callback continue to come
 from `BASE_URL`. The proxy must preserve Origin and overwrite/sanitize forwarded
 headers. See [Express's proxy configuration](https://expressjs.com/en/guide/behind-proxies/).
 
