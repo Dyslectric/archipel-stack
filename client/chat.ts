@@ -35,7 +35,7 @@ import {
   type Topic,
 } from "./shared.js";
 import { closePicker, togglePicker } from "./picker.js";
-import { renderSidebar, wireSidebar } from "./sidebar.js";
+import { renderSidebar, sidebarFrame } from "./sidebar.js";
 import { attachButton, pickFiles, quoteInto } from "./attach.js";
 import { markdownText } from "./markdown.js";
 import { isHidden, notifies, pickPref, prefItems, prefMenu, type PrefKind } from "./prefs.js";
@@ -158,17 +158,13 @@ const canPost = () => !!current?.role && !postBlocked();
 // The inbox borrows the frame too (inbox.ts): it fills the same heading, feed and toolbar.
 export function chatFrame(view: HTMLElement) {
   if (view.querySelector(".workspace")) return;
-  view.innerHTML = `<div class="workspace"><aside class="sidebar" id="sidebar" aria-label="Conversations">
-      <nav id="channel-list" aria-label="Your conversations"></nav>
-      <button type="button" class="side-foot" data-new-dm>${icon("pencil")}<span>New direct message</span></button>
-      <div class="side-resize" id="side-resize" role="separator" aria-orientation="vertical" aria-label="Sidebar width" aria-valuemin="180" aria-valuemax="520" tabindex="0" title="Drag to resize. Double-click to reset."></div></aside>
-      <main class="conversation" id="main"><header class="channel-header"><div id="channel-heading"></div><div class="header-actions" id="channel-actions"></div></header>
+  const workspace = sidebarFrame(view);
+  workspace.insertAdjacentHTML("beforeend", `<main class="conversation" id="main"><header class="channel-header"><div id="channel-heading"></div><div class="header-actions" id="channel-actions"></div></header>
       <div class="feed-wrap"><div id="message-list" class="feed" role="log" aria-label="Conversation" tabindex="-1"><div class="feed-inner"><div id="feed-top"></div><div id="rows"></div><div id="feed-empty"></div></div></div>
       <button type="button" id="new-pill" class="new-pill" hidden></button></div>
       <div id="composer-area"></div></main>
-      <aside class="members-panel" id="member-panel" aria-label="Members" hidden><div class="side-resize" id="members-resize" role="separator" aria-orientation="vertical" aria-label="Members panel width" aria-valuemin="180" aria-valuemax="520" tabindex="0" title="Drag to resize. Double-click to reset."></div><div class="members-inner" id="member-list"></div></aside></div>`;
+      <aside class="members-panel" id="member-panel" aria-label="Members" hidden><div class="side-resize" id="members-resize" role="separator" aria-orientation="vertical" aria-label="Members panel width" aria-valuemin="180" aria-valuemax="520" tabindex="0" title="Drag to resize. Double-click to reset."></div><div class="members-inner" id="member-list"></div></aside>`);
   painted = false;
-  wireSidebar($("#channel-list"));
   wireFeed();
   wireMembersResize();
   $("#channel-actions").addEventListener("click", (e) => {

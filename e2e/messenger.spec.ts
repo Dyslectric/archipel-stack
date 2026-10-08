@@ -143,6 +143,40 @@ test("channel defaults, in-chat options and message menus work on desktop and mo
   await page.getByRole("menuitem", { name: "Of everything new", exact: true }).click();
 });
 
+test("the conversation sidebar stays available on Channels and Settings", async ({ page }) => {
+  await login(page);
+  await createChannel(page, "sidebar-pages");
+  const opener = page.getByRole("button", { name: "Show channels", exact: true });
+  const sidebar = page.locator("#sidebar");
+  for (const width of [1400, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    for (const tab of ["channels", "settings"]) {
+      await page.locator(`[data-nav=${tab}]`).click();
+      if (tab === "settings") {
+        await page.goto("/#/settings/personal/profile");
+        await expect(page.getByLabel("Display name", { exact: true })).toBeVisible();
+      }
+      const input = tab === "channels"
+        ? page.getByLabel("Search channels")
+        : page.getByLabel("Display name", { exact: true });
+      await input.fill("sidebar-pages");
+      await expect(opener).toBeVisible();
+      if (width > 720) {
+        await expect(sidebar).toBeVisible();
+        await opener.click();
+        await expect(sidebar).toBeHidden();
+      } else await expect(sidebar).toBeHidden();
+      await opener.click();
+      await expect(sidebar).toBeVisible();
+      await expect(input).toHaveValue("sidebar-pages");
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await sidebar.getByRole("link", { name: /sidebar-pages/ }).click();
+      await expect(page.locator("#channel-heading strong")).toHaveText("sidebar-pages");
+      if (width <= 720) await expect(sidebar).toBeHidden();
+    }
+  }
+});
+
 test("topics inherit mentions-only notifications and keep their own overrides", async ({ page }) => {
   await login(page);
   await createChannel(page, "mentions-topics", "topical");

@@ -193,8 +193,7 @@ nav.primary { display: flex; gap: 2px; align-items: center; }
 .account-menu > summary .avatar { border-radius: 50%; }
 .account-menu > summary .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .account-menu > summary .chev { color: var(--muted); }
-#mobile-menu { display: none; }
-.app[data-view=chat] #mobile-menu, .app[data-view=xmpp] #mobile-menu { display: inline-flex; }
+#mobile-menu { display: inline-flex; }
 
 /* ---- the app: bar, then one page that fills the rest ---- */
 .app { height: 100dvh; display: flex; flex-direction: column; }
@@ -225,6 +224,7 @@ main.page { padding: 0 16px; }
 
 /* ---- chat: direct messages and channels on the left ---- */
 .workspace { display: grid; grid-template-columns: var(--sidebar-w, 264px) minmax(0, 1fr) auto; min-height: 0; }
+.workspace > .page { min-width: 0; min-height: 0; }
 .sidebar { background: var(--card); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0;
   min-width: 0; position: relative; }
 /* The sidebar's right edge: drag it to make the column wider or narrower. */
@@ -605,6 +605,7 @@ dialog.share-dialog li + li { margin-top: 6px; }
   .brand > span, .nav-item .label, .account-menu > summary .label { display: none; }
   .nav-item { padding: 8px; }
   .workspace { display: block; }
+  .workspace > .page { height: 100%; }
   .side-resize { display: none; }
   .members-panel { position: fixed; right: 0; top: var(--header-h); bottom: 0; width: min(280px, 86vw); z-index: 15;
     box-shadow: var(--shadow-pop); }

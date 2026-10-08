@@ -356,6 +356,16 @@ function groupMenu(button: HTMLElement) {
 }
 
 // ---- the sidebar itself: as wide as the reader drags it, or folded away. Kept for this browser. ----
+export function sidebarFrame(view: HTMLElement) {
+  view.innerHTML = `<div class="workspace"><aside class="sidebar" id="sidebar" aria-label="Conversations">
+    <nav id="channel-list" aria-label="Your conversations"></nav>
+    <button type="button" class="side-foot" data-new-dm>${icon("pencil")}<span>New direct message</span></button>
+    <div class="side-resize" id="side-resize" role="separator" aria-orientation="vertical" aria-label="Sidebar width" aria-valuemin="180" aria-valuemax="520" tabindex="0" title="Drag to resize. Double-click to reset."></div></aside></div>`;
+  wireSidebar(view.querySelector<HTMLElement>("#channel-list")!);
+  renderSidebar();
+  return view.querySelector<HTMLElement>(".workspace")!;
+}
+
 const WIDTH = "archipel-sidebar-width",
   FOLDED = "archipel-sidebar-collapsed";
 function stored(key: string) {

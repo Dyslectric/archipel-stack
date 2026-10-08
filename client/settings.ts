@@ -31,6 +31,7 @@ import {
   type User,
 } from "./shared.js";
 import { chatChannel, resetChat } from "./chat.js";
+import { sidebarFrame } from "./sidebar.js";
 import { mirrorDialog } from "./mirrors.js";
 import {
   disablePush,
@@ -1238,7 +1239,8 @@ export async function showSettings(
   // changed) and the page beside it are replaced, once the new page is ready to show.
   let page = view.querySelector<HTMLElement>(".page.settings-page");
   if (!page) {
-    view.innerHTML = `<div class="page settings-page"><div class="page-inner settings-layout"><nav class="settings-nav" aria-label="Settings"></nav><section class="settings-body"></section></div></div>`;
+    const workspace = sidebarFrame(view);
+    workspace.insertAdjacentHTML("beforeend", `<div class="page settings-page"><div class="page-inner settings-layout"><nav class="settings-nav" aria-label="Settings"></nav><section class="settings-body"></section></div></div>`);
     page = $(".page", view);
     $(".settings-nav", view).addEventListener("change", (e) => {
       const select = e.target as HTMLSelectElement,

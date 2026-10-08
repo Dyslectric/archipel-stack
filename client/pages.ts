@@ -20,6 +20,7 @@ import {
   toast,
   type Channel,
 } from "./shared.js";
+import { sidebarFrame } from "./sidebar.js";
 
 const plainTop = () =>
   `<header class="top"><div class="top-inner"><a class="brand" href="/">${icon("logo", "brand-mark")}<span>Archipel</span></a><span class="grow"></span><span class="muted small">${esc(state.session.instance)}</span></div></header>`;
@@ -69,7 +70,8 @@ export function renderAdmission() {
 
 // Every channel this account can see, and a form to start one.
 export function showChannels(view: HTMLElement, create: boolean) {
-  view.innerHTML = `<div class="page"><div class="page-inner directory"><div class="feed-head"><div><h1>Channels</h1><p class="muted small">Everything you can see on ${esc(state.session.instance)}. Find <a href="#/settings/federation/remote">channels on other servers</a>.</p></div></div>
+  const workspace = sidebarFrame(view);
+  workspace.insertAdjacentHTML("beforeend", `<div class="page"><div class="page-inner directory"><div class="feed-head"><div><h1>Channels</h1><p class="muted small">Everything you can see on ${esc(state.session.instance)}. Find <a href="#/settings/federation/remote">channels on other servers</a>.</p></div></div>
     <div class="layout"><section><label class="search-field">${icon("search")}<input type="search" id="channel-search" placeholder="Search channels" aria-label="Search channels"></label><ul class="plain browse-list" id="browse-list"></ul></section>
     <aside><section class="card"><h2>Federated channels</h2><p class="muted">Follow a channel hosted on another Archipel instance.</p><a class="button secondary" href="#/settings/federation/remote">Join a federated channel</a></section><section class="card"><h2>XMPP rooms</h2><p class="muted">Join a conversation hosted on another XMPP server.</p><a class="button secondary" href="#/xmpp">Join an XMPP room</a></section>${state.session.user!.create_channels ? "" : '<section class="card"><h2>Create a channel</h2><p class="muted">Your role does not allow creating channels.</p></section>'}<section class="card" id="new-channel" ${state.session.user!.create_channels ? "" : "hidden"}><h2>Create a channel</h2><form class="stack">
       <label>Channel name<span class="input-prefix"><span>#</span><input name="name" required minlength="2" maxlength="40" pattern="[a-zA-Z0-9][a-zA-Z0-9_\\-]{1,39}" placeholder="general" autocomplete="off"></span></label>
@@ -81,7 +83,7 @@ export function showChannels(view: HTMLElement, create: boolean) {
       <label>Who can join?<select name="admission"><option value="open">Anyone on this instance</option><option value="allowlist">Invited users only</option></select></label>
       <label class="check"><input type="checkbox" name="show_members" checked> Show the member list</label>
       <label class="check"><input type="checkbox" name="hide_handles"> Hide handles, leaving only display names</label>
-      </div></details><p class="form-error" role="alert"></p><button>Create channel</button></form></section></aside></div></div></div>`;
+      </div></details><p class="form-error" role="alert"></p><button>Create channel</button></form></section></aside></div></div></div>`);
   const list = $("#browse-list"),
     search = $<HTMLInputElement>("#channel-search");
   function draw() {
