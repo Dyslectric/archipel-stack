@@ -126,6 +126,94 @@ test("personal remote blocks reject incoming messages and cancel queued sends un
   assert.ok(b.fed.directMessages(b.bob).some((m) => m.body === "Reply after unblock"));
 });
 
+test("profile pictures are exported, cached and updated for federated direct conversations", async t => {
+  const a = await instance(t), b = await instance(t);
+  a.store.setAvatar(a.alice, image);
+  // Some peers replace picture bytes at a stable URL instead of versioning it.
+  const originalActor = a.fed.publicActor.bind(a.fed);
+  a.fed.publicActor = (kind, id) => {
+    const document = originalActor(kind, id);
+    if (document.icon) document.icon.url = document.icon.url.split("?")[0];
+    return document;
+  };
+  const actor = a.fed.publicActor("users", a.alice.id);
+  assert.equal(actor.icon.mediaType, "image/png");
+  const publicImage = await fetch(actor.icon.url);
+  assert.equal(publicImage.status, 200);
+  assert.deepEqual(Buffer.from(await publicImage.arrayBuffer()), Buffer.from(image, "base64"));
+  await b.fed.sendDirect(b.bob, a.fed.userActor(a.alice), "Hello with a picture");
+  const peer = a.fed.userActor(a.alice);
+  const cachedUrl = b.store.peerInfo(peer).avatar_url!;
+  assert.match(cachedUrl, /^\/api\/remote-avatars\//);
+  assert.deepEqual(Buffer.from(b.store.remoteAvatarImage(cachedUrl.split("/").at(-1)!.split("?")[0]).image), Buffer.from(image, "base64"));
+  await drain(a, b);
+  await a.fed.sendDirect(a.alice, b.fed.userActor(b.bob), "Reply with my picture");
+  await drain(a, b);
+  assert.equal(b.store.directHistory(b.bob, peer).messages.at(-1)?.avatar_url, cachedUrl);
+  b.store.setContactName(b.bob, peer, "My friend");
+  const changed = Buffer.from(image, "base64"); changed[changed.length - 1] ^= 1;
+  a.store.setAvatar(a.alice, changed.toString("base64"));
+  await drain(a, b);
+  assert.notEqual(b.store.peerInfo(peer).avatar_url, cachedUrl);
+  assert.equal(b.store.peerInfo(peer, b.bob).display_name, "My friend");
+  b.restart();
+  assert.ok(b.store.peerInfo(peer).avatar_url);
+  a.store.removeAvatar(a.alice);
+  await drain(a, b);
+  assert.equal(b.store.peerInfo(peer).avatar_url, null);
+  assert.equal(b.store.directHistory(b.bob, peer).messages.at(-1)?.avatar_url, null);
+  assert.equal((await fetch(actor.icon.url)).status, 404);
+  a.fed.setEnabled(a.alice, false);
+  assert.equal((await fetch(actor.icon.url)).status, 403);
+});
+
+test("channel profile updates propagate home and remote author pictures across three instances", async t => {
+  const a = await instance(t), b = await instance(t), c = await instance(t);
+  const home = channel(a);
+  const subB = await b.fed.subscribe(b.bob, `#general@${new URL(a.origin).host}`);
+  const subC = await c.fed.subscribe(c.bob, `#general@${new URL(a.origin).host}`);
+  await drain(a, b, c);
+  a.store.post(a.alice, home.id, { body: "From home" });
+  await drain(a, b, c);
+  a.store.setAvatar(a.alice, image);
+  await drain(a, b, c);
+  assert.ok(b.store.messages(b.bob, subB.channel.id).find(m => m.body === "From home")?.avatar_url);
+  assert.ok(c.store.messages(c.bob, subC.channel.id).find(m => m.body === "From home")?.avatar_url);
+  await b.fed.remotePost(b.bob, subB.channel.id, { body: "From remote author" });
+  await drain(a, b, c);
+  b.store.setAvatar(b.bob, image);
+  await drain(a, b, c);
+  assert.ok(a.store.messages(a.alice, home.id).find(m => m.body === "From remote author")?.avatar_url);
+  assert.ok(c.store.messages(c.bob, subC.channel.id).find(m => m.body === "From remote author")?.avatar_url);
+  b.store.removeAvatar(b.bob);
+  await drain(a, b, c);
+  assert.equal(c.store.messages(c.bob, subC.channel.id).find(m => m.body === "From remote author")?.avatar_url, null);
+});
+
+test("foreign, invalid and oversized optional profile pictures cannot bypass fetch limits or break messaging", async t => {
+  const a = await instance(t), b = await instance(t);
+  const original = a.fed.publicActor.bind(a.fed);
+  let iconUrl = "https://127.0.0.1/private-avatar";
+  a.fed.publicActor = (kind, id) => ({ ...original(kind, id), icon: { type: "Image", url: iconUrl } });
+  const peer = a.fed.userActor(a.alice);
+  await b.fed.actor(peer, true);
+  assert.equal(b.store.peerInfo(peer).avatar_url, null);
+  iconUrl = peer; // Same-origin JSON must never be served as an avatar.
+  await b.fed.actor(peer, true);
+  assert.equal(b.store.peerInfo(peer).avatar_url, null);
+  iconUrl = `${a.origin}/federation/avatars/${a.alice.id}`;
+  a.store.db.prepare("INSERT INTO user_avatars VALUES(?,?,?,?)").run(a.alice.id, "too-large", "image/png", Buffer.concat([Buffer.from(image, "base64"), Buffer.alloc(2097152)]));
+  await b.fed.actor(peer, true);
+  assert.equal(b.store.peerInfo(peer).avatar_url, null);
+  await b.fed.sendDirect(b.bob, peer, "Avatar failure does not break chat");
+  await drain(a, b);
+  assert.equal(a.store.directHistory(a.alice, b.fed.userActor(b.bob)).messages[0].body, "Avatar failure does not break chat");
+  const url = new URL(`${b.origin}/federation/inbox`);
+  const activity = JSON.stringify({ id: `${a.origin}/forged-profile`, type: "Update", actor: peer, object: { type: "Person", id: a.fed.userActor(a.bob) } });
+  const response = await fetch(url, { method: "POST", headers: signedHeaders(url, "POST", peer, a.fed.keys().private_key, activity), body: activity });
+  assert.equal(response.status, 403);
+});
+
 test("two real instances subscribe, exchange signed messages, edit, delete, and deduplicate", async (t) => {
   const a = await instance(t),
     b = await instance(t);

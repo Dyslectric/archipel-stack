@@ -20,6 +20,7 @@ settings, richer channel views, and the existing ActivityPub federation.
 | XEP-0313 MAM v2, XEP-0059 paging | Personal and room archives; bounded pages, timestamps, direct peer filter, before/after cursors |
 | XEP-0359 stanza IDs | Stable archive IDs; native stanza IDs and origin IDs retained |
 | XEP-0308 corrections | Timeline messages; author and room checks |
+| XEP-0054 vCard photos, XEP-0153 avatar presence | Shared profile pictures; native reads/uploads/removals and federated picture caching |
 | Room configuration, affiliations, kicks, invitations | Managed through Archipel; native management commands rejected |
 | Offline messages | Retrieve through MAM after reconnect; no independent Prosody offline queue |
 | Topics, nested threads, attachments, OMEMO, remote room participation | Not exposed by this profile |
@@ -97,6 +98,29 @@ automatic discovery read the SRV record; clients with a manual port setting need
 the new value. If you change the federation port, update the server SRV records
 for both the account domain and `channels.<XMPP_DOMAIN>` as well. These remain
 STARTTLS listeners; changing the port does not enable direct TLS.
+
+### Shared profile pictures
+
+Pictures uploaded under **Settings → Profile** are shared with permitted remote
+contacts over XMPP vCard photos. XMPP clients can read, replace or remove their
+own photo using `vcard-temp`; the same picture appears in Archipel. Native vCard
+writes update the photo only; other vCard fields remain managed in Archipel.
+Available presence advertises the authoritative SHA-1 avatar hash, including an
+empty photo element after removal. Foreign photos are fetched through Prosody
+when a conversation opens, a message arrives or a changed presence hash is seen.
+Remote photos are cached locally and used in browser messages and conversations.
+PEP user-avatar (XEP-0084) is not implemented by this profile.
+
+ActivityPub actors advertise a public home-instance image URL when the account
+has federation permissions. Signed profile updates notify existing contacts and
+channel subscribers, including authors relayed through a channel's home server.
+Receivers refresh the author's own profile and cache validated raster bytes;
+foreign URLs are never loaded directly by the browser. Downloads are limited to
+2 MiB, use the existing federation network restrictions, and accept only the
+supported raster formats. An unavailable image does not reject the conversation.
+Updates preserve personal contact names. Removing a picture removes its remote
+cached copy after notification; current blocks, federation settings and account
+admission apply to profile reads and queued requests.
 
 ## Policy, archive, and protocol boundaries
 

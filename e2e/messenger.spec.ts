@@ -570,6 +570,10 @@ test("two browser instances federate a channel and a direct message with admin-c
   await login(peerAdmin);
   await grantFederation(page, "alice");
   await grantFederation(peerAdmin, "bob");
+  await page.goto("/#/settings/personal/profile");
+  await page.getByLabel("Profile picture", { exact: true }).setInputFiles({ name: "portrait.png", mimeType: "image/png", buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=", "base64") });
+  await page.getByRole("button", { name: "Upload picture", exact: true }).click();
+  await expect(page.locator("#profile-picture-preview img")).toHaveAttribute("src", /^\/api\/avatars\//);
   await createChannel(page, "federated-lounge");
   await channelSettings(page, "Federation");
   await page
@@ -608,6 +612,13 @@ test("two browser instances federate a channel and a direct message with admin-c
   }).toPass({ timeout: 15000 });
   await bob.getByRole("button", { name: "Open channel", exact: true }).click();
   await expect(bob.locator(".message-body")).toContainText("Home greeting.");
+  const remotePicture = bob.locator(".message").filter({ hasText: "Home greeting." }).locator(".avatar img");
+  await expect(remotePicture).toHaveAttribute("src", /^\/api\/remote-avatars\//);
+  await expect.poll(() => remotePicture.evaluate(img => (img as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+  await page.goto("/#/settings/personal/profile");
+  await page.getByRole("button", { name: "Remove picture", exact: true }).click();
+  await expect(remotePicture).toHaveCount(0);
+  await openChat(page);
   await send(bob, "Remote greeting.");
   await expect(
     page.locator(".message-body").filter({ hasText: "Remote greeting." }),

@@ -61,6 +61,7 @@ export function createApp(config: Config, store: Store) {
     express.json({ limit: "360kb" }),
   );
   app.use("/api/profile/avatar", express.json({ limit: "3mb" }));
+  app.use("/internal/xmpp/avatars", express.json({ limit: "3mb" }));
   // Federation authenticates with signed requests; browser APIs keep Origin/CSRF.
   app.use(
     "/federation",
@@ -175,6 +176,13 @@ export function createApp(config: Config, store: Store) {
       | undefined;
     if (!image) throw new Problem(404, "Emoji not found.");
     res.type(image.mime).send(Buffer.from(image.image));
+  });
+  app.get("/federation/avatars/:id", (req, res) => {
+    const actor = federation.publicActor("users", String(req.params.id));
+    store.active(String(req.params.id));
+    if (!actor.icon) throw new Problem(404, "Profile picture is not federated.");
+    const picture = store.avatarImage(String(req.params.id));
+    res.type(picture.mime).send(Buffer.from(picture.image));
   });
   app.use(express.json({ limit: "64kb" }));
   // Private bearer-authenticated adapter, before browser Origin/session checks.
@@ -445,7 +453,9 @@ export function createApp(config: Config, store: Store) {
       req.query.before === undefined ? undefined : Number(req.query.before);
     if (before !== undefined && (!Number.isSafeInteger(before) || before < 1))
       throw new Problem(400, "Invalid message cursor.");
-    res.json(store.directHistory(user(res), req.query.peer, before));
+    const history = store.directHistory(user(res), req.query.peer, before);
+    if (history.conversation.peer.startsWith("xmpp:")) xmpp.requestAvatar(user(res), history.conversation.peer);
+    res.json(history);
   });
   app.get("/api/contact-names", (req, res) =>
     res.json(store.peerInfo(text(req.query.peer, "User", 2048), user(res))),
@@ -457,6 +467,7 @@ export function createApp(config: Config, store: Store) {
     if (typeof req.body?.to === "string" && req.body.to.startsWith("xmpp:")) {
       xmpp.enabled();
       const target = xmpp.remoteJid(req.body.to);
+      if (!target.endsWith(`@${config.xmppDomain}`)) xmpp.requestAvatar(user(res), `xmpp:${target}`);
       res.json(target.endsWith(`@${config.xmppDomain}`)
         ? store.peerInfo(`${config.baseUrl}/actors/users/${xmpp.local(target).id}`, user(res))
         : store.peerInfo(`xmpp:${target}`, user(res)));
@@ -666,6 +677,20 @@ export function createApp(config: Config, store: Store) {
   );
   app.get("/api/avatars/:id", (req, res) => {
     const picture = store.avatarImage(String(req.params.id));
+    res.setHeader("Cache-Control", "private, no-store");
+    res.type(picture.mime).send(Buffer.from(picture.image));
+  });
+  app.get("/api/remote-avatars/:id", (_req, res) => {
+    const picture = store.remoteAvatarImage(String(_req.params.id));
+    const viewer = user(res);
+    if (picture.peer.startsWith("xmpp:")) {
+      const access = xmpp.remoteAccess(viewer, picture.peer);
+      if (access.blocked || (!access.incoming && !access.outgoing)) throw new Problem(403, "Remote profile access is disabled.");
+    } else {
+      federation.require(viewer, "federation_receive");
+      federation.allowed(picture.peer);
+      if (store.isUserBlocked(viewer.id, picture.peer)) throw new Problem(403, "This user is blocked.");
+    }
     res.setHeader("Cache-Control", "private, no-store");
     res.type(picture.mime).send(Buffer.from(picture.image));
   });

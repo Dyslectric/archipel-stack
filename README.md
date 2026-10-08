@@ -53,6 +53,8 @@ usernames match. New instances start without fabricated channels or conversation
 - Administrator controls for each user's federated sending, receiving,
   subscriptions, and channel posting, plus remote instance/actor blocks.
 - Stable actor URLs with ActivityStreams discovery and signed, authorized channel history.
+- Shared profile pictures across ActivityPub and XMPP instances, with local caching
+  and propagation of changes and removals.
 - Prosody XMPP integration: native client login with revocable app passwords,
   direct messages, local timeline MUC rooms, authorized MAM history, and TLS
   server-to-server direct messaging. See [XMPP setup and supported profile](docs/xmpp.md).

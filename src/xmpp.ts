@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { Router, type RequestHandler } from "express";
 import type { Config } from "./config.js";
 import { Store, Problem, hash, randomToken, text, type User, type Message } from "./store.js";
@@ -24,6 +24,9 @@ export class Xmpp {
       throw new Error("XMPP_DOMAIN cannot change after account provisioning; restore the saved domain.");
     store.db.prepare("INSERT OR IGNORE INTO instance_settings VALUES('xmpp_domain',?)").run(config.xmppDomain);
     store.xmppHooks = {
+      profile: (user) => {
+        if (!user.remote_actor) store.db.prepare("INSERT INTO xmpp_events(kind,object_id,sender_id) VALUES('Profile',?,?)").run(user.id, user.id);
+      },
       message: (message, kind) => {
         const channel = store.channel(message.channel_id);
         // Cross-protocol forwarding is deliberately not implicit.
@@ -152,6 +155,7 @@ export class Xmpp {
         .run(id, user.id, `xmpp:${target}`, body, stamp);
       this.store.db.prepare("INSERT INTO xmpp_events(kind,object_id,sender_id,recipient) VALUES('Direct',?,?,?)")
         .run(id, user.id, target);
+      this.requestAvatar(user, `xmpp:${target}`);
     });
     return { peer: `xmpp:${target}`, id };
   }
@@ -196,6 +200,29 @@ export class Xmpp {
       try { this.local(`${text(input.username, "Username", 128)}@${this.config.xmppDomain}`); return { exists: true }; }
       catch { return { exists: false }; }
     }
+    if (input.operation === "vcard") return this.vcard(input);
+    if (input.operation === "avatar-hash") return { hash: this.avatar(this.authorize(input))?.hash || "" };
+    if (input.operation === "vcard-access") {
+      const user = this.authorize(input), peer = `xmpp:${this.remoteJid(input.to)}`;
+      const access = this.remoteAccess(user, peer);
+      if (access.blocked || (!access.incoming && !access.outgoing)) throw new Problem(403, "Remote profile access is disabled.");
+      return { valid: true };
+    }
+    if (input.operation === "avatar-refresh") {
+      const sender = this.remoteJid(input.from), user = this.local(text(input.to, "Recipient", 1024));
+      const peer = `xmpp:${sender}`, access = this.remoteAccess(user, peer);
+      if (access.blocked || (!access.incoming && !access.outgoing)) throw new Problem(403, "Remote profile access is disabled.");
+      if (input.photo === "") {
+        this.store.cacheRemoteAvatar(peer, null, "");
+        this.store.db.prepare("DELETE FROM xmpp_avatar_requests WHERE peer=?").run(peer);
+      }
+      else {
+        const current = this.store.db.prepare("SELECT image FROM remote_avatars WHERE peer=?").get(peer) as { image: Uint8Array } | undefined;
+        const currentHash = current ? createHash("sha1").update(current.image).digest("hex") : "";
+        if (typeof input.photo === "string" && /^[a-f0-9]{40}$/i.test(input.photo) && currentHash !== input.photo.toLowerCase()) this.requestAvatar(user, peer, true);
+      }
+      return { valid: true };
+    }
     if (input.operation === "direct" && !String(input.from).split("/")[0].endsWith(`@${this.config.xmppDomain}`)) {
       // Only authenticated s2s origins may call this branch (the private adapter enforces that).
       const sender = this.remoteJid(input.from), recipient = this.local(text(input.to, "Recipient", 1024));
@@ -207,6 +234,7 @@ export class Xmpp {
           .run(id, recipient.id, `xmpp:${sender}`, body, stamp);
         this.store.db.prepare("INSERT INTO xmpp_events(kind,object_id,recipient) VALUES('Direct',?,?)").run(id, this.jid(recipient));
         this.recordDirectId(id, input);
+        this.requestAvatar(recipient, `xmpp:${sender}`);
         return { id };
       });
     }
@@ -252,6 +280,45 @@ export class Xmpp {
       case "archive": return this.archive(user, input);
       default: throw new Problem(400, "Unknown XMPP operation.");
     }
+  }
+  private avatar(user: User) {
+    const picture = this.store.db.prepare("SELECT mime,image FROM user_avatars WHERE user_id=?").get(user.id) as { mime: string; image: Uint8Array } | undefined;
+    return picture ? { mime: picture.mime, image: Buffer.from(picture.image).toString("base64"), hash: createHash("sha1").update(picture.image).digest("hex") } : null;
+  }
+  vcard(input: Input) {
+    const from = text(input.from, "Sender", 1024), user = this.local(text(input.to || from, "Profile account", 1024));
+    if (from.split("/")[0].endsWith(`@${this.config.xmppDomain}`)) this.authorize(input);
+    else {
+      const access = this.remoteAccess(user, `xmpp:${this.remoteJid(from)}`);
+      if (access.blocked || !access.outgoing) throw new Problem(403, "Profile federation is disabled.");
+    }
+    return { name: user.display_name, jid: this.jid(user), avatar: this.avatar(user) };
+  }
+  requestAvatar(user: User, peer: string, force = false) {
+    const access = this.remoteAccess(user, peer);
+    if (access.blocked || (!access.incoming && !access.outgoing)) return;
+    const previous = this.store.db.prepare("SELECT requested_at FROM xmpp_avatar_requests WHERE peer=?").get(peer) as { requested_at: number } | undefined;
+    if (!force && previous && previous.requested_at > Date.now() - 60000) return;
+    this.store.db.prepare("INSERT INTO xmpp_avatar_requests(peer,requester_id,requested_at) VALUES(?,?,?) ON CONFLICT(peer) DO UPDATE SET requester_id=excluded.requester_id,requested_at=excluded.requested_at")
+      .run(peer, user.id, Date.now());
+  }
+  cacheAvatar(input: Input) {
+    if (input.operation === "set") {
+      const user = this.authorize(input);
+      if (input.to && String(input.to).split("/")[0] !== this.jid(user)) throw new Problem(403, "Only your own profile may be changed.");
+      if (input.image === null) this.store.removeAvatar(user);
+      else this.store.setAvatar(user, typeof input.image === "string" ? input.image.replace(/\s/g, "") : input.image);
+      return { valid: true };
+    }
+    const peer = `xmpp:${this.remoteJid(input.peer)}`, requester = this.local(text(input.requester, "Requester", 1024));
+    const access = this.remoteAccess(requester, peer);
+    if (access.blocked || (!access.incoming && !access.outgoing)) throw new Problem(403, "Remote profile access is disabled.");
+    const request = this.store.db.prepare("SELECT requester_id,last_attempt FROM xmpp_avatar_requests WHERE peer=?").get(peer) as { requester_id: string; last_attempt: number } | undefined;
+    if (!request || request.requester_id !== requester.id || request.last_attempt !== input.attempt)
+      throw new Problem(403, "No matching profile request.");
+    const image = typeof input.image === "string" ? input.image.replace(/\s/g, "") : input.image;
+    this.store.cacheRemoteAvatar(peer, image, peer);
+    return { valid: true };
   }
   private recordDirectId(id: string, input: Input) {
     const origin = input.origin_id === undefined ? null : text(input.origin_id, "Origin ID", 200);
@@ -367,9 +434,14 @@ export class Xmpp {
     }
     const events = this.store.db.prepare("SELECT * FROM xmpp_events WHERE seq>? ORDER BY seq LIMIT 100")
       .all(after) as { seq: number; kind: string; object_id: string; sender_id: string | null; recipient: string | null }[];
-    const messages: Delivery[] = [];
+    const messages: Delivery[] = [], profiles: { jid: string; hash: string }[] = [];
     for (const event of events) {
-      if (event.kind === "Direct") {
+      if (event.kind === "Profile") {
+        try {
+          const user = this.store.active(event.object_id);
+          profiles.push({ jid: this.jid(user), hash: this.avatar(user)?.hash || "" });
+        } catch { /* Suspended accounts do not publish profiles. */ }
+      } else if (event.kind === "Direct") {
         const row = this.store.db.prepare("SELECT * FROM direct_messages WHERE id=?").get(event.object_id) as Direct;
         if (!row) continue;
         if (row.peer.startsWith("xmpp:")) {
@@ -392,7 +464,17 @@ export class Xmpp {
           messages.push(this.channelDelivery(occupant.user, message, occupant.jid, event.kind));
       }
     }
-    return { after: events.at(-1)?.seq ?? after, messages, disconnect, kick };
+    const avatarRequests: { peer: string; requester: string; attempt: number }[] = [];
+    const pending = this.store.db.prepare("SELECT * FROM xmpp_avatar_requests WHERE requested_at>last_attempt ORDER BY requested_at LIMIT 10").all() as { peer: string; requester_id: string }[];
+    for (const request of pending) {
+      const attempt = Date.now();
+      this.store.db.prepare("UPDATE xmpp_avatar_requests SET last_attempt=? WHERE peer=?").run(attempt, request.peer);
+      try {
+        const user = this.store.active(request.requester_id), access = this.remoteAccess(user, request.peer);
+        if (!access.blocked && (access.incoming || access.outgoing)) avatarRequests.push({ peer: request.peer.slice(5), requester: this.jid(user), attempt });
+      } catch { /* Current policy cancels queued remote profile reads. */ }
+    }
+    return { after: events.at(-1)?.seq ?? after, messages, disconnect, kick, profiles, avatar_requests: avatarRequests };
   }
   internalRouter() {
     const router = Router();
@@ -404,6 +486,7 @@ export class Xmpp {
     router.post("/auth", (req, res) => res.json(this.verify(req.body || {})));
     router.post("/operation", (req, res) => res.json(this.operation(req.body || {})));
     router.post("/sync", (req, res) => res.json(this.sync(req.body || {})));
+    router.post("/avatars", (req, res) => res.json(this.cacheAvatar(req.body || {})));
     return router;
   }
 }

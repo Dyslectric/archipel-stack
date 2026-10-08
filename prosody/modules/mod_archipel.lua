@@ -3,14 +3,85 @@ local st = require "prosody.util.stanza";
 local jid = require "prosody.util.jid";
 local async = require "prosody.util.async";
 local array = require "prosody.util.array";
+local uuid = require "prosody.util.uuid";
+local json = require "prosody.util.json";
 local cursor_store = module:open_store("archipel_cursor");
 local cursor = (cursor_store:get(nil) or {}).after or 0;
 local assigned_nicks = module:shared("/" .. bridge.domain .. "/archipel/assigned_nicks");
 module:add_feature("urn:xmpp:mam:2");
+module:add_feature("vcard-temp");
 module:hook("account-disco-info", function(event)
   event.reply:tag("feature", { var = "urn:xmpp:mam:2" }):up()
-    :tag("feature", { var = "urn:xmpp:sid:0" }):up();
+    :tag("feature", { var = "urn:xmpp:sid:0" }):up()
+    :tag("feature", { var = "vcard-temp" }):up();
 end);
+local function get_vcard(event)
+  if event.origin.type ~= "c2s" and event.origin.type ~= "s2sin" then return true; end
+  local result = bridge.operation(event, "vcard");
+  if not result then return true; end
+  local reply = st.reply(event.stanza):tag("vCard", { xmlns = "vcard-temp" })
+    :tag("FN"):text(result.name):up():tag("JABBERID"):text(result.jid):up();
+  if result.avatar and result.avatar ~= json.null then
+    reply:tag("PHOTO"):tag("TYPE"):text(result.avatar.mime):up()
+      :tag("BINVAL"):text(result.avatar.image):up():up();
+  end
+  event.origin.send(reply); return true;
+end
+local function set_vcard(event)
+  if event.origin.type ~= "c2s" then event.origin.send(st.error_reply(event.stanza, "auth", "forbidden")); return true; end
+  local photo = event.stanza:get_child("vCard", "vcard-temp"):get_child("PHOTO");
+  local image = photo and photo:get_child_text("BINVAL");
+  local result = bridge.request("/avatars", { operation = "set"; from = event.stanza.attr.from;
+    to = event.stanza.attr.to; credential = event.origin.archipel_credential; image = image and image ~= "" and image or json.null });
+  event.origin.send(result and st.reply(event.stanza) or st.error_reply(event.stanza, "cancel", "not-allowed"));
+  return true;
+end
+for _, address in ipairs({ "self", "bare" }) do
+  module:hook("iq-get/" .. address .. "/vcard-temp:vCard", get_vcard, 100);
+  module:hook("iq-set/" .. address .. "/vcard-temp:vCard", set_vcard, 100);
+end
+local function remote_vcard_access(event)
+  if event.origin.type ~= "c2s" or not event.stanza:get_child("vCard", "vcard-temp") or
+    jid.host(event.stanza.attr.to or "") == module.host or not event.stanza.attr.to then return; end
+  if event.stanza.attr.type == "set" then event.origin.send(st.error_reply(event.stanza, "auth", "forbidden")); return true; end
+  if event.stanza.attr.type == "get" and not bridge.operation(event, "vcard-access") then return true; end
+end
+module:hook("pre-iq/bare", remote_vcard_access, 100);
+module:hook("pre-iq/full", remote_vcard_access, 100);
+-- Replace client-supplied hashes with the authoritative shared profile hash.
+local function local_avatar_presence(event)
+  if event.origin.type ~= "c2s" or event.stanza.attr.type then return; end
+  local result = bridge.operation(event, "avatar-hash");
+  if not result then return true; end
+  event.stanza:remove_children("x", "vcard-temp:x:update");
+  event.stanza:tag("x", { xmlns = "vcard-temp:x:update" }):tag("photo"):text(result.hash):up():up();
+end
+module:hook("pre-presence/bare", local_avatar_presence, 100);
+module:hook("pre-presence/full", local_avatar_presence, 110);
+module:hook("pre-presence/host", local_avatar_presence, 100);
+local function remote_avatar_presence(event)
+  if event.origin.type ~= "s2sin" or event.stanza.attr.type then return; end
+  local update = event.stanza:get_child("x", "vcard-temp:x:update");
+  local photo = update and update:get_child_text("photo");
+  if photo ~= nil then bridge.operation(event, "avatar-refresh", { photo = photo }); end
+end
+module:hook("presence/bare", remote_avatar_presence, 100);
+module:hook("presence/full", remote_avatar_presence, 100);
+local avatar_cache_runner = async.runner(function(payload) bridge.request("/avatars", payload); end,
+  { error = function(_, err) module:log("warn", "Remote avatar cache failed: %s", err); end });
+local function request_avatar(item)
+  module:send_iq(st.iq({ type = "get"; from = item.requester; to = item.peer; id = uuid.generate() })
+    :tag("vCard", { xmlns = "vcard-temp" }), nil, 15):next(function(event)
+      if jid.bare(event.stanza.attr.from) ~= item.peer then return; end
+      local card = event.stanza:get_child("vCard", "vcard-temp");
+      if not card then return; end
+      local photo = card:get_child("PHOTO");
+      local image = photo and photo:get_child_text("BINVAL");
+      if image and #image > 2800000 then return; end
+      avatar_cache_runner:run({ peer = item.peer; requester = item.requester; attempt = item.attempt;
+        image = image and image ~= "" and image or json.null });
+    end, function() end);
+end
 -- MUC self-presence is routed through the user's host before final delivery.
 module:hook("presence/full", function(event)
   local stanza = event.stanza;
@@ -107,6 +178,19 @@ local runner = async.runner(function()
       local session = active[item.to];
       if session and not session.destroyed then session.send(bridge.message(item)); end
     else module:send(bridge.message(item)); end
+  end
+  for _, item in ipairs(result.avatar_requests or {}) do request_avatar(item); end
+  for _, profile in ipairs(result.profiles or {}) do
+    local bare_session = prosody.bare_sessions[profile.jid];
+    for _, session in pairs(bare_session and bare_session.sessions or {}) do
+      if session.presence and not session.destroyed then
+        local presence = st.clone(session.presence);
+        presence.attr.from = session.full_jid; presence.attr.to = nil;
+        presence:remove_children("x", "vcard-temp:x:update");
+        presence:tag("x", { xmlns = "vcard-temp:x:update" }):tag("photo"):text(profile.hash):up():up();
+        module:send(presence, session);
+      end
+    end
   end
   cursor = result.after;
   assert(cursor_store:set(nil, { after = cursor }));

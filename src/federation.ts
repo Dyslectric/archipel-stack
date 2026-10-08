@@ -71,6 +71,7 @@ export class Federation {
       )
       .run();
     store.federationHooks = {
+      profile: (user) => this.profileChanged(user),
       write: (user, channel) => {
         if (this.importing) return;
         if (channel.remote_actor)
@@ -202,6 +203,10 @@ export class Federation {
         type: "Person",
         preferredUsername: user.username,
         name: user.display_name,
+        icon: !user.banned && flags.some(f => user[f]) && this.store.avatarUrl(user.id) ? {
+          type: "Image", mediaType: this.store.avatarImage(user.id).mime,
+          url: `${this.config.baseUrl}/federation/avatars/${user.id}?v=${this.store.db.prepare("SELECT revision FROM user_avatars WHERE user_id=?").get(user.id)!.revision}`,
+        } : null,
       };
     } else {
       const channel = this.store.channel(id);
@@ -231,7 +236,7 @@ export class Federation {
       },
     };
   }
-  async actor(id: string): Promise<Doc> {
+  async actor(id: string, refresh = false): Promise<Doc> {
     this.ensureEnabled();
     const url = this.allowed(id);
     if (url.origin === this.config.baseUrl) {
@@ -245,7 +250,7 @@ export class Federation {
     const cache = this.store.db
       .prepare("SELECT * FROM federation_actors WHERE id=?")
       .get(id) as { document: string; fetched_at: number } | undefined;
-    if (cache && cache.fetched_at > Date.now() - 60000)
+    if (!refresh && cache && cache.fetched_at > Date.now() - 60000)
       return JSON.parse(cache.document) as Doc;
     const actor = await peerJson(url, this.config);
     if (
@@ -273,12 +278,36 @@ export class Federation {
         400,
         "Actor must use an RSA signing key of at least 2048 bits.",
       );
+    await this.syncAvatar(actor, refresh);
     this.store.db
       .prepare(
         "INSERT INTO federation_actors VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET document=excluded.document,fetched_at=excluded.fetched_at",
       )
       .run(id, JSON.stringify(actor), Date.now());
     return actor;
+  }
+  private async syncAvatar(actor: Doc, refresh = false) {
+    if (actor.type !== "Person") return;
+    if (!actor.icon) { this.store.cacheRemoteAvatar(actor.id, null, ""); return; }
+    try {
+      if (actor.icon.type !== "Image") return;
+      const url = this.allowed(actor.icon.url);
+      if (url.origin !== new URL(actor.id).origin) return;
+      const cached = this.store.db.prepare("SELECT source FROM remote_avatars WHERE peer=?").get(actor.id);
+      if (!refresh && cached?.source === url.href) return;
+      const image = await peerRequest(url, this.config, { accept: "image/png,image/jpeg,image/gif,image/webp" }, undefined, 2097152, 3000);
+      this.ensureEnabled(); this.allowed(actor.id);
+      this.store.cacheRemoteAvatar(actor.id, image.body.toString("base64"), url.href);
+    } catch { /* An unavailable or invalid optional image must not reject messages. */ }
+  }
+  private profileChanged(user: User) {
+    if (!this.enabled() || user.remote_actor || !flags.some(f => user[f])) return;
+    const recipients = (this.store.db.prepare(`
+      SELECT peer AS actor FROM direct_messages WHERE user_id=? AND peer LIKE 'http%'
+      UNION SELECT f.actor FROM federation_follows f JOIN messages m ON m.channel_id=f.channel_id WHERE m.author_id=? AND f.status='accepted'
+      UNION SELECT c.remote_actor AS actor FROM memberships m JOIN channels c ON c.id=m.channel_id WHERE m.user_id=? AND c.remote_actor IS NOT NULL
+    `).all(user.id, user.id, user.id) as { actor: string }[]).map(r => r.actor);
+    if (recipients.length) this.queue("Update", this.userActor(user), this.publicActor("users", user.id), recipients, "profile", user.id, null);
   }
   async authenticate(req: Request, rawBody?: Buffer) {
     this.ensureEnabled();
@@ -510,7 +539,11 @@ export class Federation {
     const existing = this.store.db
       .prepare("SELECT id FROM users WHERE remote_actor=?")
       .get(actor.id) as { id: string } | undefined;
-    if (existing) return this.store.user(existing.id);
+    if (existing) {
+      if (actor.type === "Person") this.store.db.prepare("UPDATE users SET display_name=? WHERE id=?")
+        .run(String(actor.name || actor.preferredUsername || "Remote member").slice(0, 80), existing.id);
+      return this.store.user(existing.id);
+    }
     const id = randomUUID(),
       stem = `${
         String(actor.preferredUsername || "remote")
@@ -1567,7 +1600,21 @@ export class Federation {
     const object = activity.object;
     let prepared: Awaited<ReturnType<Federation["prepareNote"]>> | undefined;
     let snapshot: Awaited<ReturnType<Federation["snapshot"]>> | undefined;
-    if (["Create", "Update"].includes(activity.type)) {
+    const profileUpdate = activity.type === "Update" && object?.type === "Person";
+    const profileRelay = activity.type === "Announce" && sender.type === "Group" && object?.type === "Update" && object.object?.type === "Person";
+    if (profileUpdate) {
+      if (sender.type !== "Person" || object.id !== sender.id)
+        throw new Problem(403, "Profile update must belong to its signing actor.");
+      // Refresh from the actor's own endpoint; a profile activity cannot replace keys.
+      await this.actor(sender.id, true);
+    } else if (profileRelay) {
+      if (object.actor !== object.object.id) throw new Problem(403, "Invalid profile author.");
+      const channel = this.store.db.prepare("SELECT id FROM channels WHERE remote_actor=?").get(sender.id) as { id: string } | undefined;
+      if (!channel) throw new Problem(403, "Unknown profile relay channel.");
+      const recipients = this.store.db.prepare("SELECT 1 FROM federation_subscriptions s JOIN users u ON u.id=s.user_id WHERE s.channel_id=? AND s.status='accepted' AND u.banned=0 AND u.admission_status='approved' AND u.federation_receive=1 AND u.federation_subscribe=1").get(channel.id);
+      if (!recipients) throw new Problem(403, "No permitted profile recipients.");
+      await this.actor(object.actor, true);
+    } else if (["Create", "Update"].includes(activity.type)) {
       if (object?.attributedTo !== sender.id || sender.type !== "Person")
         throw new Problem(
           403,
@@ -1615,7 +1662,20 @@ export class Federation {
           throw new Problem(409, "Conflicting activity.");
         return;
       }
-      if (activity.type === "Follow") {
+      if (profileUpdate || profileRelay) {
+        const author = profileUpdate ? sender.id : object.actor;
+        const cached = this.store.db.prepare("SELECT document FROM federation_actors WHERE id=?").get(author) as { document: string };
+        const remoteAuthor = this.remoteUser(JSON.parse(cached.document));
+        if (profileUpdate) {
+          // Notify other subscribers when a remote author changes their picture.
+          const channels = this.store.db.prepare("SELECT channel_id FROM federation_follows WHERE actor=? AND status='accepted'").all(sender.id) as { channel_id: string }[];
+          for (const entry of channels) {
+            const channel = this.store.channel(entry.channel_id);
+            const recipients = (this.store.db.prepare("SELECT actor FROM federation_follows WHERE channel_id=? AND status='accepted' AND actor<>?").all(channel.id, sender.id) as { actor: string }[]).map(r => r.actor);
+            if (channel.federation_enabled && recipients.length) this.queue("Announce", this.channelActor(channel), { type: "Update", actor: sender.id, object: { type: "Person", id: sender.id } }, recipients, "relay", remoteAuthor.id, channel.id);
+          }
+        }
+      } else if (activity.type === "Follow") {
         if (
           sender.type !== "Person" ||
           typeof object !== "string" ||
@@ -1877,6 +1937,10 @@ export class Federation {
       this.require(user!, "federation_subscribe");
       if (!this.store.role(channel!.id, user!.id))
         throw new Problem(403, "No longer subscribed.");
+    } else if (outgoing.purpose === "profile") {
+      this.store.active(user!.id);
+      if (!flags.some(f => user![f]) || this.store.isUserBlocked(user!.id, recipient))
+        throw new Problem(403, "Profile federation is disabled for this account.");
     } else if (outgoing.purpose === "direct") {
       this.require(user!, "federation_send");
       if (this.store.isUserBlocked(user!.id, recipient))

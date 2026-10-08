@@ -90,6 +90,7 @@ export async function peerRequest(
   headers: Record<string, string> = {},
   body?: string,
   maxBytes = 262144,
+  timeoutMs = 15000,
 ) {
   peerUrl(url.href, config);
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
@@ -119,7 +120,7 @@ export async function peerRequest(
           family: address.family,
           lookup: (_host, _options, done) =>
             done(null, address.address, address.family),
-          signal: AbortSignal.timeout(15000),
+          signal: AbortSignal.timeout(timeoutMs),
         },
         (response) => {
           if (

@@ -7,6 +7,36 @@ import { Store } from "../src/store.js";
 import { loadConfig, type Config } from "../src/config.js";
 import { createApp } from "../src/app.js";
 
+test("remote avatar endpoints require membership and current federation and block permissions", async t => {
+  const f = await application(t, { xmppDomain: "chat.example", xmppBridgeSecret: "s".repeat(43) });
+  const alice = browser(f.origin), bob = browser(f.origin);
+  await alice.login("alice"); const member = await bob.login("bob");
+  f.store.db.prepare("INSERT OR REPLACE INTO instance_settings VALUES('federation_enabled','true')").run();
+  f.store.db.prepare("UPDATE users SET federation_receive=1,federation_send=1 WHERE id=?").run(member.id);
+  const image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC1lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
+  const peers = ["xmpp:other@remote.example", "https://remote.example/actors/users/other"];
+  for (const peer of peers) {
+    f.store.cacheRemoteAvatar(peer, image, peer);
+    const path = f.store.peerInfo(peer).avatar_url!;
+    assert.equal((await fetch(f.origin + path)).status, 401);
+    const picture = await bob.request(path);
+    assert.equal(picture.status, 200);
+    assert.equal(picture.headers.get("content-type"), "image/png");
+    assert.deepEqual(Buffer.from(await picture.arrayBuffer()), Buffer.from(image, "base64"));
+    f.store.setUserBlock(f.store.user(member.id), peer, true);
+    assert.equal((await bob.request(path)).status, 403);
+    f.store.setUserBlock(f.store.user(member.id), peer, false);
+    f.store.db.prepare("INSERT INTO federation_blocks VALUES(?,'instance')").run("https://remote.example");
+    assert.equal((await bob.request(path)).status, 403);
+    f.store.db.prepare("DELETE FROM federation_blocks").run();
+    f.store.db.prepare("UPDATE instance_settings SET value='false' WHERE key='federation_enabled'").run();
+    assert.equal((await bob.request(path)).status, 403);
+    f.store.db.prepare("UPDATE instance_settings SET value='true' WHERE key='federation_enabled'").run();
+    f.store.cacheRemoteAvatar(peer, null, "");
+    assert.equal((await bob.request(path)).status, 404);
+  }
+});
+
 async function listen(t: TestContext) {
   const server = createServer();
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

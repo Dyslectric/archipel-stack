@@ -11,7 +11,7 @@ test("remote contact names are personal and cover DM history, sidebar and inbox 
   const alice = store.loginIdentity("https://id.example", "alice", "alice", []);
   const bob = store.loginIdentity("https://id.example", "bob", "bob", []);
   const peer = "xmpp:other@remote.test";
-  store.xmppHooks = {message() {}, direct() {}, access: () => ({incoming:true,outgoing:true,blocked:null})};
+  store.xmppHooks = {profile() {}, message() {}, direct() {}, access: () => ({incoming:true,outgoing:true,blocked:null})};
   store.db.prepare("INSERT INTO direct_messages(id,user_id,peer,direction,body,created_at) VALUES(?,?,?,'incoming','Hello',?)")
     .run("incoming", alice.id, peer, new Date().toISOString());
   assert.equal(store.setContactName(alice, peer, "  Remote Friend  ").display_name, "Remote Friend");
@@ -79,9 +79,9 @@ test("upgrading version seven preserves the archive and contact names survive re
   const peer = "xmpp:other@remote.test";
   store.db.prepare("INSERT INTO direct_messages(id,user_id,peer,direction,body,created_at) VALUES(?,?,?,'incoming','Saved history',?)")
     .run("saved", alice.id, peer, new Date().toISOString());
-  store.db.exec("DROP TABLE contact_names; PRAGMA user_version=7"); store.close();
+  store.db.exec("DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; PRAGMA user_version=7"); store.close();
   store = new Store(path);
-  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 9);
+  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 10);
   store.setContactName(alice, peer, "Saved name"); store.close();
   store = new Store(path);
   try {

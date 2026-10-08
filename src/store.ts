@@ -98,6 +98,7 @@ export class Store {
   db: DatabaseSync;
   private transactionDepth = 0;
   federationHooks?: {
+    profile: (user: User) => void;
     write: (user: User, channel: Channel) => void;
     message: (
       message: Message,
@@ -108,6 +109,7 @@ export class Store {
     direct: (user: User, peer: string) => DirectAccess;
   };
   xmppHooks?: {
+    profile: (user: User) => void;
     message: (message: Message, kind: "Create" | "Update" | "Delete") => void;
     direct: (id: string, sender: User, recipient: User) => void;
     access: (user: User, peer: string) => DirectAccess;
@@ -125,7 +127,7 @@ export class Store {
     const version = (
       this.db.prepare("PRAGMA user_version").get() as { user_version: number }
     ).user_version;
-    if (version > 9) throw new Error("Database is newer than this application");
+    if (version > 10) throw new Error("Database is newer than this application");
     if (version === 0)
       this.transaction(() =>
         this.db.exec(
@@ -191,6 +193,10 @@ export class Store {
     if (version < 9)
       this.transaction(() => this.db.exec(readFileSync(
         new URL("../migrations/009_xmpp_stream_ids.sql", import.meta.url), "utf8",
+      )));
+    if (version < 10)
+      this.transaction(() => this.db.exec(readFileSync(
+        new URL("../migrations/010_remote_avatars.sql", import.meta.url), "utf8",
       )));
   }
   close() {
@@ -1184,7 +1190,7 @@ export class Store {
   private peerIdentity(peer: string) {
     if (peer.startsWith("xmpp:") && /^xmpp:[^@/:\s]+@[a-z0-9.-]+$/.test(peer)) {
       const address = peer.slice(5);
-      return { peer, id: peer, username: address, display_name: address, avatar_url: null, remote: true };
+      return { peer, id: peer, username: address, display_name: address, avatar_url: this.remoteAvatarUrl(peer), remote: true };
     }
     const local = this.localPeer(peer);
     const user = (
@@ -1226,7 +1232,7 @@ export class Store {
       id: peer,
       username: `${name}@${host}`,
       display_name: String(actor.name || name).slice(0, 80),
-      avatar_url: null,
+      avatar_url: this.remoteAvatarUrl(peer),
       remote: true,
     };
   }
@@ -1607,6 +1613,8 @@ export class Store {
     return this.profile(this.user(user.id), true);
   }
   avatarUrl(userId: string) {
+    const user = this.user(userId);
+    if (user.remote_actor) return this.remoteAvatarUrl(user.remote_actor);
     const row = this.db
       .prepare("SELECT revision FROM user_avatars WHERE user_id=?")
       .get(userId) as { revision: string } | undefined;
@@ -1622,15 +1630,42 @@ export class Store {
   setAvatar(user: User, encoded: unknown) {
     this.active(user.id);
     const { image, mime } = decodeRasterImage(encoded, 2097152, "profile picture");
-    this.db
-      .prepare("INSERT INTO user_avatars VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET revision=excluded.revision,mime=excluded.mime,image=excluded.image")
-      .run(user.id, randomUUID(), mime, image);
+    this.transaction(() => {
+      this.db
+        .prepare("INSERT INTO user_avatars VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET revision=excluded.revision,mime=excluded.mime,image=excluded.image")
+        .run(user.id, randomUUID(), mime, image);
+      this.federationHooks?.profile(this.user(user.id));
+      this.xmppHooks?.profile(this.user(user.id));
+    });
     return this.profile(this.user(user.id), true);
   }
   removeAvatar(user: User) {
     this.active(user.id);
-    this.db.prepare("DELETE FROM user_avatars WHERE user_id=?").run(user.id);
+    this.transaction(() => {
+      this.db.prepare("DELETE FROM user_avatars WHERE user_id=?").run(user.id);
+      this.federationHooks?.profile(this.user(user.id));
+      this.xmppHooks?.profile(this.user(user.id));
+    });
     return this.profile(this.user(user.id), true);
+  }
+  remoteAvatarUrl(peer: string) {
+    const row = this.db.prepare("SELECT id,revision FROM remote_avatars WHERE peer=?").get(peer) as { id: string; revision: string } | undefined;
+    return row ? `/api/remote-avatars/${row.id}?v=${row.revision}` : null;
+  }
+  remoteAvatarImage(id: string) {
+    const row = this.db.prepare("SELECT peer,mime,image FROM remote_avatars WHERE id=?").get(id) as { peer: string; mime: string; image: Uint8Array } | undefined;
+    if (!row) throw new Problem(404, "Profile picture not found.");
+    return row;
+  }
+  cacheRemoteAvatar(peer: string, encoded: unknown, source: string) {
+    if (encoded === null) {
+      this.db.prepare("DELETE FROM remote_avatars WHERE peer=?").run(peer);
+      return;
+    }
+    const { image, mime } = decodeRasterImage(encoded, 2097152, "profile picture");
+    const revision = hash(image.toString("base64"));
+    this.db.prepare("INSERT INTO remote_avatars VALUES(?,?,?,?,?,?,?) ON CONFLICT(peer) DO UPDATE SET revision=excluded.revision,mime=excluded.mime,image=excluded.image,source=excluded.source,fetched_at=excluded.fetched_at")
+      .run(hash(peer), peer, revision, mime, image, source, Date.now());
   }
   directory(user: User) {
     this.active(user.id);

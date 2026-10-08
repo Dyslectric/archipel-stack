@@ -17,6 +17,10 @@ allow_registration = false
 c2s_require_encryption = true
 s2s_require_encryption = true
 s2s_secure_auth = true
+c2s_stanza_size_limit = 3145728
+s2s_stanza_size_limit = 3145728
+-- Bound stream traffic while allowing a 2 MiB photo to finish within IQ timeouts.
+limits = { c2s = { rate = "256kb/s"; burst = 13 }; s2s = { rate = "256kb/s"; burst = 13 } }
 certificates = ENV_XMPP_CERTS_PATH or "/etc/prosody/certs"
 -- Optional private PKI trust anchor; normal deployments use system trust roots.
 ssl = { cafile = ENV_XMPP_CA_FILE }

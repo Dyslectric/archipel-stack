@@ -28,6 +28,8 @@ const port = server.address().port;
 const alice = store.loginIdentity("urn:archipel:development", "alice", "alice", [], true);
 const bob = store.loginIdentity("urn:archipel:development", "bob", "bob", []);
 const a = xmpp.issue(alice, "Native desktop"), b = xmpp.issue(bob, "Native phone");
+const avatarImage = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
+store.setAvatar(alice, avatarImage);
 const room = store.createChannel(alice, { name: "general", mode: "timeline", visibility: "members", admission: "open" });
 const roomJid = "general@channels.chat.test";
 const clients = [];
@@ -76,6 +78,18 @@ try {
   assert.equal(phone.native.status, "online");
   console.log(`PASS TLS, SASL app-password authentication and resource binding on custom client port ${clientPort}`);
   await desktop.native.send(xml("presence")); await phone.native.send(xml("presence"));
+  const ownCard = await desktop.native.iqCaller.request(xml("iq", { type: "get" }, xml("vCard", { xmlns: "vcard-temp" })));
+  assert.equal(ownCard.getChild("vCard").getChild("PHOTO").getChildText("BINVAL"), avatarImage);
+  const largeAvatar = Buffer.concat([Buffer.from(avatarImage, "base64"), Buffer.alloc(300000)]).toString("base64");
+  await phone.native.iqCaller.request(xml("iq", { type: "set" }, xml("vCard", { xmlns: "vcard-temp" }, xml("PHOTO", {}, xml("TYPE", {}, "image/png"), xml("BINVAL", {}, largeAvatar)))));
+  assert.deepEqual(Buffer.from(store.avatarImage(bob.id).image), Buffer.from(largeAvatar, "base64"));
+  const largeCard = await desktop.native.iqCaller.request(xml("iq", { type: "get", to: b.jid }, xml("vCard", { xmlns: "vcard-temp" })));
+  assert.equal(largeCard.getChild("vCard").getChild("PHOTO").getChildText("BINVAL"), largeAvatar);
+  await assert.rejects(phone.native.iqCaller.request(xml("iq", { type: "set", to: a.jid }, xml("vCard", { xmlns: "vcard-temp" }))));
+  await phone.native.iqCaller.request(xml("iq", { type: "set" }, xml("vCard", { xmlns: "vcard-temp" })));
+  assert.equal(store.avatarUrl(bob.id), null);
+  await until(() => desktop.received.find(s => s.is("presence") && s.getChild("x", "vcard-temp:x:update")?.getChildText("photo")), "authoritative local avatar presence");
+  console.log("PASS native vCard reads, shared avatar writes/removals and presence hashes");
   await desktop.native.send(xml("presence", { to: `${roomJid}/Alice's phone`, id: "join-alice" }, xml("x", { xmlns: "http://jabber.org/protocol/muc" })));
   await phone.native.send(xml("presence", { to: `${roomJid}/bob`, id: "join-bob" }, xml("x", { xmlns: "http://jabber.org/protocol/muc" })));
   await until(() => phone.received.find(s => s.is("presence") && s.attrs.from === `${roomJid}/bob` && !s.attrs.type), "Bob room join");
@@ -126,7 +140,7 @@ data_path = "/var/lib/prosody"
 pidfile = "/var/run/prosody/prosody.pid"
 daemonize = false
 log = {{ levels = { min = "info" }, to = "console" }}
-modules_enabled = { "disco"; "roster"; "saslauth"; "tls"; "ping"; "offline" }
+modules_enabled = { "disco"; "roster"; "saslauth"; "tls"; "ping"; "offline"; "vcard" }
 authentication = "internal_hashed"
 c2s_require_encryption = true
 s2s_require_encryption = true
@@ -155,6 +169,7 @@ VirtualHost "remote.test"
   await until(() => desktop.received.find(s => s.attrs.id === "fed-denied" && s.attrs.type === "error"), "default federation rejection");
   app.locals.federation.setEnabled(alice, true);
   app.locals.federation.setPermissions(alice, alice.id, { federation_send: true, federation_receive: true, federation_subscribe: false, federation_post: false });
+  await peer.native.iqCaller.request(xml("iq", { type: "set" }, xml("vCard", { xmlns: "vcard-temp" }, xml("PHOTO", {}, xml("TYPE", {}, "image/png"), xml("BINVAL", {}, avatarImage)))));
   await desktop.native.send(xml("message", { type: "chat", to: "other@remote.test", id: "fed-native" }, xml("body", {}, "Hello to ordinary Prosody")));
   await until(() => {
     const rejected = desktop.received.find(s => s.attrs.type === "error" && s.getChildText("body") === "Hello to ordinary Prosody");
@@ -164,6 +179,16 @@ VirtualHost "remote.test"
   await peer.native.send(xml("message", { type: "chat", to: a.jid, id: "fed-reply" }, xml("body", {}, "Reply from ordinary Prosody")));
   await until(() => desktop.received.find(s => s.getChildText("body") === "Reply from ordinary Prosody"), "incoming s2s delivery", 15000);
   assert.equal(store.directHistory(alice, "xmpp:other@remote.test").messages.at(-1).body, "Reply from ordinary Prosody");
+  await until(() => store.peerInfo("xmpp:other@remote.test").avatar_url, "remote native avatar cached for browser", 15000);
+  const remoteCard = await peer.native.iqCaller.request(xml("iq", { type: "get", to: a.jid }, xml("vCard", { xmlns: "vcard-temp" })));
+  assert.equal(remoteCard.getChild("vCard").getChild("PHOTO").getChildText("BINVAL"), avatarImage);
+  await peer.native.iqCaller.request(xml("iq", { type: "set" }, xml("vCard", { xmlns: "vcard-temp" })));
+  await peer.native.send(xml("presence", { to: a.jid }, xml("x", { xmlns: "vcard-temp:x:update" }, xml("photo"))));
+  await until(() => !store.peerInfo("xmpp:other@remote.test").avatar_url, "remote avatar removal presence", 10000);
+  store.removeAvatar(alice);
+  const emptyCard = await peer.native.iqCaller.request(xml("iq", { type: "get", to: a.jid }, xml("vCard", { xmlns: "vcard-temp" })));
+  assert.equal(emptyCard.getChild("vCard").getChild("PHOTO"), undefined);
+  console.log("PASS bidirectional federated vCard pictures and avatar removal");
   console.log("PASS certificate-authenticated TLS federation with an ordinary Prosody peer");
   store.setUserBlock(bob, `${store.baseUrl}/actors/users/${alice.id}`, true);
   await desktop.native.send(xml("message", { to: b.jid, type: "chat", id: "blocked-dm" }, xml("body", {}, "Must not arrive")));
