@@ -136,6 +136,7 @@ export function chatFrame(view: HTMLElement) {
   view.innerHTML = `<div class="workspace"><aside class="sidebar" id="sidebar" aria-label="Conversations">
       <nav id="channel-list" aria-label="Your conversations"></nav>
       <a class="side-foot" href="#/channels">${icon("compass")}<span>Browse all channels</span></a>
+      <a class="side-foot" href="#/xmpp">${icon("globe")}<span>Join an XMPP room</span></a>
       <button type="button" class="side-foot" data-new-dm>${icon("pencil")}<span>New direct message</span></button></aside>
       <main class="conversation" id="main"><header class="channel-header"><div id="channel-heading"></div><div class="header-actions" id="channel-actions"></div></header>
       <div class="feed-wrap"><div id="message-list" class="feed" role="log" aria-label="Conversation" tabindex="-1"><div class="feed-inner"><div id="feed-top"></div><div id="rows"></div><div id="feed-empty"></div></div></div>

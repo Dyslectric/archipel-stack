@@ -17,19 +17,63 @@ settings, richer channel views, and the existing ActivityPub federation.
 | Local direct messages | Native clients and browser share history and blocks |
 | XMPP server-to-server direct messages | Certificate-authenticated TLS; instance federation and per-user send/receive grants required |
 | XEP-0045 rooms | Local timeline channels; authorized join, presence, chat, discovery |
+| Foreign XEP-0045 rooms | Native client participation; browser join/leave, subjects, speaking roles, live messages and bounded join history |
 | XEP-0313 MAM v2, XEP-0059 paging | Personal and room archives; bounded pages, timestamps, direct peer filter, before/after cursors |
 | XEP-0359 stanza IDs | Stable archive IDs; native stanza IDs and origin IDs retained |
 | XEP-0308 corrections | Timeline messages; author and room checks |
 | XEP-0054 vCard photos, XEP-0153 avatar presence | Shared profile pictures; native reads/uploads/removals and federated picture caching |
 | Room configuration, affiliations, kicks, invitations | Managed through Archipel; native management commands rejected |
 | Offline messages | Retrieve through MAM after reconnect; no independent Prosody offline queue |
-| Topics, nested threads, attachments, OMEMO, remote room participation | Not exposed by this profile |
+| Topics, nested threads, attachments, OMEMO in the browser | Not exposed by this profile |
 
 This is a defined XMPP interoperability profile, not a claim that every XEP or
 every client's optional feature is supported. Remote users can exchange direct
-messages with local accounts; joining Archipel rooms from a foreign home server
-and joining foreign rooms with an Archipel account are not currently supported.
-Room nicknames are assigned from the local account's stable XMPP node.
+messages with local accounts and Archipel accounts can join foreign rooms.
+Joining Archipel rooms from a foreign home server is still unsupported.
+Local-room nicknames are assigned from the account's stable XMPP node; foreign
+rooms use a chosen nickname, subject to the hosting room's rules.
+
+## Join a room hosted elsewhere
+
+Open **Channels → Join an XMPP room** (or the same link in the conversation
+sidebar). Enter a bare room address, such as `jdev@muc.xmpp.org`, and a nickname.
+The room appears in the sidebar. Archipel shows the join state, room subject,
+nickname and role, and displays errors such as nickname conflicts or a required
+invitation. Use **Leave room** to stop participating; saved history stays private
+to your account. Use **Join again** after an error or removal.
+
+The instance must have XMPP and federation enabled. The account needs receiving
+and subscription grants to join/read, and sending and posting grants to write.
+The hosting room must also grant a participant or moderator role. Instance,
+identity and personal room blocks apply on every receive/send and archive read.
+Revoking access removes active browser and native occupants and cancels pending
+browser posts.
+
+Prosody maintains a separate browser resource for each subscription and rejoins
+after a restart. Browser subscriptions continue receiving while the browser is
+closed. Join history is requested with limits of 100 messages and 100,000 XML
+characters; the remote room chooses what it supplies. Older *locally received*
+messages can be paged in the browser. This does not backfill the remote MAM
+archive or guarantee messages sent while disconnected. Replayed history with
+room-issued stanza IDs, sender-scoped message IDs or delayed timestamps is
+deduplicated. Authors remain `room@service/nickname`, without inferring their
+real identities from room nicknames.
+
+Browser messages show **Queued**, then **Awaiting room confirmation**, and are
+confirmed when reflected by the room. Errors are shown separately. Dispatches
+are recorded before routing; uncertain sends are not automatically retried after
+an adapter crash, to avoid duplicate posts. If a confirmation never arrives,
+check the room before sending again.
+
+Native clients can join using **Settings → XMPP clients** credentials and their
+client's usual group-chat dialog, including password-protected rooms and remote
+MAM where supported by the room/client. They maintain their own room sessions;
+opening a native room does not create a browser subscription. The browser
+supports rooms that accept an ordinary presence join (including members-only
+rooms when the account already has membership); password entry, room management,
+occupant private messages, corrections, attachments and OMEMO are not exposed in
+the browser view. Foreign content is not mirrored into local or ActivityPub
+channels or the personal direct-message archive.
 
 ## Configure a deployment
 

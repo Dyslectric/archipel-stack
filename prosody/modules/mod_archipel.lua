@@ -61,6 +61,7 @@ module:hook("pre-presence/full", local_avatar_presence, 110);
 module:hook("pre-presence/host", local_avatar_presence, 100);
 local function remote_avatar_presence(event)
   if event.origin.type ~= "s2sin" or event.stanza.attr.type then return; end
+  if event.stanza:get_child("x", "http://jabber.org/protocol/muc#user") then return; end
   local update = event.stanza:get_child("x", "vcard-temp:x:update");
   local photo = update and update:get_child_text("photo");
   if photo ~= nil then bridge.operation(event, "avatar-refresh", { photo = photo }); end
@@ -138,12 +139,6 @@ module:hook("pre-stanza", function(event)
     end
   end
 end, 1000);
-module:hook("pre-presence/full", function(event)
-  local target_host = jid.host(event.stanza.attr.to or "");
-  if target_host ~= module.host and target_host ~= "channels." .. module.host then
-    event.origin.send(st.error_reply(event.stanza, "cancel", "feature-not-implemented", "Foreign rooms are not supported.")); return true;
-  end
-end, 100);
 
 local busy = false;
 local runner = async.runner(function()

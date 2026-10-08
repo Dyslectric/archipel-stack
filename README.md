@@ -57,7 +57,9 @@ usernames match. New instances start without fabricated channels or conversation
   and propagation of changes and removals.
 - Prosody XMPP integration: native client login with revocable app passwords,
   direct messages, local timeline MUC rooms, authorized MAM history, and TLS
-  server-to-server direct messaging. See [XMPP setup and supported profile](docs/xmpp.md).
+  server-to-server direct messaging. Join foreign XMPP rooms from the browser
+  or a native client, with private browser histories and room role checks.
+  See [XMPP setup and supported profile](docs/xmpp.md).
 
 The server is Express/TypeScript; the browser uses TypeScript and Vite. Runtime
 files live in the persistent Docker volume at `/app/data`. Preserve the database and `BASE_URL` across restarts: they

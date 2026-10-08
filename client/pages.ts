@@ -69,7 +69,7 @@ export function renderAdmission() {
 export function showChannels(view: HTMLElement, create: boolean) {
   view.innerHTML = `<div class="page"><div class="page-inner directory"><div class="feed-head"><div><h1>Channels</h1><p class="muted small">Everything you can see on ${esc(state.session.instance)}. Remote channels are under <a href="#/settings/federation/remote">Federation</a>.</p></div></div>
     <div class="layout"><section><label class="search-field">${icon("search")}<input type="search" id="channel-search" placeholder="Search channels" aria-label="Search channels"></label><ul class="plain browse-list" id="browse-list"></ul></section>
-    <aside><section class="card" id="new-channel"><h2>Create a channel</h2><form class="stack">
+    <aside><section class="card"><h2>XMPP rooms</h2><p class="muted">Join a conversation hosted on another XMPP server.</p><a class="button secondary" href="#/xmpp">Join an XMPP room</a></section><section class="card" id="new-channel"><h2>Create a channel</h2><form class="stack">
       <label>Channel name<span class="input-prefix"><span>#</span><input name="name" required minlength="2" maxlength="40" pattern="[a-zA-Z0-9][a-zA-Z0-9_-]{1,39}" placeholder="general" autocomplete="off"></span></label>
       <label>Description<textarea name="description" maxlength="500" rows="2" placeholder="What is it for?"></textarea></label>
       <label>Conversation style<select name="mode"><option value="timeline">Timeline: one running conversation</option><option value="topical">Topics: messages grouped by subject</option><option value="threaded">Threads: posts with nested replies</option></select></label>

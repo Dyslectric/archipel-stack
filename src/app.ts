@@ -355,6 +355,11 @@ export function createApp(config: Config, store: Store) {
     res.json(store.emojiCatalog(user(res))),
   );
   app.get("/api/xmpp", (_req, res) => res.json(xmpp.status(user(res))));
+  app.get("/api/xmpp/rooms", (_req, res) => res.json(xmpp.remoteRooms.list(user(res))));
+  app.post("/api/xmpp/rooms", (req, res) => res.status(201).json(xmpp.remoteRooms.join(user(res), req.body || {})));
+  app.delete("/api/xmpp/rooms/:id", (req, res) => res.json(xmpp.remoteRooms.leave(user(res), String(req.params.id))));
+  app.get("/api/xmpp/rooms/:id/messages", (req, res) => res.json(xmpp.remoteRooms.history(user(res), String(req.params.id), req.query.before)));
+  app.post("/api/xmpp/rooms/:id/messages", (req, res) => res.status(201).json(xmpp.remoteRooms.post(user(res), String(req.params.id), req.body?.body)));
   app.post("/api/xmpp/credentials", (req, res) =>
     res.status(201).json(xmpp.issue(user(res), req.body?.label)),
   );
@@ -498,7 +503,7 @@ export function createApp(config: Config, store: Store) {
     );
     res.status(202).json({ peer: sent.peer, queued: true });
   });
-  app.get("/api/overview", (_req, res) => res.json(store.overview(user(res))));
+  app.get("/api/overview", (_req, res) => res.json({ ...store.overview(user(res)), xmpp_rooms: xmpp.remoteRooms.list(user(res)) }));
   app.post("/api/user-blocks", (req, res) =>
     res.json(store.setUserBlock(user(res), req.body?.peer, req.body?.blocked)),
   );

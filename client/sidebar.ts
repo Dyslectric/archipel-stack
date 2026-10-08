@@ -242,7 +242,8 @@ export function renderSidebar() {
   }
   const list = document.querySelector("#channel-list");
   if (!list || drag) return;
-  const next = sectionHtml("dms") + sectionHtml("channels");
+  const next = sectionHtml("dms") + sectionHtml("channels") +
+    (state.xmppRooms.some(r => r.desired) ? `<section class="side-section"><div class="side-heading">XMPP rooms</div>${state.xmppRooms.filter(r => r.desired).map(r => `<a class="channel-link${location.hash === `#/xmpp/${r.id}` ? " on" : ""}" href="#/xmpp/${r.id}" title="${esc(r.room)}">${icon("globe")}<span class="grow">${esc(r.room)}</span></a>`).join("")}</section>` : "");
   if (next === html && list.childElementCount) return;
   list.innerHTML = html = next;
 }

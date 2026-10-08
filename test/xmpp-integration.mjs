@@ -34,7 +34,10 @@ const room = store.createChannel(alice, { name: "general", mode: "timeline", vis
 const roomJid = "general@channels.chat.test";
 const clients = [];
 const execute = promisify(execFile);
-const docker = async (...args) => (await execute("docker", args, { encoding: "utf8", timeout: 60000 })).stdout.trim();
+const docker = async (...args) => {
+  const result = await execute("docker", args, { encoding: "utf8", timeout: 60000 });
+  return (result.stdout + (args[0] === "logs" ? result.stderr : "")).trim();
+};
 async function until(fn, label, timeout = 10000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) { const value = fn(); if (value) return value; await delay(50); }
@@ -64,7 +67,7 @@ try {
     "--mount", `type=bind,src=${join(temporary, "local.cfg.lua")},dst=/etc/prosody/prosody.cfg.lua,readonly`,
     "--mount", `type=bind,src=${resolve("prosody/modules")},dst=/etc/prosody/archipel-modules,readonly`,
     "--entrypoint", "sh", image, "-c",
-    'mkdir -p /tmp/test-certs; openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/test-certs/chat.test.key -out /tmp/test-certs/chat.test.crt -days 1 -subj /CN=chat.test -addext subjectAltName=DNS:chat.test,DNS:channels.chat.test,DNS:remote.test >/dev/null 2>&1 && chown -R prosody:prosody /tmp/test-certs && exec /entrypoint.sh prosody');
+    'mkdir -p /tmp/test-certs; test -f /tmp/test-certs/chat.test.crt || openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/test-certs/chat.test.key -out /tmp/test-certs/chat.test.crt -days 1 -subj /CN=chat.test -addext subjectAltName=DNS:chat.test,DNS:channels.chat.test,DNS:remote.test,DNS:muc.remote.test >/dev/null 2>&1 && chown -R prosody:prosody /tmp/test-certs && exec /entrypoint.sh prosody');
   xmppPort = Number(JSON.parse(await docker("inspect", name))[0].NetworkSettings.Ports[`${clientPort}/tcp`][0].HostPort);
   assert.equal(xmpp.status(alice).port, clientPort);
   await delay(1500);
@@ -151,16 +154,18 @@ unbound = { resolvconf = true; hoststxt = true; options = { ["domain-insecure"] 
 http_ports = {}
 https_ports = {}
 VirtualHost "remote.test"
+Component "muc.remote.test" "muc"
+  restrict_room_creation = false
 `);
   const remotePassword = randomToken();
-  await docker("run", "--detach", "--rm", "--name", remoteName, "--network", network, "--network-alias", "remote.test",
+  await docker("run", "--detach", "--rm", "--name", remoteName, "--network", network, "--network-alias", "remote.test", "--network-alias", "muc.remote.test",
     "--publish", "127.0.0.1::5222", "--env", `TEST_REMOTE_PASSWORD=${remotePassword}`,
     "--mount", `type=bind,src=${temporary},dst=/test,readonly`, "--entrypoint", "sh", image, "-c",
     'cp /test/remote.cfg.lua /etc/prosody/prosody.cfg.lua && mkdir /tmp/peer-certs && cp /test/remote.test.crt /test/remote.test.key /tmp/peer-certs/ && chown -R prosody:prosody /tmp/peer-certs && prosodyctl register other remote.test "$TEST_REMOTE_PASSWORD" && exec /entrypoint.sh prosody');
   await delay(1500);
   const remotePort = Number(JSON.parse(await docker("inspect", remoteName))[0].NetworkSettings.Ports["5222/tcp"][0].HostPort);
   const remoteIp = Object.values(JSON.parse(await docker("inspect", remoteName))[0].NetworkSettings.Networks)[0].IPAddress;
-  writeFileSync(join(temporary, "local.cfg.lua"), `unbound = { resolvconf = true; hoststxt = true; options = { ["domain-insecure"] = "test"; ["local-data"] = "remote.test. IN A ${remoteIp}" } }\n` + readFileSync(resolve("prosody/prosody.cfg.lua"), "utf8"));
+  writeFileSync(join(temporary, "local.cfg.lua"), `unbound = { resolvconf = true; hoststxt = true; options = { ["domain-insecure"] = "test"; ["local-zone"] = "remote.test. redirect"; ["local-data"] = "remote.test. IN A ${remoteIp}" } }\n` + readFileSync(resolve("prosody/prosody.cfg.lua"), "utf8"));
   await docker("exec", name, "sh", "-c", 'kill -HUP "$(cat /var/run/prosody/prosody.pid)"');
   await delay(500);
   const peer = account({ jid: "other@remote.test", password: remotePassword }, "ordinary-client", "remote.test", remotePort);
@@ -190,6 +195,48 @@ VirtualHost "remote.test"
   assert.equal(emptyCard.getChild("vCard").getChild("PHOTO"), undefined);
   console.log("PASS bidirectional federated vCard pictures and avatar removal");
   console.log("PASS certificate-authenticated TLS federation with an ordinary Prosody peer");
+  // Foreign MUCs use an ordinary peer, including browser resources without c2s sessions.
+  app.locals.federation.setPermissions(alice, alice.id, { federation_send: true, federation_receive: true, federation_subscribe: true, federation_post: true });
+  const foreignRoom = "lounge@muc.remote.test";
+  await peer.native.send(xml("presence", { to: `${foreignRoom}/host` }, xml("x", { xmlns: "http://jabber.org/protocol/muc" })));
+  await until(() => peer.received.find(s => s.is("presence") && s.attrs.from === `${foreignRoom}/host`), "foreign room creation");
+  await peer.native.iqCaller.request(xml("iq", { type: "set", to: foreignRoom }, xml("query", { xmlns: "http://jabber.org/protocol/muc#owner" }, xml("x", { xmlns: "jabber:x:data", type: "submit" }))));
+  await peer.native.send(xml("message", { to: foreignRoom, type: "groupchat", id: "before-join" }, xml("body", {}, "History from the foreign room")));
+  const subscription = xmpp.remoteRooms.join(alice, { room: foreignRoom, nick: "alice-browser" });
+  await until(() => xmpp.remoteRooms.list(alice).find(r => r.id === subscription.id)?.state === "joined", "browser external room join", 15000);
+  await until(() => xmpp.remoteRooms.history(alice, subscription.id).messages.some(m => m.body === "History from the foreign room"), "foreign room join history");
+  await peer.native.send(xml("message", { to: foreignRoom, type: "groupchat", id: "foreign-live" }, xml("body", {}, "Live foreign room message")));
+  await until(() => xmpp.remoteRooms.history(alice, subscription.id).messages.some(m => m.body === "Live foreign room message"), "foreign live archive");
+  const outgoing = xmpp.remoteRooms.post(alice, subscription.id, "Browser posting to the foreign room");
+  await until(() => peer.received.find(s => s.getChildText("body") === "Browser posting to the foreign room"), "browser foreign post");
+  await until(() => xmpp.remoteRooms.history(alice, subscription.id).messages.find(m => m.id === outgoing.id)?.status === "confirmed", "room echo confirmation");
+  assert.equal(xmpp.remoteRooms.history(alice, subscription.id).messages.filter(m => m.body === "Browser posting to the foreign room").length, 1);
+  await desktop.native.send(xml("presence", { to: `${foreignRoom}/alice-native`, id: "native-foreign-join" }, xml("x", { xmlns: "http://jabber.org/protocol/muc" })));
+  await until(() => desktop.received.find(s => s.is("presence") && s.attrs.from === `${foreignRoom}/alice-native` && !s.attrs.type), "native foreign join");
+  await desktop.native.send(xml("message", { to: foreignRoom, type: "groupchat", id: "native-foreign-post" }, xml("body", {}, "Native foreign room message")));
+  await until(() => peer.received.find(s => s.getChildText("body") === "Native foreign room message"), "native foreign post");
+  await until(() => desktop.received.find(s => s.getChildText("body") === "Native foreign room message" && s.attrs.type === "groupchat"), "native foreign echo");
+  await peer.native.send(xml("message", { to: foreignRoom, type: "groupchat" }, xml("subject", {}, "Foreign room subject")));
+  await until(() => xmpp.remoteRooms.list(alice).find(r => r.id === subscription.id)?.subject === "Foreign room subject", "foreign room subject");
+  await peer.native.iqCaller.request(xml("iq", { type: "set", to: foreignRoom }, xml("query", { xmlns: "http://jabber.org/protocol/muc#admin" }, xml("item", { nick: "alice-browser", role: "visitor" }))));
+  await until(() => xmpp.remoteRooms.list(alice).find(r => r.id === subscription.id)?.role === "visitor", "foreign room speaking role change");
+  assert.throws(() => xmpp.remoteRooms.post(alice, subscription.id, "Visitor cannot post"));
+  await peer.native.iqCaller.request(xml("iq", { type: "set", to: foreignRoom }, xml("query", { xmlns: "http://jabber.org/protocol/muc#admin" }, xml("item", { nick: "alice-browser", role: "participant" }))));
+  await until(() => xmpp.remoteRooms.list(alice).find(r => r.id === subscription.id)?.can_post, "foreign speaking role restored");
+  xmpp.remoteRooms.leave(alice, subscription.id);
+  await until(() => peer.received.find(s => s.is("presence") && s.attrs.from === `${foreignRoom}/alice-browser` && s.attrs.type === "unavailable"), "browser foreign leave");
+  await desktop.native.send(xml("presence", { to: `${foreignRoom}/alice-native`, type: "unavailable" }));
+  xmpp.remoteRooms.join(alice, { room: foreignRoom, nick: "host" });
+  await until(() => xmpp.remoteRooms.list(alice).find(r => r.id === subscription.id)?.state === "error", "foreign nickname conflict");
+  assert.match(xmpp.remoteRooms.list(alice).find(r => r.id === subscription.id).error, /conflict/);
+  xmpp.remoteRooms.join(alice, { room: foreignRoom, nick: "alice-browser" });
+  await until(() => xmpp.remoteRooms.list(alice).find(r => r.id === subscription.id)?.state === "joined", "rejoin after conflict");
+  app.locals.federation.setPermissions(alice, alice.id, { federation_send: true, federation_receive: false, federation_subscribe: true, federation_post: true });
+  const unavailableCount = peer.received.filter(s => s.is("presence") && s.attrs.from === `${foreignRoom}/alice-browser` && s.attrs.type === "unavailable").length;
+  await until(() => peer.received.filter(s => s.is("presence") && s.attrs.from === `${foreignRoom}/alice-browser` && s.attrs.type === "unavailable").length > unavailableCount, "foreign policy revocation evicts browser");
+  app.locals.federation.setPermissions(alice, alice.id, { federation_send: true, federation_receive: true, federation_subscribe: true, federation_post: true });
+  xmpp.remoteRooms.leave(alice, subscription.id);
+  console.log("PASS foreign MUC joins, history, live messages, confirmed posts, subjects, roles, conflicts, leave and policy revocation");
   store.setUserBlock(bob, `${store.baseUrl}/actors/users/${alice.id}`, true);
   await desktop.native.send(xml("message", { to: b.jid, type: "chat", id: "blocked-dm" }, xml("body", {}, "Must not arrive")));
   await until(() => desktop.received.find(s => s.attrs.id === "blocked-dm" && s.attrs.type === "error"), "blocked DM rejection");
@@ -203,8 +250,20 @@ VirtualHost "remote.test"
   xmpp.revoke(bob, b.id);
   await until(() => phone.native.status !== "online", "credential disconnect");
   console.log("PASS personal blocks, owner protection, membership removal, archive denial and credential disconnect");
+  xmpp.remoteRooms.join(alice, { room: foreignRoom, nick: "alice-browser" });
+  await until(() => xmpp.remoteRooms.list(alice).find(r => r.id === subscription.id)?.state === "joined", "join before adapter restart");
+  const historyCount = xmpp.remoteRooms.history(alice, subscription.id).messages.length;
+  const presenceCount = peer.received.filter(s => s.is("presence") && s.attrs.from === `${foreignRoom}/alice-browser` && !s.attrs.type).length;
+  await docker("restart", "--time", "1", name);
+  await until(() => peer.received.filter(s => s.is("presence") && s.attrs.from === `${foreignRoom}/alice-browser` && !s.attrs.type).length > presenceCount && xmpp.remoteRooms.list(alice).find(r => r.id === subscription.id)?.state === "joined", "persistent browser room rejoins after Prosody restart", 20000);
+  await peer.native.send(xml("message", { to: foreignRoom, type: "groupchat", id: "after-restart" }, xml("body", {}, "Live after adapter restart")));
+  await until(() => xmpp.remoteRooms.history(alice, subscription.id).messages.some(m => m.body === "Live after adapter restart"), "room live delivery after restart", 15000);
+  assert.equal(xmpp.remoteRooms.history(alice, subscription.id).messages.filter(m => m.body === "History from the foreign room").length, 1);
+  assert.ok(xmpp.remoteRooms.history(alice, subscription.id).messages.length >= historyCount);
+  xmpp.remoteRooms.leave(alice, subscription.id);
+  console.log("PASS persistent browser subscription reconnects after adapter restart without replaying duplicate history");
 } catch (error) {
-  try { console.error((await docker("logs", name)).split("\n").filter(line => /^s2s|remote\.test|\serror\s|Client disconnected|stream:error/.test(line)).join("\n")); } catch { /* Container may already be gone. */ }
+  try { console.error(await docker("logs", "--tail", "100", name)); } catch (logsError) { console.error("Local logs unavailable", logsError.message); }
   try { console.error(await docker("logs", remoteName)); } catch { /* Peer may not be started. */ }
   throw error;
 } finally {

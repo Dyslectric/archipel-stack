@@ -38,7 +38,7 @@ archipel_api_url = ENV_ARCHIPEL_API_URL or "http://archipel:8788/internal/xmpp"
 archipel_api_secret = Lua.assert(ENV_XMPP_BRIDGE_SECRET, "XMPP_BRIDGE_SECRET is required")
 archipel_domain = domain
 VirtualHost (domain)
-  modules_enabled = { "archipel" }
+  modules_enabled = { "archipel"; "archipel_remote_rooms" }
 Component ("channels." .. domain) "muc"
   modules_enabled = { "archipel_muc" }
   modules_disabled = { "muc_mam" }

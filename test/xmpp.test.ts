@@ -243,10 +243,10 @@ test("version 8 migration preserves native IDs and archive correction references
   const room = store.createChannel(alice, { name: "legacy", mode: "timeline", visibility: "members", admission: "open" });
   const input = { from: `${credential.jid}/desktop`, credential: credential.id, operation: "post", to: `legacy@${xmpp.rooms}`, id: "old-id", body: "Old content" };
   const result = xmpp.operation(input) as { id: string };
-  store.db.exec("DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP INDEX xmpp_message_ids_sender; ALTER TABLE xmpp_message_ids DROP COLUMN scope; CREATE UNIQUE INDEX legacy_stanza_ids ON xmpp_message_ids(sender,stanza_id); PRAGMA user_version=8");
+  store.db.exec("DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP INDEX xmpp_message_ids_sender; ALTER TABLE xmpp_message_ids DROP COLUMN scope; CREATE UNIQUE INDEX legacy_stanza_ids ON xmpp_message_ids(sender,stanza_id); PRAGMA user_version=8");
   store.close(); store = new Store(path); xmpp = new Xmpp(store, config);
   t.after(() => { store.close(); rmSync(directory, { recursive: true, force: true }); });
-  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 10);
+  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 11);
   assert.equal(xmpp.archive(alice, { room: input.to }).messages[0].stanza_id, "old-id");
   xmpp.operation({ ...input, stream: "new-stream", id: "new-id", replace: "old-id", body: "Migrated correction" });
   assert.equal(store.message(result.id).body, "Migrated correction");

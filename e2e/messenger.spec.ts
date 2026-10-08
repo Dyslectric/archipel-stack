@@ -37,6 +37,7 @@ async function openChannel(page: Page, name: string) {
   await expect(page.locator("#channel-heading strong")).toHaveText(name);
 }
 const openChat = (page: Page) => page.locator("[data-nav=chat]").click();
+
 // Settings are pages: open one from the list on the left.
 const section = (page: Page, name: string) =>
   page
@@ -928,4 +929,53 @@ test("XMPP app passwords are shown once, retained per account and revocable", as
   await page.getByRole("button", { name: "Revoke", exact: true }).click();
   await expect(page.getByText("No active app passwords.")).toBeVisible();
   await context.close();
+});
+
+test("external XMPP room browser flow joins, renders safe content, posts and follows room roles", async ({ page, browser }, testInfo) => {
+  await login(page);
+  const session = await (await page.request.get("/api/session")).json();
+  const headers = { "X-CSRF-Token": session.csrf, Origin: "http://127.0.0.1:8790" };
+  expect((await page.request.patch("/api/admin/federation", { headers, data: { enabled: true } })).ok()).toBeTruthy();
+  expect((await page.request.patch(`/api/admin/users/${session.user.id}/federation`, { headers, data: {
+    federation_receive: true, federation_subscribe: true, federation_send: true, federation_post: true,
+  } })).ok()).toBeTruthy();
+  await page.locator("#browse").click();
+  await page.getByRole("link", { name: "Join an XMPP room", exact: true }).click();
+  await page.getByLabel("Room address").fill("browser-test@muc.remote.example");
+  await page.getByLabel("Nickname", { exact: true }).fill("alice-browser");
+  await page.getByRole("button", { name: "Join room", exact: true }).click();
+  await expect(page.locator("#channel-heading")).toContainText("browser-test@muc.remote.example");
+  await expect(page.locator("#channel-heading")).toContainText("joining");
+  const roomId = page.url().split("/xmpp/")[1];
+  const adapterHeaders = { Authorization: "Bearer browser-test-bridge-secret-with-43-characters-minimum" };
+  const sync = await (await page.request.post("/internal/xmpp/remote-rooms/sync", { headers: adapterHeaders, data: {} })).json();
+  const occupant = sync.desired.find((r: { room: string }) => r.room === "browser-test@muc.remote.example");
+  const receive = async (data: Record<string, unknown>) => {
+    expect((await page.request.post("/internal/xmpp/remote-rooms/receive", {
+      headers: adapterHeaders, data: { session: occupant.session, from: `${occupant.room}/alice-browser`, ...data },
+    })).ok()).toBeTruthy();
+  };
+  await receive({ kind: "state", state: "joined", role: "participant" });
+  await receive({ kind: "subject", subject: "A room hosted elsewhere" });
+  await receive({ kind: "message", from: `${occupant.room}/host`, id: "foreign-1", body: '<img src=x onerror="window.archipelUnsafe=true">' });
+  await expect(page.locator("#composer-area textarea")).toBeVisible();
+  await expect(page.locator("#feed-top")).toContainText("A room hosted elsewhere");
+  await expect(page.locator(".message-body")).toContainText("<img src=x");
+  expect(await page.evaluate(() => (window as unknown as { archipelUnsafe?: boolean }).archipelUnsafe)).toBeUndefined();
+  await page.getByRole("textbox", { name: "Message", exact: true }).fill("Hello from the browser");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.locator(".xmpp-message").filter({ hasText: "Hello from the browser" })).toContainText("Queued");
+  await page.reload();
+  await expect(page.locator(".message-body").filter({ hasText: "Hello from the browser" })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("external-room.png"), fullPage: true });
+  const otherContext = await browser.newContext(), bob = await otherContext.newPage();
+  await login(bob, "bob");
+  expect(await (await bob.request.get("/api/xmpp/rooms")).json()).toEqual([]);
+  expect((await bob.request.get(`/api/xmpp/rooms/${roomId}/messages`)).status()).toBe(404);
+  await otherContext.close();
+  await receive({ kind: "state", state: "joined", role: "visitor" });
+  await expect(page.locator("#composer-area")).toContainText("reading only");
+  await expect(page.getByRole("button", { name: "Send message" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Leave room", exact: true }).click();
+  await expect(page.locator("#channel-heading")).toContainText("left");
 });

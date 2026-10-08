@@ -127,7 +127,7 @@ export class Store {
     const version = (
       this.db.prepare("PRAGMA user_version").get() as { user_version: number }
     ).user_version;
-    if (version > 10) throw new Error("Database is newer than this application");
+    if (version > 11) throw new Error("Database is newer than this application");
     if (version === 0)
       this.transaction(() =>
         this.db.exec(
@@ -197,6 +197,10 @@ export class Store {
     if (version < 10)
       this.transaction(() => this.db.exec(readFileSync(
         new URL("../migrations/010_remote_avatars.sql", import.meta.url), "utf8",
+      )));
+    if (version < 11)
+      this.transaction(() => this.db.exec(readFileSync(
+        new URL("../migrations/011_xmpp_remote_rooms.sql", import.meta.url), "utf8",
       )));
   }
   close() {

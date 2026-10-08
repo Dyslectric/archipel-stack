@@ -67,10 +67,16 @@ export interface SideSection {
 export type SideKind = "dms" | "channels";
 export type Layout = Record<SideKind, SideSection>;
 export interface Overview {
+  xmpp_rooms: XmppRoom[];
   dms: Conversation[];
   unread: Record<string, number>;
   layout: Layout | null;
   user_blocks: string[];
+}
+export interface XmppRoom {
+  id: string; room: string; nick: string; desired: boolean; state: string;
+  role: string; subject: string; error: string | null; blocked: string | null;
+  can_post: boolean; post_blocked: string | null;
 }
 export interface Message {
   id: string;
@@ -107,6 +113,7 @@ export const state = {
   channels: [] as Channel[],
   emojis: [] as CustomEmoji[],
   dms: [] as Conversation[],
+  xmppRooms: [] as XmppRoom[],
   // New messages per conversation: a channel's id, or dm:<peer>.
   unread: {} as Record<string, number>,
   layout: null as Layout | null,

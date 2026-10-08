@@ -120,6 +120,34 @@ function browser(origin: string) {
   };
 }
 
+test("external room HTTP APIs require session, CSRF, ownership and private adapter authentication", async t => {
+  const f = await application(t, { xmppDomain: "chat.example", xmppBridgeSecret: "s".repeat(43) });
+  const alice = browser(f.origin), bob = browser(f.origin), anonymous = browser(f.origin);
+  const user = await alice.login("alice"); await bob.login("bob");
+  f.store.db.prepare("INSERT OR REPLACE INTO instance_settings VALUES('federation_enabled','true')").run();
+  f.store.db.prepare("UPDATE users SET federation_subscribe=1,federation_receive=1,federation_send=1,federation_post=1 WHERE id=?").run(user.id);
+  const data = { room: "test@muc.remote.example", nick: "alice" };
+  assert.equal((await anonymous.request("/api/xmpp/rooms", "POST", data)).status, 401);
+  assert.equal((await alice.request("/api/xmpp/rooms", "POST", data, { "X-CSRF-Token": "bad" })).status, 403);
+  const joined = await alice.request("/api/xmpp/rooms", "POST", data);
+  assert.equal(joined.status, 201);
+  const room = await joined.json(), path = `/api/xmpp/rooms/${room.id}`;
+  assert.equal((await bob.request(`${path}/messages`)).status, 404);
+  assert.equal((await bob.request(path, "DELETE")).status, 404);
+  assert.equal((await alice.request(`${path}/messages`, "POST", { body: "Too early" })).status, 403);
+  assert.equal((await fetch(`${f.origin}/internal/xmpp/remote-rooms/sync`, { method: "POST" })).status, 401);
+  const adapter = async (path: string, data: unknown) => fetch(`${f.origin}/internal/xmpp/remote-rooms/${path}`, {
+    method: "POST", headers: { Authorization: `Bearer ${"s".repeat(43)}`, "Content-Type": "application/json" }, body: JSON.stringify(data),
+  });
+  const sync = await (await adapter("sync", {})).json();
+  const session = sync.desired[0].session;
+  assert.equal((await adapter("receive", { session, from: `${data.room}/alice`, kind: "state", state: "joined", role: "participant" })).status, 200);
+  assert.equal((await alice.request(`${path}/messages`, "POST", { body: "Valid" }, { "X-CSRF-Token": "bad" })).status, 403);
+  assert.equal((await alice.request(`${path}/messages`, "POST", { body: "Valid" })).status, 201);
+  assert.equal((await alice.request(path, "DELETE")).status, 200);
+  assert.equal((await adapter("receive", { session, from: `${data.room}/host`, kind: "message", body: "Too late" })).status, 404);
+});
+
 test("remote contact names require a member session and CSRF and remain private to their owner", async t => {
   const {origin} = await application(t);
   const alice = browser(origin), bob = browser(origin), anonymous = browser(origin);

@@ -33,6 +33,7 @@ import {
 } from "./pages.js";
 import { showSettings, tickSettings } from "./settings.js";
 import { closePicker } from "./picker.js";
+import { showXmppRooms, tickXmppRooms } from "./xmpp-rooms.js";
 
 applyTheme();
 let refreshBusy = false;
@@ -40,6 +41,7 @@ let refreshBusy = false;
 // Direct conversations, what is new in each conversation, and how the sidebar is arranged.
 async function loadOverview() {
   const overview = await api<Overview>("/overview");
+  state.xmppRooms = overview.xmpp_rooms;
   state.dms = overview.dms;
   state.userBlocks = overview.user_blocks;
   state.unread = { ...overview.unread };
@@ -110,12 +112,12 @@ async function route() {
     .split("/")
     .filter(Boolean);
   const name =
-    parts[0] === "channels" || parts[0] === "settings" ? parts[0] : "chat";
+    ["channels", "settings", "xmpp"].includes(parts[0]) ? parts[0] : "chat";
   const shell = $(".app");
   if (shell.dataset.view !== name) view.innerHTML = "";
   shell.dataset.view = name;
   // The inbox is drawn in the chat view's frame, but has its own tab.
-  const tab = parts[0] === "inbox" ? "inbox" : name;
+  const tab = parts[0] === "inbox" ? "inbox" : name === "xmpp" ? "chat" : name;
   for (const item of $$("[data-nav]")) {
     item.classList.toggle("on", item.dataset.nav === tab);
     if (item.dataset.nav === tab) item.setAttribute("aria-current", "page");
@@ -123,6 +125,7 @@ async function route() {
   }
   closePicker();
   if (name === "channels") showChannels(view, parts[1] === "new");
+  else if (name === "xmpp") await showXmppRooms(view, parts[1]);
   else if (name === "settings")
     await showSettings(view, parts[1], parts[2], parts[3]);
   else if (tab === "inbox") await showInbox(view);
@@ -148,6 +151,7 @@ async function boot() {
   state.channels = [];
   state.emojis = [];
   state.dms = [];
+  state.xmppRooms = [];
   state.unread = {};
   state.layout = null;
   state.userBlocks = [];
@@ -228,6 +232,7 @@ setInterval(() => {
         await tickInbox();
       }
       else if (view === "channels") tickChannels();
+      else if (view === "xmpp") await tickXmppRooms();
       else await tickSettings();
       connection(true);
     } catch (error) {

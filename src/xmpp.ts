@@ -2,6 +2,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { Router, type RequestHandler } from "express";
 import type { Config } from "./config.js";
 import { Store, Problem, hash, randomToken, text, type User, type Message } from "./store.js";
+import { RemoteRooms } from "./xmpp-remote-rooms.js";
 
 type Input = Record<string, unknown>;
 type Account = { user_id: string; node: string };
@@ -16,8 +17,10 @@ function equal(a: string, b: string) {
 /** Prosody owns streams/routing/MUC presence; all content and policy live in Store. */
 export class Xmpp {
   readonly rooms: string;
+  readonly remoteRooms: RemoteRooms;
   constructor(readonly store: Store, readonly config: Config) {
     this.rooms = `channels.${config.xmppDomain}`;
+    this.remoteRooms = new RemoteRooms(this);
     if (!config.xmppDomain) return;
     const savedDomain = store.db.prepare("SELECT value FROM instance_settings WHERE key='xmpp_domain'").get()?.value;
     if (savedDomain && savedDomain !== config.xmppDomain)
@@ -241,6 +244,10 @@ export class Xmpp {
     const user = this.authorize(input);
     switch (input.operation) {
       case "check": return { valid: true };
+      case "remote-room-check": {
+        if (input.mode !== "leave") this.remoteRooms.check(user, this.remoteRooms.address(input.to), input.mode === "post");
+        return { valid: true };
+      }
       case "rooms": return { rooms: this.status(user).channels };
       case "join": {
         const channel = this.room(input.to);
@@ -487,6 +494,9 @@ export class Xmpp {
     router.post("/operation", (req, res) => res.json(this.operation(req.body || {})));
     router.post("/sync", (req, res) => res.json(this.sync(req.body || {})));
     router.post("/avatars", (req, res) => res.json(this.cacheAvatar(req.body || {})));
+    router.post("/remote-rooms/sync", (req, res) => res.json(this.remoteRooms.sync(req.body || {})));
+    router.post("/remote-rooms/receive", (req, res) => res.json(this.remoteRooms.receive(req.body || {})));
+    router.post("/remote-rooms/dispatched", (req, res) => res.json(this.remoteRooms.dispatched(req.body || {})));
     return router;
   }
 }
