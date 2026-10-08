@@ -160,6 +160,11 @@ local runner = async.runner(function()
   if not result then
     -- No cached policy is accepted during an adapter outage.
     for _, session in pairs(active) do session:close({ condition = "internal-server-error"; text = "Archipel policy service is unavailable." }); end
+    for _, entry in ipairs(occupants) do
+      local room = jid.host(entry.jid) ~= module.host and muc.get_room_from_jid(entry.room);
+      local occupant = room and room:get_occupant_by_real_jid(entry.jid);
+      if occupant then room:set_role(true, occupant.nick, nil, "Archipel policy service is unavailable"); end
+    end
     busy = false; return;
   end
   for _, address in ipairs(result.disconnect) do if active[address] then active[address]:close({ condition = "not-authorized" }); end end

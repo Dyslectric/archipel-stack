@@ -150,7 +150,7 @@ s2s_require_encryption = true
 s2s_secure_auth = true
 certificates = "/tmp/peer-certs"
 ssl = { cafile = "/tmp/peer-certs/remote.test.crt" }
-unbound = { resolvconf = true; hoststxt = true; options = { ["domain-insecure"] = "test"; ["local-data"] = "chat.test. IN A ${localIp}" } }
+unbound = { resolvconf = true; hoststxt = true; options = { ["domain-insecure"] = "test"; ["local-zone"] = "chat.test. redirect"; ["local-data"] = "chat.test. IN A ${localIp}" } }
 http_ports = {}
 https_ports = {}
 VirtualHost "remote.test"
@@ -237,6 +237,45 @@ Component "muc.remote.test" "muc"
   app.locals.federation.setPermissions(alice, alice.id, { federation_send: true, federation_receive: true, federation_subscribe: true, federation_post: true });
   xmpp.remoteRooms.leave(alice, subscription.id);
   console.log("PASS foreign MUC joins, history, live messages, confirmed posts, subjects, roles, conflicts, leave and policy revocation");
+  // The opposite direction: the ordinary peer's user occupies a federated local room.
+  const mucNs = "http://jabber.org/protocol/muc";
+  const plaza = store.createChannel(alice, { name: "plaza", mode: "timeline", visibility: "public", admission: "open" });
+  const plazaJid = "plaza@channels.chat.test", guest = `${plazaJid}/other@remote.test`;
+  await peer.native.send(xml("presence", { to: `${plazaJid}/guest`, id: "unfederated-join" }, xml("x", { xmlns: mucNs })));
+  await until(() => peer.received.find(s => s.is("presence") && s.attrs.id === "unfederated-join" && s.attrs.type === "error"), "local-only room refuses a foreign join", 15000);
+  assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM users WHERE remote_actor='xmpp:other@remote.test'").get().n, 0);
+  app.locals.federation.setChannel(alice, plaza.id, true);
+  store.post(alice, plaza.id, { body: "Posted before the foreign join" });
+  await peer.native.send(xml("presence", { to: `${plazaJid}/guest`, id: "foreign-join" }, xml("x", { xmlns: mucNs }, xml("history", { maxstanzas: "10" }))));
+  const statusCodes = s => (s.getChild("x", `${mucNs}#user`)?.getChildren("status") || []).map(status => status.attrs.code);
+  const guestPresence = await until(() => peer.received.find(s => s.is("presence") && s.attrs.from === guest && !s.attrs.type && statusCodes(s).includes("110")), "foreign occupant join", 15000);
+  assert.ok(statusCodes(guestPresence).includes("210"), guestPresence.toString());
+  const replayed = await until(() => peer.received.find(s => s.is("message") && s.getChildText("body") === "Posted before the foreign join"), "bounded join history for a foreign occupant");
+  assert.equal(replayed.attrs.from, `${plazaJid}/alice`);
+  assert.ok(replayed.getChild("delay", "urn:xmpp:delay").attrs.stamp);
+  const foreigner = store.details(alice, plaza.id).members.find(member => member.actor_url === "xmpp:other@remote.test");
+  assert.equal(foreigner.username, "other@remote.test");
+  await peer.native.send(xml("message", { to: plazaJid, type: "groupchat", id: "foreign-occupant-post" }, xml("body", {}, "Hello from a foreign home server")));
+  const reflected = await until(() => peer.received.find(s => s.is("message") && s.attrs.type === "groupchat" && s.attrs.id === "foreign-occupant-post"), "foreign post reflected after commit", 15000);
+  const committed = store.messages(alice, plaza.id).at(-1);
+  assert.equal(committed.body, "Hello from a foreign home server");
+  assert.equal(committed.author_actor_url, "xmpp:other@remote.test");
+  assert.equal(committed.username, "other@remote.test");
+  assert.equal(reflected.attrs.from, guest);
+  assert.equal(reflected.getChild("stanza-id", "urn:xmpp:sid:0").attrs.id, committed.id);
+  store.post(alice, plaza.id, { body: "Live to the foreign occupant" });
+  await until(() => peer.received.find(s => s.getChildText("body") === "Live to the foreign occupant" && s.attrs.from === `${plazaJid}/alice`), "live delivery to a foreign occupant");
+  const foreignArchive = await peer.native.iqCaller.request(xml("iq", { type: "set", to: plazaJid }, xml("query", { xmlns: "urn:xmpp:mam:2", queryid: "foreign-history" })));
+  assert.equal(foreignArchive.getChild("fin", "urn:xmpp:mam:2").getChild("set").getChildText("count"), "3");
+  assert.equal(peer.received.filter(s => s.getChild("result", "urn:xmpp:mam:2")?.attrs.queryid === "foreign-history").length, 3);
+  await assert.rejects(peer.native.iqCaller.request(xml("iq", { type: "set", to: roomJid }, xml("query", { xmlns: "urn:xmpp:mam:2" }))));
+  store.deleteMessage(alice, committed.id);
+  await until(() => peer.received.find(s => s.getChild("replace", "urn:xmpp:message-correct:0")?.attrs.id === "foreign-occupant-post" && s.getChildText("body") === "This message was removed."), "moderator removal reaches the foreign occupant");
+  store.setMember(alice, plaza.id, foreigner.id, { rule: "block" });
+  await until(() => peer.received.find(s => s.is("presence") && s.attrs.from === guest && s.attrs.type === "unavailable"), "moderator block evicts the foreign occupant");
+  await peer.native.send(xml("presence", { to: `${plazaJid}/guest`, id: "foreign-rejoin" }, xml("x", { xmlns: mucNs })));
+  await until(() => peer.received.find(s => s.is("presence") && s.attrs.id === "foreign-rejoin" && s.attrs.type === "error"), "blocked foreign occupant cannot rejoin");
+  console.log("PASS foreign home-server occupants: admission, join history, committed posts, live delivery, room MAM, removal and eviction");
   store.setUserBlock(bob, `${store.baseUrl}/actors/users/${alice.id}`, true);
   await desktop.native.send(xml("message", { to: b.jid, type: "chat", id: "blocked-dm" }, xml("body", {}, "Must not arrive")));
   await until(() => desktop.received.find(s => s.attrs.id === "blocked-dm" && s.attrs.type === "error"), "blocked DM rejection");

@@ -1,7 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { Router, type RequestHandler } from "express";
 import type { Config } from "./config.js";
-import { Store, Problem, hash, randomToken, text, type User, type Message } from "./store.js";
+import { Store, Problem, hash, randomToken, text, type User, type Channel, type Message } from "./store.js";
 import { RemoteRooms } from "./xmpp-remote-rooms.js";
 
 type Input = Record<string, unknown>;
@@ -66,6 +66,43 @@ export class Xmpp {
     const account = this.store.db.prepare("SELECT * FROM xmpp_accounts WHERE node=?").get(bare.slice(0, at)) as Account | undefined;
     if (!account) throw new Problem(404, "XMPP account not found.");
     return this.store.active(account.user_id);
+  }
+  foreign(address: string) {
+    const bare = address.split("/")[0];
+    return bare.slice(bare.lastIndexOf("@") + 1) !== this.config.xmppDomain;
+  }
+  /** Foreign occupants are xmpp: remote users; a JID never links to a local or ActivityPub account. */
+  private remoteUser(address: string) {
+    const row = this.store.db.prepare("SELECT id FROM users WHERE remote_actor=?").get(`xmpp:${address}`) as { id: string } | undefined;
+    return row ? this.store.user(row.id) : null;
+  }
+  /** Content only crosses the server boundary for channels whose moderators opted into federation. */
+  private foreignPolicy(address: string, channel: Channel) {
+    if (!this.federationEnabled()) throw new Problem(403, "Federation is disabled on this instance.");
+    if (this.blockedXmppDomains().includes(address.slice(address.lastIndexOf("@") + 1)) ||
+      this.store.db.prepare("SELECT 1 FROM federation_blocks WHERE target=?").get(`xmpp:${address}`))
+      throw new Problem(403, "This XMPP identity or domain is blocked.");
+    if (!channel.federation_enabled || channel.visibility !== "public")
+      throw new Problem(403, "This room does not admit members of other servers.");
+  }
+  /** Returns the known identity, or null for a newcomer who may still join. */
+  private admissible(address: string, channel: Channel) {
+    this.foreignPolicy(address, channel);
+    const known = this.remoteUser(address), user = known && this.store.active(known.id);
+    const rule = user && this.store.rule(channel.id, user.id);
+    if (rule === "block") throw new Problem(403, "You are blocked from this channel.");
+    if (!(user && this.store.role(channel.id, user.id)) && channel.admission !== "open" && rule !== "allow")
+      throw new Problem(403, "This channel requires an invitation.");
+    return user;
+  }
+  /** Receive grants gate foreign authors; send and post grants gate what foreign occupants are shown. */
+  private visibleAuthors(viewer: User) {
+    if (viewer.remote_actor)
+      return "author_id IN (SELECT id FROM users WHERE remote_actor IS NOT NULL OR (federation_send=1 AND federation_post=1 AND banned=0 AND admission_status='approved'))";
+    return this.federationEnabled() && viewer.federation_receive ? "1=1" : "author_id NOT IN (SELECT id FROM users WHERE remote_actor LIKE 'xmpp:%')";
+  }
+  private nick(user: User) {
+    return user.remote_actor?.startsWith("xmpp:") ? user.remote_actor.slice(5) : this.account(user).node;
   }
   credential(user: User, id: unknown) {
     if (typeof id !== "string") throw new Problem(401, "XMPP authentication is required.");
@@ -172,7 +209,10 @@ export class Xmpp {
   }
   roomAccess(user: User, room: string) {
     const channel = this.room(room);
-    this.store.requireRead(user, channel);
+    if (user.remote_actor) {
+      this.foreignPolicy(user.remote_actor.slice(5), channel);
+      this.store.active(user.id);
+    } else this.store.requireRead(user, channel);
     if (!this.store.role(channel.id, user.id) || this.store.rule(channel.id, user.id) === "block")
       throw new Problem(403, "Channel membership is required.");
     return channel;
@@ -241,6 +281,7 @@ export class Xmpp {
         return { id };
       });
     }
+    if (typeof input.from === "string" && this.foreign(input.from)) return this.foreignOperation(input);
     const user = this.authorize(input);
     switch (input.operation) {
       case "check": return { valid: true };
@@ -286,6 +327,59 @@ export class Xmpp {
       });
       case "archive": return this.archive(user, input);
       default: throw new Problem(400, "Unknown XMPP operation.");
+    }
+  }
+  /** Room traffic from another home server; the adapter marks authenticated s2s origins. */
+  private foreignOperation(input: Input) {
+    if (input.s2s !== true) throw new Problem(403, "This operation requires a local XMPP account.");
+    const sender = text(input.from, "Sender", 1024), address = this.remoteJid(sender);
+    if (address.length > 320) throw new Problem(400, "Use a shorter XMPP address.");
+    const member = () => {
+      const user = this.remoteUser(address);
+      if (!user) throw new Problem(403, "Channel membership is required.");
+      return user;
+    };
+    switch (input.operation) {
+      case "join": {
+        const channel = this.room(input.to);
+        return this.store.transaction(() => {
+          let user = this.admissible(address, channel);
+          if (!user) {
+            const id = randomUUID(), taken = this.store.db.prepare("SELECT 1 FROM users WHERE username=?").get(address);
+            this.store.db.prepare("INSERT INTO users(id,username,display_name,created_at,remote_actor) VALUES(?,?,?,?,?)")
+              .run(id, taken ? `${address}-${id.slice(0, 6)}` : address, address.slice(0, 80), new Date().toISOString(), `xmpp:${address}`);
+            user = this.store.user(id);
+          }
+          const occupant = user;
+          if (!this.store.role(channel.id, occupant.id))
+            this.store.db.prepare("INSERT INTO memberships VALUES(?,?,'member')").run(channel.id, occupant.id);
+          const wanted = Math.floor(Number(input.history)), limit = Math.min(100, wanted >= 0 ? wanted : 0);
+          const rows = this.store.db.prepare(`SELECT id FROM messages WHERE channel_id=? AND remote_object IS NULL AND ${this.visibleAuthors(occupant)} ORDER BY seq DESC LIMIT ?`)
+            .all(channel.id, limit) as { id: string }[];
+          return { name: channel.name, description: channel.description,
+            history: rows.reverse().map(row => this.channelDelivery(occupant, this.store.message(row.id), sender)) };
+        });
+      }
+      case "read": { this.admissible(address, this.room(input.to)); return { valid: true }; }
+      case "post": {
+        const user = member(), channel = this.roomAccess(user, text(input.to, "Room", 512));
+        if (input.replace) throw new Problem(400, "Corrections from other servers are not supported.");
+        return this.deduplicate(input, () => {
+          // Written directly: ActivityPub grants and relays apply to local authors only.
+          const id = randomUUID(), body = text(input.body, "Message", 8000);
+          const origin = input.origin_id === undefined ? null : text(input.origin_id, "Origin ID", 200);
+          this.store.db.prepare("INSERT INTO messages(id,channel_id,author_id,body,created_at) VALUES(?,?,?,?,?)")
+            .run(id, channel.id, user.id, body, new Date().toISOString());
+          this.store.db.prepare("INSERT INTO xmpp_events(kind,object_id) VALUES('Create',?)").run(id);
+          this.store.db.prepare("INSERT INTO xmpp_message_ids VALUES(?,?,?,?,?)").run(id, address, String(input.id), origin, this.stanzaScope(input));
+          return { id };
+        });
+      }
+      case "archive": {
+        if (!input.room) throw new Problem(403, "This operation requires a local XMPP account.");
+        return this.archive(member(), input, sender);
+      }
+      default: throw new Problem(403, "This operation requires a local XMPP account.");
     }
   }
   private avatar(user: User) {
@@ -337,7 +431,7 @@ export class Xmpp {
       .get(message.id) as { stanza_id: string; origin_id: string | null } | undefined;
     // Use a stable nick shared with the presence adapter, even across reconnects.
     return { id: kind === "Create" ? message.id : `${message.id}-${kind}-${kind === "Delete" ? message.deleted_at : message.edited_at}`,
-      from: `${channel.name}@${this.rooms}/${this.account(this.store.user(message.author_id)).node}`,
+      from: `${channel.name}@${this.rooms}/${this.nick(this.store.user(message.author_id))}`,
       to, type: "groupchat", body: message.deleted_at ? "This message was removed." : view.body,
       stamp: message.created_at,
       ...(kind === "Create" && native ? { stanza_id: native.stanza_id, ...(native.origin_id ? { origin_id: native.origin_id } : {}) } : {}),
@@ -354,13 +448,13 @@ export class Xmpp {
       body: row.body, stamp: row.created_at, type: "chat",
       ...(native ? { stanza_id: native.stanza_id, ...(native.origin_id ? { origin_id: native.origin_id } : {}) } : {}) };
   }
-  archive(user: User, input: Input) {
+  archive(user: User, input: Input, to = this.jid(user)) {
     const room = input.room ? text(input.room, "Room", 512) : null;
     const clauses: string[] = [], parameters: (string | number)[] = [];
     const table = room ? "messages" : "direct_messages";
     if (room) {
       const channel = this.roomAccess(user, room);
-      clauses.push("channel_id=?", "remote_object IS NULL"); parameters.push(channel.id);
+      clauses.push("channel_id=?", "remote_object IS NULL", this.visibleAuthors(user)); parameters.push(channel.id);
     } else {
       const me = this.store.active(user.id), prefix = `${this.store.baseUrl}/actors/users/`;
       const on = this.federationEnabled();
@@ -409,7 +503,7 @@ export class Xmpp {
     if (reverse) page = page.reverse();
     const offset = page[0] ? Number(this.store.db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE ${base} AND seq<?`).get(...baseParams, page[0].seq)!.n) : 0;
     const messages = page.map(row => {
-      if (room) return this.channelDelivery(user, this.store.message(row.id), this.jid(user));
+      if (room) return this.channelDelivery(user, this.store.message(row.id), to);
       const direct = row as Direct, delivery = this.directDelivery(direct, this.jid(user));
       if (direct.direction === "outgoing") delivery.to = direct.peer.startsWith("xmpp:") ? direct.peer.slice(5) : this.jid(this.store.user(direct.peer.slice(direct.peer.lastIndexOf("/") + 1)));
       return delivery;
@@ -434,9 +528,11 @@ export class Xmpp {
       const address = text(entry.jid, "Occupant JID", 1024), room = text(entry.room, "Room", 512);
       const session = sessions.find(s => s.jid === address);
       try {
-        if (!session) throw new Problem(403, "No authorized session.");
-        this.roomAccess(session.user, room);
-        occupants.push({ room, jid: address, user: session.user });
+        // Foreign occupants have no local stream; current room policy alone keeps them.
+        const user = this.foreign(address) ? this.remoteUser(this.remoteJid(address)) : session?.user;
+        if (!user) throw new Problem(403, "No authorized session.");
+        this.roomAccess(user, room);
+        occupants.push({ room, jid: address, user });
       } catch { kick.push({ room, jid: address }); }
     }
     const events = this.store.db.prepare("SELECT * FROM xmpp_events WHERE seq>? ORDER BY seq LIMIT 100")
@@ -468,7 +564,8 @@ export class Xmpp {
       } else {
         const message = this.store.message(event.object_id), channel = this.store.channel(message.channel_id);
         for (const occupant of occupants.filter(o => o.room === `${channel.name}@${this.rooms}`))
-          messages.push(this.channelDelivery(occupant.user, message, occupant.jid, event.kind));
+          if (this.store.db.prepare(`SELECT 1 FROM messages WHERE id=? AND ${this.visibleAuthors(occupant.user)}`).get(message.id))
+            messages.push(this.channelDelivery(occupant.user, message, occupant.jid, event.kind));
       }
     }
     const avatarRequests: { peer: string; requester: string; attempt: number }[] = [];

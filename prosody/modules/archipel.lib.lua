@@ -42,6 +42,8 @@ local function operation(event, op, extras)
   input.from = stanza.attr.from or (origin.username and origin.username .. "@" .. domain);
   input.to = jid.bare(stanza.attr.to or "");
   input.credential = origin.archipel_credential;
+  -- Foreign senders are only trusted on authenticated server-to-server streams.
+  input.s2s = origin.type == "s2sin" or nil;
   -- Stanza IDs are unique within a stream, not across an account's clients.
   origin.archipel_stream_id = origin.archipel_stream_id or uuid.generate();
   input.stream = origin.archipel_stream_id;

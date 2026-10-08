@@ -823,6 +823,8 @@ export class Store {
       throw new Problem(400, "Invalid role.");
     if (input.role !== undefined && !role)
       throw new Problem(409, "The user must join before receiving a role.");
+    if (input.role === "moderator" && this.user(targetId).remote_actor)
+      throw new Problem(400, "Only local members can moderate a channel.");
     if (
       input.rule === undefined &&
       input.role === undefined &&
@@ -994,7 +996,7 @@ export class Store {
     return (
       this.db
         .prepare(
-          "SELECT m.*,u.username,u.display_name FROM messages m JOIN users u ON u.id=m.author_id WHERE m.channel_id=? AND m.seq<? AND (m.remote_object IS NULL OR ?=1) ORDER BY m.seq DESC LIMIT 100",
+          "SELECT m.*,u.username,u.display_name FROM messages m JOIN users u ON u.id=m.author_id WHERE m.channel_id=? AND m.seq<? AND ((m.remote_object IS NULL AND COALESCE(u.remote_actor,'') NOT LIKE 'xmpp:%') OR ?=1) ORDER BY m.seq DESC LIMIT 100",
         )
         .all(
           id,
@@ -1416,7 +1418,7 @@ export class Store {
     ).filter((c) => this.readable(user, c));
   }
   private unreadWhere =
-    "m.channel_id=? AND m.seq>? AND m.author_id!=? AND m.deleted_at IS NULL AND m.history_placeholder=0 AND (m.remote_object IS NULL OR ?=1) AND NOT EXISTS (SELECT 1 FROM user_blocks b JOIN users author ON author.id=m.author_id WHERE b.user_id=? AND b.peer=COALESCE(author.remote_actor,?||author.id))";
+    "m.channel_id=? AND m.seq>? AND m.author_id!=? AND m.deleted_at IS NULL AND m.history_placeholder=0 AND (?=1 OR (m.remote_object IS NULL AND NOT EXISTS (SELECT 1 FROM users foreigner WHERE foreigner.id=m.author_id AND foreigner.remote_actor LIKE 'xmpp:%'))) AND NOT EXISTS (SELECT 1 FROM user_blocks b JOIN users author ON author.id=m.author_id WHERE b.user_id=? AND b.peer=COALESCE(author.remote_actor,?||author.id))";
   overview(user: User) {
     const me = this.active(user.id),
       unread: Record<string, number> = {};

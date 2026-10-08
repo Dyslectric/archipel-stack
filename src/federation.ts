@@ -89,9 +89,11 @@ export class Federation {
         }
       },
       message: (message, type, user) => {
+        // XMPP occupants of other servers are never attributed to ActivityPub.
         if (
           !this.importing &&
-          store.channel(message.channel_id).federation_enabled
+          store.channel(message.channel_id).federation_enabled &&
+          !store.user(message.author_id).remote_actor?.startsWith("xmpp:")
         )
           this.relay(message, type, user);
       },
