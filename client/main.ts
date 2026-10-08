@@ -23,6 +23,8 @@ import {
 } from "./shared.js";
 import { redrawChat, refreshCurrent, resetChat, showChat } from "./chat.js";
 import { adoptLayout, renderSidebar, toggleSidebar } from "./sidebar.js";
+import { adoptPrefs } from "./prefs.js";
+import { disablePush, syncPush } from "./notify.js";
 import "./attach.js";
 import { showInbox, tickInbox } from "./inbox.js";
 import "./people.js";
@@ -50,6 +52,7 @@ async function loadOverview() {
   for (const c of overview.dms)
     if (c.unread) state.unread[`dm:${c.peer}`] = c.unread;
   adoptLayout(overview.layout);
+  adoptPrefs(overview.prefs);
 }
 
 // ---- the frame every signed-in page shares: the bar on top, and the page under it ----
@@ -156,6 +159,7 @@ async function boot() {
   state.unread = {};
   state.layout = null;
   state.userBlocks = [];
+  state.prefs = {};
   if (!state.session.user) return renderLogin();
   if (state.session.user.admission_status !== "approved")
     return renderAdmission();
@@ -166,11 +170,16 @@ async function boot() {
   ]);
   renderShell();
   renderSidebar();
+  void syncPush().catch(() => {
+    /* Notifications stay as they were; the settings page says how they stand. */
+  });
   await route();
 }
 hooks.boot = boot;
 hooks.account = renderAccount;
 hooks.signOut = async () => {
+  // This browser stops being notified for the account.
+  await disablePush().catch(() => {});
   await api("/logout", "POST", {});
   history.replaceState(null, "", "/");
   await boot();

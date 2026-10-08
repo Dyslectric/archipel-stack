@@ -173,7 +173,7 @@ export class Store {
     const version = (
       this.db.prepare("PRAGMA user_version").get() as { user_version: number }
     ).user_version;
-    if (version > 13) throw new Error("Database is newer than this application");
+    if (version > 14) throw new Error("Database is newer than this application");
     if (version === 0)
       this.transaction(() =>
         this.db.exec(
@@ -255,6 +255,10 @@ export class Store {
     if (version < 13)
       this.transaction(() => this.db.exec(readFileSync(
         new URL("../migrations/013_roles_attachments.sql", import.meta.url), "utf8",
+      )));
+    if (version < 14)
+      this.transaction(() => this.db.exec(readFileSync(
+        new URL("../migrations/014_prefs_push.sql", import.meta.url), "utf8",
       )));
   }
   close() {
@@ -1206,6 +1210,7 @@ export class Store {
         "topics",
         "memberships",
         "channel_rules",
+        "conversation_prefs",
       ])
         this.db.prepare(`DELETE FROM ${table} WHERE channel_id=?`).run(id);
       this.db.prepare("DELETE FROM read_marks WHERE target=?").run(id);
@@ -1465,7 +1470,7 @@ export class Store {
   }
   messages(user: User, id: string, before?: number) {
     this.requireRead(user, this.channel(id));
-    return (
+    const page = (
       this.db
         .prepare(
           "SELECT m.*,u.username,u.display_name FROM messages m JOIN users u ON u.id=m.author_id WHERE m.channel_id=? AND m.seq<? AND ((m.remote_object IS NULL AND COALESCE(u.remote_actor,'') NOT LIKE 'xmpp:%') OR ?=1) ORDER BY m.seq DESC LIMIT 100",
@@ -1478,6 +1483,11 @@ export class Store {
     )
       .reverse()
       .map((m) => this.messageFor(user, m));
+    // Threads this reader hid stay in the page, marked, so they can be shown again.
+    const hidden = this.hiddenThreadMessages(user.id, id);
+    return hidden.size
+      ? page.map((m) => (hidden.has(m.id) ? { ...m, hidden_thread: true } : m))
+      : page;
   }
   messageFor(user: User, message: Message) {
     const info = this.messageInfo(message, user);
@@ -1900,8 +1910,34 @@ export class Store {
         .all(user.id) as unknown as Channel[]
     ).filter((c) => this.readable(user, c));
   }
+  // Every message of the threads this reader hid in a channel: the first message and all under it.
+  private hiddenThreads =
+    "WITH RECURSIVE hid(id) AS (SELECT substr(target,8) FROM conversation_prefs WHERE user_id=? AND channel_id=? AND hidden=1 AND target>='thread:' AND target<'thread;' UNION SELECT r.id FROM messages r JOIN hid ON r.parent_id=hid.id) ";
   private unreadWhere =
-    "m.channel_id=? AND m.seq>? AND m.author_id!=? AND m.deleted_at IS NULL AND m.history_placeholder=0 AND (?=1 OR (m.remote_object IS NULL AND NOT EXISTS (SELECT 1 FROM users foreigner WHERE foreigner.id=m.author_id AND foreigner.remote_actor LIKE 'xmpp:%'))) AND NOT EXISTS (SELECT 1 FROM user_blocks b JOIN users author ON author.id=m.author_id WHERE b.user_id=? AND b.peer=COALESCE(author.remote_actor,?||author.id))";
+    "m.channel_id=? AND m.seq>? AND m.author_id!=? AND m.deleted_at IS NULL AND m.history_placeholder=0 AND (?=1 OR (m.remote_object IS NULL AND NOT EXISTS (SELECT 1 FROM users foreigner WHERE foreigner.id=m.author_id AND foreigner.remote_actor LIKE 'xmpp:%'))) AND NOT EXISTS (SELECT 1 FROM user_blocks b JOIN users author ON author.id=m.author_id WHERE b.user_id=? AND b.peer=COALESCE(author.remote_actor,?||author.id)) AND m.id NOT IN (SELECT id FROM hid) AND (m.topic_id IS NULL OR NOT EXISTS (SELECT 1 FROM conversation_prefs p WHERE p.user_id=? AND p.target='topic:'||m.topic_id AND p.hidden=1))";
+  // What hiddenThreads and unreadWhere ask for, in order.
+  private unreadArgs(me: User, channelId: string, after: number) {
+    return [
+      me.id,
+      channelId,
+      channelId,
+      after,
+      me.id,
+      Number(!!me.federation_receive),
+      me.id,
+      this.actorOf(""),
+      me.id,
+    ];
+  }
+  private hiddenThreadMessages(userId: string, channelId: string) {
+    return new Set(
+      (
+        this.db
+          .prepare(`${this.hiddenThreads}SELECT id FROM hid`)
+          .all(userId, channelId) as { id: string }[]
+      ).map((row) => row.id),
+    );
+  }
   overview(user: User) {
     const me = this.active(user.id),
       unread: Record<string, number> = {};
@@ -1909,22 +1945,16 @@ export class Store {
       const n = Number(
         this.db
           .prepare(
-            `SELECT COUNT(*) AS n FROM messages m WHERE ${this.unreadWhere}`,
+            `${this.hiddenThreads}SELECT COUNT(*) AS n FROM messages m WHERE ${this.unreadWhere}`,
           )
-          .get(
-            c.id,
-            this.channelMark(me.id, c.id),
-            me.id,
-            Number(!!me.federation_receive),
-            me.id,
-            this.actorOf(""),
-          )?.n,
+          .get(...this.unreadArgs(me, c.id, this.channelMark(me.id, c.id)))?.n,
       );
       if (n) unread[c.id] = n;
     }
     return {
       dms: this.conversations(me),
       unread,
+      prefs: this.prefs(me),
       layout: this.layout(me),
       user_blocks: this.userBlocks(me),
     };
@@ -1941,15 +1971,10 @@ export class Store {
       (
         this.db
           .prepare(
-            `SELECT m.*,u.username,u.display_name,t.title AS topic_title FROM messages m JOIN users u ON u.id=m.author_id LEFT JOIN topics t ON t.id=m.topic_id WHERE ${this.unreadWhere} ORDER BY m.seq DESC LIMIT 50`,
+            `${this.hiddenThreads}SELECT m.*,u.username,u.display_name,t.title AS topic_title FROM messages m JOIN users u ON u.id=m.author_id LEFT JOIN topics t ON t.id=m.topic_id WHERE ${this.unreadWhere} ORDER BY m.seq DESC LIMIT 50`,
           )
           .all(
-            c.id,
-            this.channelMark(me.id, c.id),
-            me.id,
-            Number(!!me.federation_receive),
-            me.id,
-            this.actorOf(""),
+            ...this.unreadArgs(me, c.id, this.channelMark(me.id, c.id)),
           ) as unknown as Message[]
       ).map((m) => ({
         ...this.messageInfo(m, me),
@@ -2039,6 +2064,230 @@ export class Store {
     if (!this.role(this.channel(target).id, me.id))
       throw new Problem(403, "Join this channel first.");
     set(target, latestIn(target), seq);
+  }
+
+  // ---- what a reader hid, and what may notify them ----
+  prefs(user: User) {
+    return Object.fromEntries(
+      (
+        this.db
+          .prepare(
+            "SELECT target,hidden,notify FROM conversation_prefs WHERE user_id=?",
+          )
+          .all(user.id) as {
+          target: string;
+          hidden: number;
+          notify: number | null;
+        }[]
+      ).map((p) => [
+        p.target,
+        { hidden: !!p.hidden, notify: p.notify === null ? null : !!p.notify },
+      ]),
+    );
+  }
+  // The same, with the names a settings page lists them under.
+  prefList(user: User) {
+    const me = this.active(user.id);
+    return (
+      this.db
+        .prepare(
+          "SELECT p.target,p.hidden,p.notify,c.id AS channel_id,c.name AS channel_name,t.title AS topic_title,m.title AS thread_title FROM conversation_prefs p LEFT JOIN channels c ON c.id=p.channel_id LEFT JOIN topics t ON p.target='topic:'||t.id LEFT JOIN messages m ON p.target='thread:'||m.id WHERE p.user_id=? ORDER BY c.name,p.target",
+        )
+        .all(me.id) as {
+        target: string;
+        hidden: number;
+        notify: number | null;
+        channel_id: string | null;
+        channel_name: string | null;
+        topic_title: string | null;
+        thread_title: string | null;
+      }[]
+    ).flatMap((p) => {
+      const kind = p.target.startsWith("dm:")
+        ? ("dm" as const)
+        : p.target.startsWith("topic:")
+          ? ("topic" as const)
+          : p.target.startsWith("thread:")
+            ? ("thread" as const)
+            : ("channel" as const);
+      // Kept for a channel this reader left or lost sight of, but not listed.
+      if (
+        kind !== "dm" &&
+        (!p.channel_id ||
+          !this.role(p.channel_id, me.id) ||
+          !this.readable(me, this.channel(p.channel_id)))
+      )
+        return [];
+      return [
+        {
+          target: p.target,
+          kind,
+          hidden: !!p.hidden,
+          notify: p.notify === null ? null : !!p.notify,
+          channel: p.channel_id
+            ? { id: p.channel_id, name: p.channel_name! }
+            : null,
+          title:
+            kind === "dm"
+              ? this.peerInfo(p.target.slice(3), me).display_name
+              : kind === "topic"
+                ? p.topic_title
+                : kind === "thread"
+                  ? p.thread_title
+                  : null,
+        },
+      ];
+    });
+  }
+  setPref(user: User, input: Record<string, unknown>) {
+    const me = this.active(user.id),
+      target = text(input.target, "Conversation", 2100);
+    if (input.hidden !== undefined && typeof input.hidden !== "boolean")
+      throw new Problem(400, "Choose whether it is hidden.");
+    if (
+      input.notify !== undefined &&
+      input.notify !== null &&
+      typeof input.notify !== "boolean"
+    )
+      throw new Problem(400, "Choose whether it notifies you.");
+    if (input.hidden === undefined && input.notify === undefined)
+      throw new Problem(400, "Choose a change.");
+    let channelId: string | null = null;
+    if (target.startsWith("dm:")) this.peerInfo(target.slice(3));
+    else {
+      if (target.startsWith("topic:")) {
+        const topic = this.db
+          .prepare("SELECT channel_id FROM topics WHERE id=?")
+          .get(target.slice(6)) as { channel_id: string } | undefined;
+        if (!topic) throw new Problem(404, "Topic not found.");
+        channelId = topic.channel_id;
+      } else if (target.startsWith("thread:")) {
+        const first = this.message(target.slice(7));
+        channelId = first.channel_id;
+        if (first.parent_id || this.channel(channelId).mode !== "threaded")
+          throw new Problem(400, "Choose the first message of a thread.");
+      } else channelId = this.channel(target).id;
+      this.requireRead(me, this.channel(channelId));
+      if (!this.role(channelId, me.id))
+        throw new Problem(403, "Join this channel first.");
+    }
+    // A channel or a direct conversation, rather than a part of one.
+    const whole = !channelId || channelId === target;
+    if (whole && input.hidden)
+      throw new Problem(400, "Only topics and threads can be hidden.");
+    this.transaction(() => {
+      const old = this.pref(me.id, target);
+      const hidden =
+          input.hidden === undefined ? old?.hidden || 0 : Number(input.hidden),
+        notify =
+          input.notify === undefined
+            ? (old?.notify ?? null)
+            : input.notify === null
+              ? null
+              : Number(input.notify);
+      // Nothing out of the ordinary needs no row: a whole conversation notifies unless told not to.
+      if (!hidden && (notify === null || (whole && notify === 1)))
+        this.db
+          .prepare("DELETE FROM conversation_prefs WHERE user_id=? AND target=?")
+          .run(me.id, target);
+      else
+        this.db
+          .prepare(
+            "INSERT INTO conversation_prefs VALUES(?,?,?,?,?) ON CONFLICT(user_id,target) DO UPDATE SET hidden=excluded.hidden,notify=excluded.notify",
+          )
+          .run(me.id, target, channelId, hidden, notify);
+    });
+    return this.prefs(me);
+  }
+  private pref(userId: string, target: string) {
+    return this.db
+      .prepare(
+        "SELECT hidden,notify FROM conversation_prefs WHERE user_id=? AND target=?",
+      )
+      .get(userId, target) as
+      | { hidden: number; notify: number | null }
+      | undefined;
+  }
+  // What to tell this reader about a new channel message, or null when it should stay quiet:
+  // they wrote it, read it, cannot see it, hid its topic or thread, or turned its notifications off.
+  channelNotice(userId: string, message: Message) {
+    const user = this.user(userId),
+      channel = this.channel(message.channel_id);
+    if (
+      user.banned ||
+      user.admission_status !== "approved" ||
+      !this.role(channel.id, user.id) ||
+      !this.readable(user, channel)
+    )
+      return null;
+    if (
+      !this.db
+        .prepare(
+          `${this.hiddenThreads}SELECT 1 FROM messages m WHERE ${this.unreadWhere} AND m.seq=?`,
+        )
+        .get(
+          ...this.unreadArgs(
+            user,
+            channel.id,
+            this.channelMark(user.id, channel.id),
+          ),
+          message.seq,
+        )
+    )
+      return null;
+    let first = message;
+    if (channel.mode === "threaded")
+      for (let depth = 0; first.parent_id && depth < 1000; depth++) {
+        const parent = this.db
+          .prepare("SELECT * FROM messages WHERE id=?")
+          .get(first.parent_id) as unknown as Message | undefined;
+        if (!parent) break;
+        first = parent;
+      }
+    const part =
+      channel.mode === "topical" && message.topic_id
+        ? `topic:${message.topic_id}`
+        : channel.mode === "threaded" && !first.parent_id
+          ? `thread:${first.id}`
+          : null;
+    const notify =
+      (part ? this.pref(user.id, part)?.notify : null) ??
+      this.pref(user.id, channel.id)?.notify ??
+      1;
+    if (!notify) return null;
+    const topic = message.topic_id
+      ? (
+          this.db
+            .prepare("SELECT title FROM topics WHERE id=?")
+            .get(message.topic_id) as { title: string } | undefined
+        )?.title
+      : null;
+    const within = topic || (part?.startsWith("thread:") ? first.title : null);
+    return {
+      tag: part || channel.id,
+      title: `#${channel.name}${within ? ` › ${within}` : ""}`,
+      from: this.messageFor(user, this.message(message.id)).display_name as string | null,
+      url: `/#/c/${channel.id}${message.topic_id ? `/t/${message.topic_id}` : ""}`,
+    };
+  }
+  // The same for a direct message that arrived.
+  directNotice(row: { seq: number; user_id: string; peer: string }) {
+    const user = this.user(row.user_id);
+    if (user.banned || user.admission_status !== "approved") return null;
+    const target = `dm:${row.peer}`;
+    if (
+      !this.directAccess(user, row.peer).incoming ||
+      this.isUserBlocked(user.id, row.peer) ||
+      (this.mark(user.id, target) ?? 0) >= row.seq ||
+      this.pref(user.id, target)?.notify === 0
+    )
+      return null;
+    return {
+      tag: target,
+      title: this.peerInfo(row.peer, user).display_name as string,
+      from: null as string | null,
+      url: `/#/dm/${this.localPeer(row.peer) ?? encodeURIComponent(row.peer)}`,
+    };
   }
 
   // ---- the sidebar as its reader arranged it ----

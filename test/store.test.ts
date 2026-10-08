@@ -535,7 +535,7 @@ test("version-two emoji messages keep their image metadata through the federatio
     { id: "asset", name: "island", url: "/api/emojis/asset/image" },
   ]);
   assert.equal(store.user("author").federation_send, 0);
-  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 13);
+  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 14);
 });
 
 test("direct messages reach both members, and only the reader's own are news to them", () => {
@@ -644,7 +644,7 @@ test("personal blocks persist across restarts and upgrade an existing version 4 
   let store = new Store(path);
   const alice = store.loginIdentity("https://id.example", "alice", "alice", []);
   const bob = store.loginIdentity("https://id.example", "bob", "bob", []);
-  store.db.exec("DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; DROP TABLE user_blocks; PRAGMA user_version=4;");
+  store.db.exec("DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; DROP TABLE user_blocks; PRAGMA user_version=4;");
   store.close();
   store = new Store(path);
   const peer = `${store.baseUrl}/actors/users/${alice.id}`;
@@ -694,7 +694,7 @@ test("profile picture migration preserves identities and pictures survive restar
   const path = join(directory, "db.sqlite");
   let store = new Store(path);
   const alice = store.loginIdentity("https://id.example", "alice", "alice", []);
-  store.db.exec("DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; PRAGMA user_version=5;");
+  store.db.exec("DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; PRAGMA user_version=5;");
   store.close();
   store = new Store(path);
   const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
@@ -742,9 +742,9 @@ test("version 9 avatar migration preserves pictures and XMPP cursors and remote 
   const image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
   store.setAvatar(alice, image);
   store.db.prepare("INSERT INTO xmpp_events(seq,kind,object_id) VALUES(50,'Direct','old-message')").run();
-  store.db.exec("DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; PRAGMA user_version=9");
+  store.db.exec("DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; PRAGMA user_version=9");
   store.close(); store = new Store(path);
-  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 13);
+  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 14);
   assert.equal(Buffer.from(store.avatarImage(alice.id).image).toString("base64"), image);
   assert.equal(store.db.prepare("SELECT seq FROM xmpp_events WHERE object_id='old-message'").get()?.seq, 50);
   const next = store.db.prepare("INSERT INTO xmpp_events(kind,object_id) VALUES('Profile',?)").run(alice.id);
@@ -795,5 +795,81 @@ test("owners rename and delete channels; deletion removes the conversation witho
       0,
     );
   assert.equal(store.createChannel(alice, channelInput({ name: "lobby" })).name, "lobby");
+  store.close();
+});
+test("hidden topics and threads leave what is new, and each part of a channel decides whether it notifies", () => {
+  const { store, alice, bob, charlie } = fixture();
+  const topical = store.createChannel(alice, channelInput({ name: "topics", mode: "topical" }));
+  const threads = store.createChannel(alice, channelInput({ name: "threads", mode: "threaded" }));
+  for (const c of [topical, threads]) store.join(bob, c.id);
+  const news = store.createTopic(alice, topical.id, "News"),
+    noise = store.createTopic(alice, topical.id, "Noise");
+  store.post(alice, topical.id, { body: "Worth reading", topic_id: news.id });
+  const loud = store.post(alice, topical.id, { body: "Chatter", topic_id: noise.id });
+  const kept = store.post(alice, threads.id, { body: "Kept", title: "Kept thread" });
+  const dull = store.post(alice, threads.id, { body: "Dull", title: "Dull thread" });
+  const reply = store.post(alice, threads.id, { body: "More of it", parent_id: dull.id });
+  const deeper = store.post(alice, threads.id, { body: "And more", parent_id: reply.id });
+  assert.deepEqual(store.overview(bob).unread, { [topical.id]: 2, [threads.id]: 4 });
+
+  // Only topics and threads hide, and only for members.
+  denied(() => store.setPref(bob, { target: topical.id, hidden: true }), 400);
+  denied(() => store.setPref(bob, { target: `thread:${reply.id}`, hidden: true }), 400);
+  denied(() => store.setPref(bob, { target: `topic:${noise.id}` }), 400);
+  denied(() => store.setPref(bob, { target: "topic:missing", hidden: true }), 404);
+  denied(() => store.setPref(charlie, { target: `topic:${noise.id}`, hidden: true }));
+  assert.deepEqual(store.setPref(bob, { target: `topic:${noise.id}`, hidden: true }), {
+    [`topic:${noise.id}`]: { hidden: true, notify: null },
+  });
+  store.setPref(bob, { target: `thread:${dull.id}`, hidden: true });
+  assert.deepEqual(store.overview(bob).unread, { [topical.id]: 1, [threads.id]: 1 });
+  assert.deepEqual(store.inbox(bob).map((m) => m.body).sort(), ["Kept", "Worth reading"]);
+  assert.deepEqual(store.overview(alice).prefs, {});
+  // The hidden thread still arrives, marked all the way down, so it can be shown again.
+  assert.deepEqual(
+    store.messages(bob, threads.id).map((m) => [m.body, !!(m as { hidden_thread?: boolean }).hidden_thread]),
+    [["Kept", false], ["Dull", true], ["More of it", true], ["And more", true]],
+  );
+  assert.ok(store.messages(alice, threads.id).every((m) => !("hidden_thread" in m)));
+
+  // Quiet: the author, what is hidden, and what was turned off; a part's choice beats its channel's.
+  assert.equal(store.channelNotice(alice.id, loud), null);
+  assert.equal(store.channelNotice(charlie.id, loud), null);
+  assert.equal(store.channelNotice(bob.id, loud), null);
+  assert.equal(store.channelNotice(bob.id, deeper), null);
+  assert.deepEqual(store.channelNotice(bob.id, kept), {
+    tag: `thread:${kept.id}`, title: "#threads › Kept thread", from: "alice", url: `/#/c/${threads.id}`,
+  });
+  store.setPref(bob, { target: threads.id, notify: false });
+  assert.equal(store.channelNotice(bob.id, kept), null);
+  store.setPref(bob, { target: `thread:${kept.id}`, notify: true });
+  assert.equal(store.channelNotice(bob.id, kept)?.tag, `thread:${kept.id}`);
+  store.setPref(bob, { target: `thread:${dull.id}`, hidden: false });
+  assert.equal(store.channelNotice(bob.id, deeper), null); // the channel is off, and this thread follows it
+  store.setPref(bob, { target: threads.id, notify: true });
+  assert.equal(store.channelNotice(bob.id, deeper)?.title, "#threads › Dull thread");
+  store.setPref(bob, { target: `topic:${noise.id}`, hidden: false, notify: false });
+  assert.equal(store.channelNotice(bob.id, loud), null);
+  assert.equal(store.overview(bob).unread[topical.id], 2);
+  assert.deepEqual(
+    store.prefList(bob).map((p) => [p.kind, p.channel?.name, p.title, p.hidden, p.notify]),
+    [["thread", "threads", "Kept thread", false, true], ["topic", "topics", "Noise", false, false]],
+  );
+  // What has been read is not news.
+  store.markRead(bob, { target: threads.id });
+  assert.equal(store.channelNotice(bob.id, kept), null);
+
+  store.sendDirect(alice, bob.id, "Hello");
+  const direct = store.db.prepare("SELECT seq,user_id,peer FROM direct_messages WHERE user_id=? AND direction='incoming'").get(bob.id) as { seq: number; user_id: string; peer: string };
+  assert.deepEqual(store.directNotice(direct), { tag: `dm:${direct.peer}`, title: "alice", from: null, url: `/#/dm/${alice.id}` });
+  denied(() => store.setPref(bob, { target: `dm:${direct.peer}`, hidden: true }), 400);
+  store.setPref(bob, { target: `dm:${direct.peer}`, notify: false });
+  assert.equal(store.directNotice(direct), null);
+  store.setPref(bob, { target: `dm:${direct.peer}`, notify: true });
+  store.markRead(bob, { target: `dm:${direct.peer}` });
+  assert.equal(store.directNotice(direct), null);
+
+  store.deleteChannel(alice, topical.id);
+  assert.deepEqual(Object.keys(store.prefs(bob)), [`thread:${kept.id}`]);
   store.close();
 });

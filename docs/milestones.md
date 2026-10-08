@@ -88,6 +88,12 @@ restricted content never reaches an unauthorized mirror.
 
 ## 6. PWA notifications and voice
 
+Notifications are implemented: an installable web app manifest, a service worker,
+Web Push (VAPID, encrypted payloads) to each browser a member turned on, and
+per-member choices of which channels, topics, threads and direct conversations
+notify. Members can also hide topics and threads. A subscription belongs to its
+session, so signing out or revocation stops delivery. Voice remains future work.
+
 Add service-worker push, subscription management, and conversation-scoped Jitsi
 admission using the ConsortStack integration pattern.
 

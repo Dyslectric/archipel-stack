@@ -1074,3 +1074,82 @@ test("messages show Markdown and attachments, threads fold whole, and the side p
   await page.getByRole("button", { name: "Collapse all" }).click();
   await expect(reply).toBeHidden();
 });
+
+test("a reader hides a thread and a topic, silences a channel, and undoes each from settings", async ({
+  page,
+}) => {
+  await login(page);
+  await createChannel(page, "quiet-threads", "threaded");
+  for (const [title, body] of [
+    ["Worth keeping", "Stays in sight."],
+    ["Not for me", "Goes away."],
+  ]) {
+    await page.getByRole("textbox", { name: "Thread title" }).fill(title);
+    await send(page, body);
+  }
+  const menu = (name: string) =>
+    page.getByRole("button", { name, exact: true }).first().click();
+  const pick = (name: string) =>
+    page.locator(".popup").getByRole("menuitem", { name }).click();
+  await menu("Notifications and hiding for Not for me");
+  await pick("Hide this thread");
+  await expect(page.locator(".thread-title")).toHaveText(["Worth keeping"]);
+  // The choice is kept with the account, and the thread is a click away.
+  await page.reload();
+  await expect(page.locator(".thread-title")).toHaveText(["Worth keeping"]);
+  await page.getByRole("button", { name: "Show 1 hidden thread" }).click();
+  await expect(page.locator(".hidden-thread .thread-title")).toHaveText(
+    "Not for me",
+  );
+  await menu("Notifications and hiding for Not for me");
+  await pick("Stop hiding this thread");
+  await expect(page.locator(".thread-title")).toHaveCount(2);
+  await expect(page.locator(".hidden-thread")).toHaveCount(0);
+  await expect(page.locator("[data-show-hidden]")).toHaveCount(0);
+
+  await createChannel(page, "quiet-topics", "topical");
+  const topic = page.getByLabel("Topic", { exact: true });
+  await topic.fill("Signal");
+  await send(page, "Read this.");
+  await topic.fill("Noise");
+  await send(page, "Skip this.");
+  await menu("Notifications and hiding for Noise");
+  await pick("Hide this topic");
+  await expect(page.locator(".recipient-bar")).toHaveCount(1);
+  await expect(
+    page.locator(".message-body").filter({ hasText: "Skip this." }),
+  ).toHaveCount(0);
+  // It is folded away in the sidebar, and still opens.
+  await expect(page.locator(".topic-list > .topic-link")).toHaveText(["Signal"]);
+  await page.locator(".hidden-topics > summary").click();
+  await page.locator(".hidden-topics a").filter({ hasText: "Noise" }).click();
+  await expect(
+    page.locator(".message-body").filter({ hasText: "Skip this." }),
+  ).toBeVisible();
+  await expect(page.locator("#channel-heading .pill.warn")).toHaveText("Hidden");
+
+  const row = page
+    .locator("#channel-list .channel-link")
+    .filter({ hasText: "quiet-topics" });
+  await row.click();
+  await menu("Notifications for #quiet-topics");
+  await pick("Never");
+  await expect(row.locator('[title="Notifications off"]')).toBeVisible();
+
+  await page.locator("[data-nav=settings]").click();
+  await section(page, "Notifications");
+  await expect(page.getByRole("heading", { name: "This device" })).toBeVisible();
+  const choices = page.locator("#section li");
+  await expect(choices).toHaveCount(2);
+  await expect(choices.filter({ hasText: "Noise" })).toContainText("Hidden");
+  await expect(
+    choices.filter({ hasText: "#quiet-topics channel" }),
+  ).toContainText("Never notifies");
+  for (const _ of [1, 2])
+    await page.getByRole("button", { name: "Reset" }).first().click();
+  await expect(page.locator("#section")).toContainText("Nothing is hidden");
+  await openChat(page);
+  await row.click();
+  await expect(page.locator(".recipient-bar")).toHaveCount(2);
+  await expect(row.locator('[title="Notifications off"]')).toHaveCount(0);
+});

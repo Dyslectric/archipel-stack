@@ -30,6 +30,15 @@ import {
 } from "./shared.js";
 import { chatChannel, resetChat } from "./chat.js";
 import { mirrorDialog } from "./mirrors.js";
+import {
+  disablePush,
+  enablePush,
+  pushBlocked,
+  pushOn,
+  pushSupported,
+  testPush,
+} from "./notify.js";
+import type { Pref } from "./shared.js";
 
 // Settings are pages you can move between from the list on the left: yours, federation,
 // a channel's, and the instance's. Each section draws itself into the page and redraws
@@ -246,6 +255,70 @@ const sections: Section[] = [
       onClick(el, "#remove-profile-picture", async () => {
         pictureChanged(await api<User>("/profile/avatar", "DELETE"));
         toast("Profile picture removed.");
+      });
+    },
+  },
+  {
+    group: "personal",
+    key: "notifications",
+    label: "Notifications",
+    about: "Where you are told about new messages, and what you hid.",
+    icon: "bell",
+    async draw(el, ctx) {
+      const prefs = await api<
+        {
+          target: string;
+          kind: "channel" | "dm" | "topic" | "thread";
+          hidden: boolean;
+          notify: boolean | null;
+          channel: { id: string; name: string } | null;
+          title: string | null;
+        }[]
+      >("/prefs");
+      const device = !pushSupported()
+        ? '<p class="muted">This browser cannot receive notifications. On an iPhone or iPad, add Archipel to the Home Screen from the share menu and open it from there.</p>'
+        : pushBlocked()
+          ? '<p class="muted">Notifications from this site are blocked in the browser. Allow them in its site settings, then reload.</p>'
+          : pushOn()
+            ? `<p><span class="pill good">${icon("check")} On</span> This browser is notified of new messages.</p><div class="row"><button type="button" class="secondary" id="push-test">Send a test notification</button><button type="button" class="secondary" id="push-off">Turn off</button></div>`
+            : `<button type="button" id="push-on">${icon("bell")} Turn on notifications</button>`;
+      const place = (p: (typeof prefs)[number]) =>
+        p.kind === "dm"
+          ? `<a href="#/dm/${encodeURIComponent(p.target.slice(3))}">${esc(p.title)}</a> <span class="muted">direct messages</span>`
+          : `<a href="#/c/${p.channel!.id}${p.kind === "topic" ? `/t/${p.target.slice(6)}` : ""}">#${esc(p.channel!.name)}${p.kind === "channel" ? "" : ` › ${esc(p.title || "Untitled")}`}</a> <span class="muted">${p.kind}</span>`;
+      el.innerHTML =
+        card(
+          "This device",
+          device,
+          "You are told when something new is said, even with Archipel closed. A notification names the conversation and who wrote, not what they said. Each browser and device is turned on by itself, and signing out turns it off.",
+        ) +
+        card(
+          "Your choices",
+          prefs.length
+            ? `<ul class="plain">${prefs.map((p) => `<li class="member-row"><div class="grow">${place(p)}<div class="small">${p.hidden ? '<span class="pill warn">Hidden</span> ' : ""}${p.notify === false ? '<span class="pill">Never notifies</span>' : p.notify ? '<span class="pill new">Always notifies</span>' : ""}</div></div><button type="button" class="secondary small" data-reset-pref="${esc(p.target)}">Reset</button></li>`).join("")}</ul>`
+            : '<p class="muted">Nothing is hidden, and every channel and direct conversation you are in notifies you.</p>',
+          "Change what notifies you from the bell at the top of a conversation, and hide or silence a topic or thread from the button beside it. Hidden topics and threads leave the channel, your inbox and the counts of what is new.",
+        );
+      onClick(el, "#push-on", async () => {
+        await enablePush();
+        toast("Notifications are on in this browser.");
+        await ctx.refresh();
+      });
+      onClick(el, "#push-off", async () => {
+        await disablePush();
+        await ctx.refresh();
+      });
+      onClick(el, "#push-test", async () => {
+        await testPush();
+        toast("Sent. It should appear in a moment.");
+      });
+      onClick(el, "[data-reset-pref]", async (button) => {
+        state.prefs = await api<Record<string, Pref>>("/prefs", "PUT", {
+          target: button.dataset.resetPref,
+          hidden: false,
+          notify: null,
+        });
+        await ctx.refresh();
       });
     },
   },

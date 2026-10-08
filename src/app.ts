@@ -14,6 +14,7 @@ import { createOidc, OidcFailure, type OidcStage } from "./oidc.js";
 import { logSignInFailure } from "./auth-log.js";
 import { Xmpp } from "./xmpp.js";
 import { Mirrors } from "./mirrors.js";
+import { Push } from "./push.js";
 
 function cookie(req: Request, name: string) {
   const value = (req.headers.cookie || "")
@@ -33,8 +34,10 @@ export function createApp(config: Config, store: Store) {
   const federation = new Federation(store, config);
   const xmpp = new Xmpp(store, config);
   const mirrors = new Mirrors(store, xmpp);
+  const push = new Push(store, config);
   const app = express();
   app.locals.mirrors = mirrors;
+  app.locals.push = push;
   app.locals.federation = federation;
   app.locals.xmpp = xmpp;
   app.set(
@@ -586,6 +589,24 @@ export function createApp(config: Config, store: Store) {
   app.put("/api/sidebar", (req, res) =>
     res.json(store.setLayout(user(res), req.body || {})),
   );
+  // What the reader hid or silenced, and the browsers they asked to be notified in.
+  app.get("/api/prefs", (_req, res) => res.json(store.prefList(user(res))));
+  app.put("/api/prefs", (req, res) =>
+    res.json(store.setPref(user(res), req.body || {})),
+  );
+  app.get("/api/push", (req, res) =>
+    res.json(push.status(cookie(req, authCookie))),
+  );
+  app.put("/api/push", (req, res) =>
+    res.json(push.subscribe(user(res), cookie(req, authCookie), req.body || {})),
+  );
+  app.delete("/api/push", (req, res) =>
+    res.json(push.unsubscribe(cookie(req, authCookie))),
+  );
+  app.post("/api/push/test", async (req, res) => {
+    await push.test(cookie(req, authCookie));
+    res.json({ ok: true });
+  });
   app.patch("/api/channels/:id/federation", (req, res) =>
     res.json(
       federation.setChannel(

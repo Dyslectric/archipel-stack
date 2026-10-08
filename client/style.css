@@ -628,3 +628,13 @@ dialog.dialog form { margin-top: 16px; }
 /* External room conversations keep the same readable feed and compose frame. */
 .xmpp-join { margin: 12px 0; }
 .xmpp-subject { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* ---- what the reader hid or silenced: the button on a conversation, topic or thread ---- */
+.recipient-bar .pref-button { width: 26px; height: 24px; margin: -2px -6px -2px 4px; }
+.post-meta { display: flex; align-items: flex-start; gap: 8px; }
+.post-meta .pref-button { width: 28px; height: 26px; margin: -4px -6px 0 0; }
+.hidden-thread > .post { opacity: 0.7; }
+.hidden-topics > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 5px; }
+.hidden-topics > summary::-webkit-details-marker { display: none; }
+.hidden-topics > a { opacity: 0.75; }
+.channel-link .mode-tag .i { width: 1em; height: 1em; }

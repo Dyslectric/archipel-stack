@@ -83,6 +83,14 @@ export interface Overview {
   unread: Record<string, number>;
   layout: Layout | null;
   user_blocks: string[];
+  prefs: Record<string, Pref>;
+}
+// What the reader chose for a channel, a direct conversation (dm:<peer>), a topic (topic:<id>) or
+// a thread (thread:<its first message>): hidden from them, and whether it notifies them.
+// A topic or thread with no choice of its own (null) follows its channel.
+export interface Pref {
+  hidden: boolean;
+  notify: boolean | null;
 }
 export interface XmppRoom {
   id: string; room: string; nick: string; desired: boolean; state: string;
@@ -108,6 +116,7 @@ export interface Message {
   queued?: boolean;
   author_actor_url?: string;
   history_placeholder?: number;
+  hidden_thread?: boolean; // in a thread the reader hid
 }
 export interface Session {
   user: User | null;
@@ -131,6 +140,7 @@ export const state = {
   unread: {} as Record<string, number>,
   layout: null as Layout | null,
   userBlocks: [] as string[],
+  prefs: {} as Record<string, Pref>,
 };
 // Set by main.ts: start over from the session (after sign-in or a lost session), sign out,
 // and redraw the account button after a profile change.
@@ -212,6 +222,12 @@ const paths: Record<string, string> = {
   paperclip:
     '<path d="m21 12-8.6 8.6a5 5 0 0 1-7-7L14 5a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.5a1.7 1.7 0 0 1-2.4-2.4l8-7.9"/>',
   sidebar: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>',
+  bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  "bell-off":
+    '<path d="M8.7 3A6 6 0 0 1 18 8a21.3 21.3 0 0 0 .6 5M17 17H3s3-2 3-9a4.67 4.67 0 0 1 .3-1.7M10.3 21a1.94 1.94 0 0 0 3.4 0M2 2l20 20"/>',
+  eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>',
+  "eye-off":
+    '<path d="M9.9 5.2A10.4 10.4 0 0 1 12 5c6.5 0 10 7 10 7a17.6 17.6 0 0 1-2.2 3.1M6.6 6.6A17.3 17.3 0 0 0 2 12s3.5 7 10 7a9.7 9.7 0 0 0 5.4-1.6M9.9 9.9a3 3 0 0 0 4.2 4.2M2 2l20 20"/>',
 };
 // Decorative: say what it means in text or a label next to it.
 export const icon = (name: string, cls = "") =>

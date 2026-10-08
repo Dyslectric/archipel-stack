@@ -11,6 +11,12 @@ const federationTimer = setInterval(() => {
     .catch(() => console.error("Federation worker failed."));
 }, 1000);
 federationTimer.unref();
+const pushTimer = setInterval(() => {
+  void app.locals.push
+    .tick()
+    .catch(() => console.error("Notification worker failed."));
+}, 1500);
+pushTimer.unref();
 const server = app.listen(config.port, config.host, () => {
   console.log(`Archipel is running at ${config.baseUrl}`);
   console.log(
@@ -23,6 +29,7 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
   process.on(signal, () =>
     server.close(() => {
       clearInterval(federationTimer);
+      clearInterval(pushTimer);
       store.close();
       process.exit(0);
     }),

@@ -88,7 +88,7 @@ export async function peerRequest(
   url: URL,
   config: Config,
   headers: Record<string, string> = {},
-  body?: string,
+  body?: string | Buffer,
   maxBytes = 262144,
   timeoutMs = 15000,
 ) {

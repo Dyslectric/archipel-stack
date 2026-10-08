@@ -1,11 +1,12 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import { generateKeyPairSync, sign, createHash, randomUUID } from "node:crypto";
+import { generateKeyPairSync, sign, createHash, randomUUID, createECDH, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
 import express, { type Request } from "express";
 import { Store } from "../src/store.js";
 import { loadConfig, type Config } from "../src/config.js";
 import { createApp } from "../src/app.js";
+import type { Push } from "../src/push.js";
 
 test("remote avatar endpoints require membership and current federation and block permissions", async t => {
   const f = await application(t, { xmppDomain: "chat.example", xmppBridgeSecret: "s".repeat(43) });
@@ -69,7 +70,7 @@ async function application(t: TestContext, override: Partial<Config> = {}) {
     );
     app(req, res);
   });
-  return { store, origin, config, observed };
+  return { store, origin, config, observed, app };
 }
 function browser(origin: string) {
   const cookies = new Map<string, string>();
@@ -1105,4 +1106,107 @@ test("attachments upload by role, serve by unguessable address with ranges, and 
   assert.deepEqual([(await bob.session()).user.attachments, (await bob.session()).user.instance_role.name], [false, "Text only"]);
   assert.equal((await alice.request(`/api/admin/roles/${role.id}`, "DELETE")).status, 200);
   assert.equal((await upload(bob, png, "cat.png")).status, 201);
+});
+
+// What a browser does with a push message: RFC 8291, from the receiving side.
+function pushReceiver() {
+  const ecdh = createECDH("prime256v1"),
+    auth = randomBytes(16);
+  const keys = { p256dh: ecdh.generateKeys().toString("base64url"), auth: auth.toString("base64url") };
+  return {
+    keys,
+    open(body: Buffer) {
+      const salt = body.subarray(0, 16), server = body.subarray(21, 21 + body[20]), sealed = body.subarray(21 + body[20]);
+      const derive = (key: Buffer, salt: Buffer, info: Buffer | string, length: number) => Buffer.from(hkdfSync("sha256", key, salt, info, length));
+      const ikm = derive(ecdh.computeSecret(server), auth, Buffer.concat([Buffer.from("WebPush: info\0"), ecdh.getPublicKey(), server]), 32);
+      const decipher = createDecipheriv("aes-128-gcm", derive(ikm, salt, "Content-Encoding: aes128gcm\0", 16), derive(ikm, salt, "Content-Encoding: nonce\0", 12));
+      decipher.setAuthTag(sealed.subarray(-16));
+      const plain = Buffer.concat([decipher.update(sealed.subarray(0, -16)), decipher.final()]);
+      assert.equal(plain.at(-1), 2);
+      return JSON.parse(plain.subarray(0, -1).toString());
+    },
+  };
+}
+test("browsers that subscribed are notified of new messages until they sign out or the push service forgets them", async t => {
+  const f = await application(t);
+  const received: { path: string; headers: Record<string, unknown>; body: Buffer }[] = [];
+  let gone = false;
+  const service = await listen(t);
+  service.server.on("request", (req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      received.push({ path: req.url!, headers: req.headers, body: Buffer.concat(chunks) });
+      res.statusCode = gone ? 410 : 201;
+      res.end();
+    });
+  });
+  const push = f.app.locals.push as Push;
+  const alice = browser(f.origin), bob = browser(f.origin), phone = browser(f.origin);
+  const a = await alice.login("alice"); const b = await bob.login("bob"); await phone.login("bob");
+  const channel = await (await alice.request("/api/channels", "POST", { name: "general", description: "", mode: "topical", visibility: "public", admission: "open" })).json();
+  await bob.request(`/api/channels/${channel.id}/join`, "POST", {});
+  const topic = await (await alice.request(`/api/channels/${channel.id}/topics`, "POST", { title: "Plans" })).json();
+  const say = (who: ReturnType<typeof browser>, body: string) => who.request(`/api/channels/${channel.id}/messages`, "POST", { body, topic_id: topic.id });
+
+  const status = await (await bob.request("/api/push")).json();
+  assert.equal(status.endpoint, null);
+  assert.equal(Buffer.from(status.public_key, "base64url").length, 65);
+  const desk = pushReceiver(), pocket = pushReceiver();
+  assert.equal((await fetch(`${f.origin}/api/push`)).status, 401);
+  assert.equal((await bob.request("/api/push", "PUT", { endpoint: "http://10.0.0.1/push", keys: desk.keys })).status, 400);
+  assert.equal((await bob.request("/api/push", "PUT", { endpoint: `${service.origin}/desk`, keys: { ...desk.keys, auth: "short" } })).status, 400);
+  assert.equal((await bob.request("/api/push/test", "POST", {})).status, 409);
+  assert.equal((await (await bob.request("/api/push", "PUT", { endpoint: `${service.origin}/desk`, keys: desk.keys })).json()).endpoint, `${service.origin}/desk`);
+  await phone.request("/api/push", "PUT", { endpoint: `${service.origin}/pocket`, keys: pocket.keys });
+  assert.equal((await bob.request("/api/push/test", "POST", {})).status, 200);
+  assert.equal(desk.open(received[0].body).test, true);
+  assert.match(String(received[0].headers.authorization), /^vapid t=[\w-]+\.[\w-]+\.[\w-]+, k=/);
+  const [, claims, signature] = String(received[0].headers.authorization).slice(8).split(",")[0].split(".");
+  assert.equal(JSON.parse(Buffer.from(claims, "base64url").toString()).aud, service.origin);
+  assert.equal(Buffer.from(signature, "base64url").length, 64);
+  received.length = 0;
+
+  // What was already there is not news; what comes next is, once for each of Bob's browsers.
+  await say(alice, "Before anyone was listening");
+  await push.tick();
+  assert.equal(received.length, 0);
+  await say(alice, "First"); await say(alice, "Second"); await say(bob, "Bob's own");
+  await push.tick();
+  assert.deepEqual(received.map((r) => r.path).sort(), ["/desk", "/pocket"]);
+  const notice = desk.open(received.find((r) => r.path === "/desk")!.body);
+  assert.deepEqual(notice, { tag: `topic:${topic.id}`, title: "#general › Plans", body: "2 new messages", url: `/#/c/${channel.id}/t/${topic.id}` });
+  assert.ok(!JSON.stringify(notice).includes("First"));
+  assert.throws(() => pocket.open(received.find((r) => r.path === "/desk")!.body));
+  received.length = 0;
+  await push.tick();
+  assert.equal(received.length, 0);
+
+  // A silenced channel, a hidden topic and a read conversation stay quiet.
+  assert.equal((await bob.request("/api/prefs", "PUT", { target: channel.id, notify: false })).status, 200);
+  await say(alice, "Silenced"); await push.tick();
+  assert.equal(received.length, 0);
+  await bob.request("/api/prefs", "PUT", { target: `topic:${topic.id}`, notify: true });
+  await say(alice, "This topic asked"); await push.tick();
+  assert.equal(desk.open(received.find((r) => r.path === "/desk")!.body).body, "New message from alice");
+  received.length = 0;
+  await bob.request("/api/prefs", "PUT", { target: `topic:${topic.id}`, hidden: true });
+  assert.deepEqual((await (await bob.request("/api/overview")).json()).prefs, { [channel.id]: { hidden: false, notify: false }, [`topic:${topic.id}`]: { hidden: true, notify: true } });
+  assert.deepEqual((await (await bob.request("/api/prefs")).json()).map((p: { kind: string; title: string | null }) => [p.kind, p.title]), [["channel", null], ["topic", "Plans"]]);
+  await say(alice, "Hidden"); await push.tick();
+  assert.equal(received.length, 0);
+  assert.equal((await (await bob.request("/api/overview")).json()).unread[channel.id], undefined);
+
+  // Direct messages notify too. Signing out stops that browser; a subscription the push service dropped is forgotten.
+  await alice.request("/api/dms", "POST", { to: b.username, body: "Psst" });
+  await push.tick();
+  assert.deepEqual(pocket.open(received.find((r) => r.path === "/pocket")!.body), { tag: `dm:${f.origin}/actors/users/${a.id}`, title: "alice", body: "New direct message", url: `/#/dm/${a.id}` });
+  received.length = 0;
+  await phone.request("/api/logout", "POST", {});
+  gone = true;
+  await alice.request("/api/dms", "POST", { to: b.username, body: "Again" });
+  await push.tick();
+  assert.deepEqual(received.map((r) => r.path), ["/desk"]);
+  assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM push_subscriptions").get()!.n, 0);
+  assert.equal((await (await bob.request("/api/push")).json()).endpoint, null);
 });

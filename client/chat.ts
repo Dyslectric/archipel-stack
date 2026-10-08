@@ -32,6 +32,7 @@ import { closePicker, togglePicker } from "./picker.js";
 import { renderSidebar, wireSidebar } from "./sidebar.js";
 import { attachButton, pickFiles, quoteInto } from "./attach.js";
 import { markdownText } from "./markdown.js";
+import { isHidden, notifies, prefMenu, type PrefKind } from "./prefs.js";
 
 interface Page {
   messages: Message[];
@@ -59,6 +60,8 @@ const collapsed = new Set<string>(),
   seen = new Set<string>();
 let unseen: string[] = [],
   popped: string[] = [];
+let showHidden = false, // hidden threads are on the page for now
+  lastPrefs = "";
 
 export const chatChannel = () => current;
 export const chatTopic = () => narrow;
@@ -155,7 +158,10 @@ export function chatFrame(view: HTMLElement) {
   wireSidebar($("#channel-list"));
   wireFeed();
   $("#channel-actions").addEventListener("click", (e) => {
-    if ((e.target as Element).closest("#members")) toggleMembers();
+    const at = e.target as Element,
+      pref = at.closest<HTMLElement>("[data-pref-menu]");
+    if (at.closest("#members")) toggleMembers();
+    else if (pref) openPrefMenu(pref);
   });
   $("#member-panel").addEventListener("click", (e) => {
     if ((e.target as Element).closest("[data-close-members]")) toggleMembers();
@@ -214,6 +220,7 @@ async function selectChannel(id: string, topicId?: string) {
   narrow = topicOf(topicId || null) ? topicId! : null;
   collapsed.clear();
   seen.clear();
+  showHidden = false;
   marked = 0;
   lastSignature = JSON.stringify(messages);
   localStorage.setItem("archipel-channel", id);
@@ -223,6 +230,7 @@ async function selectChannel(id: string, topicId?: string) {
 function paint() {
   painted = true;
   unseen = [];
+  lastPrefs = JSON.stringify(state.prefs);
   $("#sidebar").classList.remove("mobile-open");
   $("#rows").innerHTML = "";
   renderSidebar();
@@ -283,19 +291,58 @@ export function sortedTopics() {
     (a, b) => (last.get(b.id) || 0) - (last.get(a.id) || 0),
   );
 }
+// The button that opens a conversation's notification choices, or a topic's or thread's
+// notification and hiding choices. It shows what was chosen.
+function prefButton(kind: PrefKind, target: string, name: string, cls = "") {
+  const part = kind === "topic" || kind === "thread",
+    quiet = !notifies(target, part ? current!.id : undefined),
+    ico = isHidden(target) ? "eye-off" : quiet ? "bell-off" : part ? "more" : "bell",
+    label = `${part ? "Notifications and hiding" : "Notifications"} for ${name}`;
+  return `<button type="button" class="icon-button pref-button${cls ? ` ${cls}` : ""}" data-pref-menu="${esc(target)}" data-pref-kind="${kind}" aria-haspopup="menu" aria-label="${esc(label)}" title="${esc(label)}${isHidden(target) ? " (hidden)" : quiet ? " (off)" : ""}">${icon(ico)}</button>`;
+}
+function openPrefMenu(button: HTMLElement) {
+  prefMenu(
+    button,
+    button.dataset.prefKind as PrefKind,
+    button.dataset.prefMenu!,
+    current?.dm ? undefined : current?.id,
+    () => {
+      if (!current) return;
+      lastPrefs = JSON.stringify(state.prefs);
+      renderHeader();
+      render();
+      renderSidebar();
+    },
+  );
+}
+// The messages of threads the reader hid. A thread is hidden with its first message; replies
+// whose thread began before this page say so themselves.
+function hiddenThreads() {
+  const byId = new Map(messages.map((m) => [m.id, m]));
+  return new Set(
+    messages.filter((m) => {
+      let first = m;
+      for (let up = byId.get(m.parent_id || ""); up; up = byId.get(up.parent_id || ""))
+        first = up;
+      return first.parent_id
+        ? !!m.hidden_thread
+        : isHidden(`thread:${first.id}`);
+    }),
+  );
+}
 function renderHeader() {
   const c = current!,
     topic = topicOf(narrow);
   if (c.dm) {
     $("#channel-heading").innerHTML =
       `<h1>${avatar(c.dm, "small")}<strong>${nameButton(c.dm, c.dm.peer)}</strong></h1><span class="handle">@${esc(c.dm.username)}</span>${c.dm.remote ? '<span class="pill new">Remote</span>' : ""}<span class="desc muted small">Direct messages</span>`;
-    $("#channel-actions").innerHTML = "";
+    $("#channel-actions").innerHTML = prefButton("dm", c.id, c.name);
     return;
   }
   $("#channel-heading").innerHTML =
-    `<h1>${channelIcon(c)}<strong>${esc(c.name)}</strong>${topic ? `${icon("chevron-right", "sep")}<span class="topic-name">${esc(topic.title)}</span>` : ""}</h1><span class="pill">${modeLabel(c.mode)}</span>${c.remote_actor ? '<span class="pill new">Remote</span>' : c.federation_enabled ? '<span class="pill new">Federated</span>' : ""}${c.bridge_room ? `<span class="pill new" title="Bridged with the XMPP room ${esc(c.bridge_room)}">Bridged</span>` : ""}${c.mirror ? `<span class="pill new">${c.mirror === "writable" ? "Fork" : "Mirror"}</span>` : ""}${c.description ? `<span class="desc muted small">${esc(c.description)}</span>` : ""}`;
+    `<h1>${channelIcon(c)}<strong>${esc(c.name)}</strong>${topic ? `${icon("chevron-right", "sep")}<span class="topic-name">${esc(topic.title)}</span>` : ""}</h1>${topic && isHidden(`topic:${topic.id}`) ? '<span class="pill warn">Hidden</span>' : ""}<span class="pill">${modeLabel(c.mode)}</span>${c.remote_actor ? '<span class="pill new">Remote</span>' : c.federation_enabled ? '<span class="pill new">Federated</span>' : ""}${c.bridge_room ? `<span class="pill new" title="Bridged with the XMPP room ${esc(c.bridge_room)}">Bridged</span>` : ""}${c.mirror ? `<span class="pill new">${c.mirror === "writable" ? "Fork" : "Mirror"}</span>` : ""}${c.description ? `<span class="desc muted small">${esc(c.description)}</span>` : ""}`;
   $("#channel-actions").innerHTML =
-    `<button type="button" class="act" id="members" aria-pressed="${membersOpen()}" title="Show or hide the members of #${esc(c.name)}">${icon("people")}<span>${c.member_count} member${c.member_count === 1 ? "" : "s"}</span></button><a class="icon-button" href="#/settings/channel/overview/${c.id}" aria-label="Channel settings" title="Channel settings">${icon("settings")}</a>`;
+    `${!c.role ? "" : topic ? prefButton("topic", `topic:${topic.id}`, topic.title) : prefButton("channel", c.id, `#${c.name}`)}<button type="button" class="act" id="members" aria-pressed="${membersOpen()}" title="Show or hide the members of #${esc(c.name)}">${icon("people")}<span>${c.member_count} member${c.member_count === 1 ? "" : "s"}</span></button><a class="icon-button" href="#/settings/channel/overview/${c.id}" aria-label="Channel settings" title="Channel settings">${icon("settings")}</a>`;
 }
 
 // ---- messages ----
@@ -380,7 +427,7 @@ function chatNodes(list: Message[]): Node[] {
       day = esc(dayLabel(first.created_at));
     const head =
       c.mode === "topical"
-        ? `<header class="recipient-bar"><a class="rb-channel" href="#/c/${c.id}">${channelIcon(c)}${esc(c.name)}</a>${icon("chevron-right", "sep")}<a class="rb-topic" href="#/c/${c.id}/t/${first.topic_id}">${esc(topicOf(first.topic_id)?.title || "(no topic)")}</a><span class="rb-date">${day}</span></header>`
+        ? `<header class="recipient-bar"><a class="rb-channel" href="#/c/${c.id}">${channelIcon(c)}${esc(c.name)}</a>${icon("chevron-right", "sep")}<a class="rb-topic" href="#/c/${c.id}/t/${first.topic_id}">${esc(topicOf(first.topic_id)?.title || "(no topic)")}</a><span class="rb-date">${day}</span>${c.role && first.topic_id ? prefButton("topic", `topic:${first.topic_id}`, topicOf(first.topic_id)?.title || "this topic") : ""}</header>`
         : `<div class="day-divider"><span>${day}</span></div>`;
     return {
       key: `g-${first.id}`,
@@ -439,7 +486,7 @@ function threadNodes(list: Message[]): Node[] {
       const n = count(m);
       return {
         key: `t-${m.id}`,
-        html: `<section class="thread card"><article class="post message" id="m-${m.id}">${m.title && editing !== m.id ? `<h2 class="thread-title">${emojiHtml(m.title, m.emojis || [])}</h2>` : ""}<div class="meta small message-meta">${byline(m)}</div>${bodyHtml(m, "md")}${threadActions(m)}</article>${n ? `<details open class="thread-replies" data-key="r-${m.id}"><summary title="Show or hide every reply in this thread">${icon("chevron-down", "chev")}<span>${replies(n)}</span></summary><div class="comments" data-kids></div></details>` : '<div class="comments" data-kids></div>'}</section>`,
+        html: `<section class="thread card${isHidden(`thread:${m.id}`) ? " hidden-thread" : ""}"><article class="post message" id="m-${m.id}">${m.title && editing !== m.id ? `<h2 class="thread-title">${emojiHtml(m.title, m.emojis || [])}</h2>` : ""}<div class="meta small message-meta post-meta"><span class="grow">${byline(m)}${isHidden(`thread:${m.id}`) ? ' · <span class="pill warn">Hidden</span>' : ""}</span>${current!.role ? prefButton("thread", `thread:${m.id}`, m.title || "this thread") : ""}</div>${bodyHtml(m, "md")}${threadActions(m)}</article>${n ? `<details open class="thread-replies" data-key="r-${m.id}"><summary title="Show or hide every reply in this thread">${icon("chevron-down", "chev")}<span>${replies(n)}</span></summary><div class="comments" data-kids></div></details>` : '<div class="comments" data-kids></div>'}</section>`,
         kids: (children.get(m.id) || []).map((child) => comment(child, 0)),
       };
     });
@@ -501,17 +548,28 @@ function render(
   const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 80,
     oldHeight = list.scrollHeight,
     oldTop = list.scrollTop;
+  // A hidden topic is read by opening it; hidden threads by asking for them.
+  const quiet = c.mode === "threaded" ? hiddenThreads() : new Set<Message>(),
+    away = new Set([...quiet].map((m) => m.id)),
+    hiddenCount = [...quiet].filter(
+      (m) => !m.parent_id || !away.has(m.parent_id),
+    ).length;
+  if (!hiddenCount) showHidden = false;
   const shown =
-    c.mode === "topical" && narrow
-      ? messages.filter((m) => m.topic_id === narrow)
-      : messages;
+    c.mode === "topical"
+      ? messages.filter((m) =>
+          narrow ? m.topic_id === narrow : !isHidden(`topic:${m.topic_id}`),
+        )
+      : quiet.size && !showHidden
+        ? messages.filter((m) => !quiet.has(m))
+        : messages;
   const top = `${
     olderCursor
       ? '<button type="button" id="older-messages" class="secondary small older-button">Load earlier messages</button>'
       : c.dm
         ? `<div class="channel-intro"><h2>${avatar(c.dm)}${esc(c.name)}</h2><p class="muted">The start of your direct messages with ${esc(c.name)}. Only the two of you can read them.</p><p class="muted small"><code>@${esc(c.dm.username)}</code>${c.dm.remote ? " · on another instance" : ""}</p></div>`
         : `<div class="channel-intro"><h2>${channelIcon(c)}${esc(c.name)}</h2><p class="muted">${esc(c.description || "The start of this channel.")}</p><p class="muted small">${c.visibility === "members" ? "Members only" : "Public"} · ${modeLabel(c.mode)} · <code>#${esc(c.name)}@${esc(c.remote_actor ? new URL(c.remote_actor).host : state.session.instance)}</code></p></div>`
-  }${c.mode === "threaded" && shown.some((m) => m.parent_id) ? '<div class="toolbar"><button type="button" class="small secondary" data-fold="open">Expand all</button><button type="button" class="small secondary" data-fold="closed">Collapse all</button></div>' : ""}`;
+  }${c.mode === "threaded" && (hiddenCount || shown.some((m) => m.parent_id)) ? `<div class="toolbar">${shown.some((m) => m.parent_id) ? '<button type="button" class="small secondary" data-fold="open">Expand all</button><button type="button" class="small secondary" data-fold="closed">Collapse all</button>' : ""}${hiddenCount ? `<button type="button" class="small secondary" data-show-hidden aria-pressed="${showHidden}">${icon(showHidden ? "eye-off" : "eye")} ${showHidden ? "Put away" : "Show"} ${hiddenCount} hidden thread${hiddenCount === 1 ? "" : "s"}</button>` : ""}</div>` : ""}`;
   if ($("#feed-top").innerHTML !== top) $("#feed-top").innerHTML = top;
   popped = [];
   sync(
@@ -522,7 +580,7 @@ function render(
   $("#rows").className = `rows mode-${c.mode}`;
   $("#feed-empty").innerHTML = shown.length
     ? ""
-    : `<p class="card empty muted">${c.mode === "threaded" ? "No threads yet." : narrow ? "No messages in this topic yet." : "No messages yet."}</p>`;
+    : `<p class="card empty muted">${c.mode === "threaded" ? (hiddenCount ? "Every thread here is hidden." : "No threads yet.") : narrow ? "No messages in this topic yet." : messages.length ? "Every topic here is hidden. Open one from the sidebar to read it." : "No messages yet."}</p>`;
   for (const d of $$<HTMLDetailsElement>(folds, list))
     d.open = !collapsed.has(d.dataset.key!);
   refreshTimes(list);
@@ -703,6 +761,10 @@ function wireFeed() {
       const open = hit.dataset.fold === "open";
       for (const d of $$<HTMLDetailsElement>(open ? folds : "details.thread-replies", list))
         d.open = open;
+    } else if ((hit = on("[data-pref-menu]"))) openPrefMenu(hit);
+    else if (on("[data-show-hidden]")) {
+      showHidden = !showHidden;
+      render();
     } else if ((hit = on("[data-jump]"))) reveal(hit.dataset.jump!);
     else if ((hit = on("[data-emoji-for]")))
       togglePicker(hit, $<HTMLTextAreaElement>("textarea", hit.closest("form")!));
@@ -807,7 +869,13 @@ function renderComposer(keepDraft = true) {
   if (reply?.topic_id) topic = topicOf(reply.topic_id)?.title || topic;
   else if (narrow && !keepDraft) topic = topicOf(narrow)?.title || "";
   if (c.mode === "topical" && !topic)
-    topic = topicOf(narrow || messages.at(-1)?.topic_id || null)?.title || "";
+    topic =
+      topicOf(
+        narrow ||
+          [...messages].reverse().find((m) => !isHidden(`topic:${m.topic_id}`))
+            ?.topic_id ||
+          null,
+      )?.title || "";
   const place =
     c.mode === "threaded"
       ? "Start the thread…"
@@ -922,8 +990,9 @@ function updateTopicOptions() {
 }
 
 // ---- keeping up: called every few seconds while the conversation is on screen ----
-export function redrawChat(composer = false) {
+export function redrawChat(composer = false, header = false) {
   if (!current) return;
+  if (header && document.querySelector("#rows")) renderHeader();
   render();
   if (composer) renderComposer();
 }
@@ -963,8 +1032,14 @@ export async function refreshCurrent() {
   if (roleChanged || federationChanged || headerChanged || topicsChanged)
     renderHeader();
   renderMembers();
+  // Choices made in another browser, or just now from the sidebar.
+  const prefs = JSON.stringify(state.prefs),
+    prefsChanged = prefs !== lastPrefs;
+  lastPrefs = prefs;
+  if (prefsChanged && !(roleChanged || federationChanged || headerChanged || topicsChanged))
+    renderHeader();
   const signature = JSON.stringify(messages);
-  if (signature !== lastSignature || roleChanged || federationChanged) {
+  if (signature !== lastSignature || roleChanged || federationChanged || prefsChanged) {
     lastSignature = signature;
     render({ animate: true });
   } else refreshTimes($("#message-list"));

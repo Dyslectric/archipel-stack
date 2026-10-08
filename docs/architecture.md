@@ -168,8 +168,10 @@ does not supply a channel ownership-transfer or consensus mechanism.
 Deliver live browser events only after a message transaction commits. Keep the
 browser API separate from federation so clients never sign server activities.
 Add PWA installation and service-worker push after the basic messenger works.
-Proposed: push notifications omit message content by default; subscription
-revocation and logout stop future delivery to that subscription.
+Implemented: push notifications name the conversation and the author and omit
+message content; logout, session expiry and revocation stop delivery to that
+subscription. A worker in the server process finds new messages by sequence
+number, so every way a message arrives (local, federated, bridged) notifies.
 
 [ConsortStack](https://github.com/ConsortChat/ConsortStack) checks membership on
 the server and issues Jitsi JWTs scoped to a conversation's derived room.

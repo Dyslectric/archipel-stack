@@ -19,7 +19,8 @@ import {
   type SideSection,
   type XmppRoom,
 } from "./shared.js";
-import { chatChannel, chatTopic, sortedTopics } from "./chat.js";
+import { chatChannel, chatTopic, redrawChat, sortedTopics } from "./chat.js";
+import { isHidden, pickPref, prefItems } from "./prefs.js";
 
 // The sidebar: direct messages, channels, then XMPP rooms. Each section folds away, and its conversations can be
 // put in named groups and reordered, by dragging or from the menu on each row. The arrangement is
@@ -169,23 +170,29 @@ async function newGroup(kind: SideKind, firstItem?: string) {
 }
 
 // ---- the markup ----
+const silenced = (id: string) =>
+  state.prefs[id]?.notify === false
+    ? `<span class="mode-tag" title="Notifications off">${icon("bell-off")}</span>`
+    : "";
 function channelRow(c: Channel) {
   const open = chatChannel(),
     narrow = chatTopic(),
     on = open?.id === c.id;
-  const topics =
-    on && c.mode === "topical" && open!.topics?.length
-      ? `<div class="topic-list">${sortedTopics()
-          .map(
-            (t) =>
-              `<a class="topic-link${narrow === t.id ? " on" : ""}" href="#/c/${c.id}/t/${t.id}"${narrow === t.id ? ' aria-current="page"' : ""}>${esc(t.title)}</a>`,
-          )
-          .join("")}</div>`
-      : "";
+  const topic = (t: { id: string; title: string }) =>
+    `<a class="topic-link${narrow === t.id ? " on" : ""}" href="#/c/${c.id}/t/${t.id}"${narrow === t.id ? ' aria-current="page"' : ""}>${esc(t.title)}</a>`;
+  // Hidden topics are folded away under the others; the one being read stays in sight.
+  const all = on && c.mode === "topical" ? sortedTopics() : [],
+    away = all.filter((t) => isHidden(`topic:${t.id}`) && narrow !== t.id);
+  const topics = all.length
+    ? `<div class="topic-list">${all
+        .filter((t) => !away.includes(t))
+        .map(topic)
+        .join("")}${away.length ? `<details class="hidden-topics"><summary class="topic-link">${icon("eye-off")} ${away.length} hidden</summary>${away.map(topic).join("")}</details>` : ""}</div>`
+    : "";
   return {
     name: `#${c.name}`,
     extra: topics,
-    link: `<a class="channel-link${on && !narrow ? " on" : ""}" draggable="false" href="#/c/${c.id}"${on && !narrow ? ' aria-current="page"' : ""} data-channel="${c.id}">${channelIcon(c)}<span class="grow">${esc(c.name)}</span>${c.mode !== "timeline" ? `<span class="mode-tag">${modeLabel(c.mode)}</span>` : ""}${count(unread(c.id))}</a>`,
+    link: `<a class="channel-link${on && !narrow ? " on" : ""}" draggable="false" href="#/c/${c.id}"${on && !narrow ? ' aria-current="page"' : ""} data-channel="${c.id}">${channelIcon(c)}<span class="grow">${esc(c.name)}</span>${c.mode !== "timeline" ? `<span class="mode-tag">${modeLabel(c.mode)}</span>` : ""}${silenced(c.id)}${count(unread(c.id))}</a>`,
   };
 }
 function dmRow(c: Conversation) {
@@ -193,7 +200,7 @@ function dmRow(c: Conversation) {
   return {
     name: c.display_name,
     extra: "",
-    link: `<a class="channel-link dm-link${on ? " on" : ""}" draggable="false" href="${esc(dmHref(c.peer))}"${on ? ' aria-current="page"' : ""} title="@${esc(c.username)}">${avatar(c, "small")}<span class="grow">${esc(c.display_name)}</span>${c.remote ? `<span class="mode-tag">${icon("globe")}</span>` : ""}${count(unread(`dm:${c.peer}`))}</a>`,
+    link: `<a class="channel-link dm-link${on ? " on" : ""}" draggable="false" href="${esc(dmHref(c.peer))}"${on ? ' aria-current="page"' : ""} title="@${esc(c.username)}">${avatar(c, "small")}<span class="grow">${esc(c.display_name)}</span>${c.remote ? `<span class="mode-tag">${icon("globe")}</span>` : ""}${silenced(`dm:${c.peer}`)}${count(unread(`dm:${c.peer}`))}</a>`,
   };
 }
 function roomRow(r: XmppRoom) {
@@ -284,9 +291,13 @@ function itemMenu(button: HTMLElement) {
   const panel = popup(
     button,
     `<div class="menu-section" role="menu">${item("up", "Move up", "arrow-up")}${item("down", "Move down", "arrow-down")}</div>
-    <div class="menu-section" role="menu"><div class="menu-label">Group</div>${section.groups.map((g) => item(`to:${g.id}`, g.name, "folder", g === inGroup)).join("")}${inGroup ? item("to:", "No group", "x") : ""}${item("new", "New group…", "folder-plus")}</div>`,
+    <div class="menu-section" role="menu"><div class="menu-label">Group</div>${section.groups.map((g) => item(`to:${g.id}`, g.name, "folder", g === inGroup)).join("")}${inGroup ? item("to:", "No group", "x") : ""}${item("new", "New group…", "folder-plus")}</div>${kind === "xmpp" ? "" : prefItems(kind === "dms" ? "dm" : "channel", id)}`,
   );
   panel?.addEventListener("click", (e) => {
+    pickPref(e, id, () => {
+      renderSidebar();
+      redrawChat(false, true);
+    });
     const name = (e.target as Element).closest<HTMLElement>("[data-do]")
       ?.dataset.do;
     if (name === "up") stepItem(id, -1);
