@@ -30,7 +30,7 @@ import {
 } from "./shared.js";
 import { closePicker, togglePicker } from "./picker.js";
 import { renderSidebar, wireSidebar } from "./sidebar.js";
-import { attachButton, pickFiles } from "./attach.js";
+import { attachButton, pickFiles, quoteInto } from "./attach.js";
 import { markdownText } from "./markdown.js";
 
 interface Page {
@@ -335,6 +335,9 @@ function chatMessage(m: Message, cont: boolean) {
   const tools = [
     canPost() && !m.deleted_at && current!.mode === "topical"
       ? `<button type="button" class="icon-button reply-button" data-reply="${m.id}" aria-label="Reply to ${esc(m.display_name)}" title="Reply">${icon("reply")}</button>`
+      : "",
+    canPost() && !m.deleted_at
+      ? `<button type="button" class="icon-button quote-button" data-quote="${m.id}" aria-label="Quote ${esc(m.display_name)}" title="Quote">${icon("quote")}</button>`
       : "",
     mine(m)
       ? `<button type="button" class="icon-button edit-button" data-edit="${m.id}" aria-label="Edit message" title="Edit">${icon("pencil")}</button>`
@@ -709,6 +712,15 @@ function wireFeed() {
       reply = messages.find((m) => m.id === hit!.dataset.reply) || null;
       renderComposer();
       $("#message-body").focus();
+    } else if ((hit = on("[data-quote]"))) {
+      // An XMPP room's rows sit in this feed too, and answer for themselves (xmpp-rooms.ts).
+      const quoted = messages.find((m) => m.id === hit!.dataset.quote),
+        topic = document.querySelector<HTMLInputElement>("#compose-topic");
+      if (!quoted) return;
+      // The answer belongs with what it quotes, unless it is already a reply to something else.
+      if (topic && !reply && quoted.topic_id)
+        topic.value = topicOf(quoted.topic_id)?.title || topic.value;
+      quoteInto($<HTMLTextAreaElement>("#message-body"), quoted.body);
     } else if ((hit = on("[data-edit]"))) {
       editing = hit.dataset.edit!;
       render();

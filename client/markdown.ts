@@ -217,6 +217,15 @@ export function markdownHtml(
 ) {
   return blocks(body.replace(/\r\n?/g, "\n").split("\n"), { emojis, origin }, 0);
 }
+// A message as a quotation: each of its lines behind a >, as written.
+export function markdownQuote(body: string) {
+  return body
+    .replace(/\r\n?/g, "\n")
+    .trim()
+    .split("\n")
+    .map((line) => (line ? `> ${line}` : ">"))
+    .join("\n");
+}
 // One line of plain text for a preview: what the message says, without its markup.
 export function markdownText(body: string) {
   return body

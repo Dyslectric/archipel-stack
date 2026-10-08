@@ -136,6 +136,22 @@ test("topics separate conversations and allow replies within their topic", async
   await expect(
     page.locator(".message-body").filter({ hasText: "Our first plan." }),
   ).toHaveCount(0);
+  // Quoting puts the message in the compose box behind a >, addressed to its own topic.
+  const box = page.getByRole("textbox", { name: "Message", exact: true });
+  await topic.fill("Elsewhere");
+  await page.locator(".message").filter({ hasText: "Time to build." }).hover();
+  await page.getByRole("button", { name: "Quote alice" }).click();
+  await expect(box).toHaveValue("> Time to build.\n\n");
+  await expect(box).toBeFocused();
+  await expect(topic).toHaveValue("Building");
+  await box.pressSequentially("Agreed.");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.locator(".message-body blockquote")).toHaveText(
+    "Time to build.",
+  );
+  await expect(
+    page.locator(".message-body").filter({ hasText: "Agreed." }),
+  ).toBeVisible();
 });
 
 test("nested threads preserve replies when a parent is removed", async ({
@@ -970,6 +986,9 @@ test("external XMPP room browser flow joins, renders safe content, posts and fol
   await expect(page.locator("#feed-top")).toContainText("A room hosted elsewhere");
   await expect(page.locator(".message-body")).toContainText("<img src=x");
   expect(await page.evaluate(() => (window as unknown as { archipelUnsafe?: boolean }).archipelUnsafe)).toBeUndefined();
+  await page.locator(".xmpp-message").hover();
+  await page.getByRole("button", { name: "Quote host" }).click();
+  await expect(page.getByRole("textbox", { name: "Message", exact: true })).toHaveValue('> <img src=x onerror="window.archipelUnsafe=true">\n\n');
   await page.getByRole("textbox", { name: "Message", exact: true }).fill("Hello from the browser");
   await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.locator(".xmpp-message").filter({ hasText: "Hello from the browser" })).toContainText("Queued");

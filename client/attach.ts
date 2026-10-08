@@ -1,4 +1,5 @@
 import { icon, state, toast } from "./shared.js";
+import { markdownQuote } from "./markdown.js";
 
 // Pictures and videos go into a message as ![name](address), where the cursor is: chosen with the
 // paperclip, pasted, or dropped on the box. The address is the file on this instance.
@@ -14,6 +15,15 @@ function put(area: HTMLTextAreaElement, text: string) {
   const at = area.selectionStart ?? area.value.length,
     gap = at && !/\s$/.test(area.value.slice(0, at)) ? " " : "";
   area.setRangeText(gap + text, at, area.selectionEnd ?? at, "end");
+  area.dispatchEvent(new Event("input", { bubbles: true }));
+}
+// A quoted message goes in on lines of its own, with the cursor left under it for the answer.
+export function quoteInto(area: HTMLTextAreaElement, body: string) {
+  const at = area.selectionStart ?? area.value.length,
+    before = area.value.slice(0, at),
+    gap = !before.trim() ? "" : "\n\n".slice(/\n*$/.exec(before)![0].length);
+  area.focus();
+  area.setRangeText(`${gap}${markdownQuote(body)}\n\n`, at, area.selectionEnd ?? at, "end");
   area.dispatchEvent(new Event("input", { bubbles: true }));
 }
 function swap(area: HTMLTextAreaElement, from: string, to: string) {

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { markdownHtml, markdownText } from "../client/markdown.js";
+import { markdownHtml, markdownQuote, markdownText } from "../client/markdown.js";
 
 const origin = "https://chat.example";
 const md = (body: string) => markdownHtml(body, [], origin);
@@ -72,6 +72,14 @@ test("markdown renders emoji shortcodes outside code and keeps unknown ones as w
   assert.match(html, /<img class="custom-emoji" src="\/api\/emojis\/1\/image" alt=":island_wave:"/);
   assert.match(html, /:nope_this:/);
   assert.match(html, /<code>:wave:<\/code>/);
+});
+
+test("a quoted message keeps its lines, paragraphs and formatting", () => {
+  assert.equal(markdownQuote("one\r\ntwo\n\n**three**\n"), "> one\n> two\n>\n> **three**");
+  assert.equal(
+    md(`${markdownQuote("one\n\n> inner")}\n\nanswer`),
+    "<blockquote><p>one</p><blockquote><p>inner</p></blockquote></blockquote><p>answer</p>",
+  );
 });
 
 test("markdown previews are plain text and long inputs stay quick", () => {
