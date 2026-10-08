@@ -17,6 +17,7 @@ settings, richer channel views, and the existing ActivityPub federation.
 | Local direct messages | Native clients and browser share history and blocks |
 | XMPP server-to-server direct messages | Certificate-authenticated TLS; instance federation and per-user send/receive grants required |
 | XEP-0045 rooms | Local timeline channels; authorized join, presence, chat, discovery |
+| Occupants from other home servers | Federated public timeline channels; s2s join, bounded join history, live messages, posting, room MAM; moderation in Archipel |
 | Foreign XEP-0045 rooms | Native client participation; browser join/leave, subjects, speaking roles, live messages and bounded join history |
 | XEP-0313 MAM v2, XEP-0059 paging | Personal and room archives; bounded pages, timestamps, direct peer filter, before/after cursors |
 | XEP-0359 stanza IDs | Stable archive IDs; native stanza IDs and origin IDs retained |
@@ -28,10 +29,12 @@ settings, richer channel views, and the existing ActivityPub federation.
 
 This is a defined XMPP interoperability profile, not a claim that every XEP or
 every client's optional feature is supported. Remote users can exchange direct
-messages with local accounts and Archipel accounts can join foreign rooms.
-Joining Archipel rooms from a foreign home server is still unsupported.
-Local-room nicknames are assigned from the account's stable XMPP node; foreign
-rooms use a chosen nickname, subject to the hosting room's rules.
+messages with local accounts, Archipel accounts can join foreign rooms, and
+accounts on other home servers can join local rooms that opted into federation.
+Local-room nicknames are assigned by Archipel: the account's stable XMPP node
+for local accounts and the full bare address (`user@domain`) for occupants of
+other servers. Foreign rooms use a chosen nickname, subject to the hosting
+room's rules.
 
 ## Join a room hosted elsewhere
 
@@ -76,6 +79,53 @@ rooms when the account already has membership); password entry, room management,
 occupant private messages, corrections, attachments and OMEMO are not exposed in
 the browser view. Foreign content is not mirrored into local or ActivityPub
 channels or the personal direct-message archive.
+
+## Let other servers join a local room
+
+Two Archipel instances share a room when one hosts it and members of the other
+join it through **Channels → Join an XMPP room**, entering
+`channel-name@channels.<XMPP_DOMAIN>` of the hosting instance. Any standard
+XMPP client on another server can join the same way.
+
+A local room admits accounts from other home servers only when all of these
+hold, and each is checked again on every stanza and every delivery cycle:
+
+- XMPP and federation are enabled on the instance, and the stanza arrived on a
+  certificate-authenticated server-to-server stream;
+- the channel is a timeline channel with **Federation** enabled in its
+  settings and **Who can read** set to everyone (public);
+- the channel has open membership, or a moderator has set an *Allow to join*
+  rule for that identity after it was first seen;
+- neither the sender's domain (administrator instance block) nor its
+  `xmpp:user@domain` identity is blocked, and no channel rule blocks it.
+
+The first admitted join creates a remote identity keyed `xmpp:user@domain` and a
+channel membership. It is listed under the channel's **Members** with its full
+address, and moderators remove or block it there exactly like a local member.
+It cannot be made a moderator. Removal, a channel or instance block, or
+disabling channel or instance federation evicts the occupant within the
+one-second delivery cycle and refuses further posts and archive reads. A removed occupant
+of an open channel may join again; use a block to keep it out. As for local
+accounts, leaving the room keeps the membership.
+
+Foreign occupants receive up to 100 messages of join history (25 unless the
+client asks otherwise), live messages, corrections and removal notices, and can
+page the room archive with MAM. They are only sent messages whose local author
+currently holds the sending and posting federation grants; removed messages
+appear as removal notices. Their own posts are committed to the Archipel
+archive under the remote identity before any occupant sees them, deduplicated
+by stanza ID within the server-to-server stream, and shown in the browser with
+the full address as handle and an **XMPP** marker. Local members need the
+receiving federation grant to see those posts in the browser, in native
+clients and in unread counts; personal blocks of `xmpp:user@domain` hide them
+like any other author. Corrections sent by foreign occupants, room discovery
+on `channels.<XMPP_DOMAIN>`, private messages to occupants and room
+administration from other servers are rejected. These posts are not relayed to
+ActivityPub subscribers of the same channel.
+
+Occupancy is live presence only: after the hosting Prosody restarts, or during
+an Archipel policy-service outage, foreign occupants are removed and must join
+again (**Join again** in the other instance's browser).
 
 ## Configure a deployment
 
@@ -211,9 +261,9 @@ _xmpp-server._tcp.channels.two.example.org. SRV 0 5 5270 xmpp.example.org.
 
 Open all four ports in the firewall. Each instance obtains its own
 certificates; with the `acme` source and an `http` challenge only one instance
-can hold port 80, so use `dns` or `traefik` for the others. The instances exchange direct messages with each other like any
-two servers, including when they share an address. Rooms on another Archipel
-instance cannot be joined yet (see the profile above).
+can hold port 80, so use `dns` or `traefik` for the others. The instances federate with each other like any two servers, including when
+they share an address: accounts exchange direct messages and can join the other
+instance's public timeline channels that opted into federation.
 
 ### Custom listener ports
 
@@ -289,7 +339,8 @@ Membership removal evicts occupants, channel blocks prevent posting/history,
 and personal blocks redact room messages and reject direct messages. Built-in MUC
 history, independent MAM archives, offline queues, carbons, and native room
 administration are disabled to prevent alternative writes or reads bypassing
-these controls. A room join may create membership in an open channel; closing a
+these controls. Join history for occupants of other servers is produced by
+Archipel under the same checks, not by Prosody. A room join may create membership in an open channel; closing a
 client's room window only leaves its live presence, retaining Archipel membership.
 
 Native remote contacts use `xmpp:user@domain` identity keys. An ActivityPub actor
@@ -326,7 +377,8 @@ The real XMPP integration check requires Docker and Node 24 or newer. It creates
 temporary Prosody containers, test certificates, a separate standard Prosody
 peer, and a temporary network. It checks real TLS/SASL streams, MUC discovery,
 native/browser delivery, stable IDs, corrections, personal/room MAM, policy
-rejection and revocation. Fixtures are cleaned up on completion. Certificates
+rejection and revocation, foreign rooms, and the peer's user joining, reading
+and posting in a federated local room. Fixtures are cleaned up on completion. Certificates
 and DNS overrides are limited to the disposable test network.
 
 One executable with bundled Prosody remains future work; see

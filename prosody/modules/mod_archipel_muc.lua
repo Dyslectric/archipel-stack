@@ -4,13 +4,24 @@ local jid = require "prosody.util.jid";
 local muc = module:depends "muc";
 local assigned_nicks = module:shared("/" .. bridge.domain .. "/archipel/assigned_nicks");
 module:add_feature("urn:xmpp:mam:2");
+local muc_ns = "http://jabber.org/protocol/muc";
+-- Join history for occupants of other servers, held between admission and room entry.
+local pending_history = {};
 
 -- Gate room creation, presence and discovery before built-in MUC sees them.
 module:hook("presence/full", function(event)
   if event.stanza.attr.type == "unavailable" or event.stanza.attr.type == "error" then return; end
-  local result = bridge.operation(event, "join");
-  if not result then return true; end
+  local from = event.stanza.attr.from;
   local room_jid = jid.bare(event.stanza.attr.to);
+  local foreign = jid.host(from) ~= bridge.domain;
+  local extras;
+  if foreign then
+    local x = event.stanza:get_child("x", muc_ns);
+    local history = x and x:get_child("history");
+    extras = { history = x and (tonumber(history and history.attr.maxstanzas) or 25) or 0 };
+  end
+  local result = bridge.operation(event, "join", extras);
+  if not result then return true; end
   local room = muc.get_room_from_jid(room_jid) or muc.create_room(room_jid);
   if not room then event.origin.send(st.error_reply(event.stanza, "wait", "internal-server-error")); return true; end
   room:set_members_only(true);
@@ -21,11 +32,27 @@ module:hook("presence/full", function(event)
   room:set_historylength(0);
   room:set_affiliation(true, jid.bare(event.stanza.attr.from), "member");
   -- Stable account nicks keep history and live messages aligned.
-  local assigned = room_jid .. "/" .. jid.node(event.stanza.attr.from);
+  -- Foreign occupants keep their whole address, which no local account nick can equal.
+  local assigned = room_jid .. "/" .. (foreign and jid.bare(from) or jid.node(from));
+  if foreign then pending_history[from .. " " .. room_jid] = result.history; end
   if event.stanza.attr.to ~= assigned then
     assigned_nicks[event.stanza.attr.from] = assigned;
   end
   event.stanza.attr.to = assigned;
+end, 100);
+-- Self-presence for another server leaves through s2s, not through a local user's host.
+module:hook("route/remote", function(event)
+  local stanza = event.stanza;
+  if stanza.name ~= "presence" or stanza.attr.type or assigned_nicks[stanza.attr.to] ~= stanza.attr.from then return; end
+  local x = stanza:get_child("x", muc_ns .. "#user");
+  if not x then return; end
+  for status in x:childtags("status") do
+    if status.attr.code == "110" then
+      x:tag("status", { code = "210" }):up();
+      assigned_nicks[stanza.attr.to] = nil;
+      break;
+    end
+  end
 end, 100);
 
 module:hook("muc-occupant-groupchat", function(event)
@@ -40,6 +67,9 @@ module:hook("muc-occupant-groupchat", function(event)
   end
   if not event.occupant then event.origin.send(st.error_reply(event.stanza, "auth", "forbidden")); return true; end
   local replace = event.stanza:get_child("replace", "urn:xmpp:message-correct:0");
+  if replace and jid.host(event.stanza.attr.from) ~= bridge.domain then
+    event.origin.send(st.error_reply(event.stanza, "cancel", "feature-not-implemented", "Corrections from other servers are not supported.")); return true;
+  end
   local origin_id = event.stanza:get_child("origin-id", "urn:xmpp:sid:0");
   bridge.operation(event, "post", { body = body; replace = replace and replace.attr.id; origin_id = origin_id and origin_id.attr.id });
   return true; -- Delivery happens from the committed, policy-filtered event stream.
@@ -62,7 +92,21 @@ module:hook("message/bare", function(event)
   if event.stanza.attr.type ~= "groupchat" then return deny(event); end
 end, 100);
 module:hook("muc-room-pre-create", deny, 100);
-module:hook("muc-get-history", function() return true; end, 100);
+-- Built-in history stays disabled; foreign occupants get a bounded, policy-filtered page.
+module:hook("muc-get-history", function(event)
+  local key = event.to .. " " .. event.room.jid;
+  local items, index = pending_history[key] or {}, 0;
+  pending_history[key] = nil;
+  function event.next_stanza()
+    index = index + 1;
+    local item = items[index];
+    if not item then return; end
+    local stanza = bridge.message(item);
+    stanza:tag("delay", { xmlns = "urn:xmpp:delay"; from = event.room.jid; stamp = item.stamp }):up();
+    return stanza;
+  end
+  return true;
+end, 100);
 module:hook("iq-get/bare/http://jabber.org/protocol/disco#info:query", function(event)
   if not bridge.operation(event, "read") then return true; end
 end, 100);

@@ -257,8 +257,10 @@ const removable = (m: Message) =>
   !m.deleted_at &&
   !current!.dm &&
   (m.author_id === me().id || canModerate(current!));
+// Occupants of other XMPP servers are marked; their handle is their full address.
 const author = (m: Message) =>
-  nameButton(m, m.history_placeholder ? undefined : m.author_actor_url);
+  nameButton(m, m.history_placeholder ? undefined : m.author_actor_url) +
+  (m.author_actor_url?.startsWith("xmpp:") ? ' <span class="pill new">XMPP</span>' : "");
 
 function chatMessage(m: Message, cont: boolean) {
   const parent = m.parent_id
