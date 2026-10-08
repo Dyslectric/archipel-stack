@@ -23,6 +23,7 @@ export async function showXmppRooms(view: HTMLElement, id?: string) {
   $("#feed-top").innerHTML = `<div class="channel-intro"><h2>${icon("globe")}Join a room hosted elsewhere</h2></div><section class="card xmpp-join">${connection.enabled ?
     `<p class="muted">You join as ${esc(connection.jid)}. Your nickname is displayed in the room.</p><form class="stack" id="xmpp-room-join">
       <label>Room address<input name="room" required maxlength="512" placeholder="jdev@muc.xmpp.org" autocomplete="off"></label>
+      <p class="muted small">A channel on another Archipel instance is <code>channel-name@channels.&lt;its XMPP domain&gt;</code>.</p>
       <label>Nickname<input name="nick" required maxlength="100" value="${esc(state.session.user!.username)}" autocomplete="off"></label>
       <p class="form-error" role="alert"></p><button>Join room</button></form>` : '<p>XMPP is not configured on this instance. Ask your administrator to enable it.</p>'}</section>`;
   $("#rows").className = "";

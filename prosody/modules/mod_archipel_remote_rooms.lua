@@ -158,7 +158,7 @@ local runner = async.runner(function()
   for token, entry in pairs(occupants) do
     if not desired[token] then unavailable(entry); occupants[token] = nil;
     elseif not entry.joined and os.time() - entry.started > 30 then
-      receive(entry, st.presence({ from = entry.room .. "/" .. entry.nick }), { kind = "state"; state = "error"; error = "The room did not answer the join request. Try joining again." });
+      receive(entry, st.presence({ from = entry.room .. "/" .. entry.nick }), { kind = "state"; state = "error"; error = "The room did not answer the join request. Check the address (Archipel channels are name@channels.<domain>), then try joining again." });
       unavailable(entry); occupants[token] = nil;
       desired[token] = nil;
     end
