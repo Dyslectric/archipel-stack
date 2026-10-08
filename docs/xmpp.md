@@ -62,7 +62,13 @@ messages can be paged in the browser. This does not backfill the remote MAM
 archive or guarantee messages sent while disconnected. Replayed history with
 room-issued stanza IDs, sender-scoped message IDs or delayed timestamps is
 deduplicated. Authors remain `room@service/nickname`, without inferring their
-real identities from room nicknames.
+real identities from room nicknames. A room that discloses its occupants'
+addresses (non-anonymous, or to moderators) names them in presence; live
+messages then also show the sender's own `user@server`, from which they can be
+sent a direct message or blocked everywhere. Replayed history is not attributed
+this way, since a nickname may have changed hands. Where the room hides
+addresses, a member can only be blocked by nickname in that room, and cannot be
+messaged directly.
 
 Browser messages show **Queued**, then **Awaiting room confirmation**, and are
 confirmed when reflected by the room. Errors are shown separately. Dispatches
@@ -78,7 +84,32 @@ supports rooms that accept an ordinary presence join (including members-only
 rooms when the account already has membership); password entry, room management,
 occupant private messages, corrections, attachments and OMEMO are not exposed in
 the browser view. Foreign content is not mirrored into local or ActivityPub
-channels or the personal direct-message archive.
+channels or the personal direct-message archive, except through a bridge.
+
+## Bridge a channel with a foreign room
+
+The owner of a local timeline channel (or an administrator) can bridge it with
+one room on another server under **Settings → Channel → XMPP bridge**. The
+owner needs the send, receive, subscribe and post grants, and joins the room as
+the bridge's first occupant.
+
+- Room to channel: each room message enters the channel once, however many
+  bridged occupants hear it. Its author is the sender's own address when the
+  room discloses it, otherwise `room@service/nickname`. These authors are
+  `xmpp:` identities: readers need the receive grant to see them, personal and
+  administrator blocks apply, and nothing is relayed onward to ActivityPub
+  followers.
+- Channel to room: a new message from a local member is repeated in the room by
+  that member's own occupant, joined under their XMPP node the first time they
+  write. This needs the member's own four grants; without them the message
+  stays in the channel. These occupants are not listed under the member's
+  **XMPP rooms** and keep no private archive.
+
+Edits and removals are not carried across in either direction, and messages
+from ActivityPub subscribers or from other servers' occupants of the channel's
+own room are not repeated in the foreign room. A private subscription to the
+same room never feeds a channel bridged by someone else. Removing the bridge,
+or deleting the channel, retires the occupants made for it.
 
 ## Let other servers join a local room
 

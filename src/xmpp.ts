@@ -35,6 +35,7 @@ export class Xmpp {
         // Cross-protocol forwarding is deliberately not implicit.
         if (!channel.remote_actor && channel.mode === "timeline" && !message.remote_object)
           store.db.prepare("INSERT INTO xmpp_events(kind,object_id) VALUES(?,?)").run(kind, message.id);
+        if (kind === "Create") this.remoteRooms.relay(message);
       },
       direct: (id, sender, recipient) => {
         store.db.prepare("INSERT INTO xmpp_events(kind,object_id,sender_id,recipient) VALUES('Direct',?,?,?)")
@@ -75,6 +76,19 @@ export class Xmpp {
   private remoteUser(address: string) {
     const row = this.store.db.prepare("SELECT id FROM users WHERE remote_actor=?").get(`xmpp:${address}`) as { id: string } | undefined;
     return row ? this.store.user(row.id) : null;
+  }
+  /** The xmpp: identity for an address, created on first sight; null when administrators blocked or suspended it. */
+  identity(address: string, name = address) {
+    if (this.blockedXmppDomains().includes(address.split("/")[0].split("@")[1]) ||
+      this.store.db.prepare("SELECT 1 FROM federation_blocks WHERE target=?").get(`xmpp:${address}`)) return null;
+    let user = this.remoteUser(address);
+    if (!user) {
+      const id = randomUUID(), taken = this.store.db.prepare("SELECT 1 FROM users WHERE username=?").get(address);
+      this.store.db.prepare("INSERT INTO users(id,username,display_name,created_at,remote_actor) VALUES(?,?,?,?,?)")
+        .run(id, taken ? `${address}-${id.slice(0, 6)}` : address, name.slice(0, 80), new Date().toISOString(), `xmpp:${address}`);
+      user = this.store.user(id);
+    }
+    return user.banned || user.admission_status !== "approved" ? null : user;
   }
   /** Content only crosses the server boundary for channels whose moderators opted into federation. */
   private foreignPolicy(address: string, channel: Channel) {

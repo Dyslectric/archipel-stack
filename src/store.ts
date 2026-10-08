@@ -106,7 +106,13 @@ export class Store {
       actor: User,
     ) => void;
     read: (user: User, channel: Channel) => void;
+    // Runs inside the change's transaction, while the channel's rows still exist.
+    channel: (channel: Channel, change: "rename" | "delete") => void;
     direct: (user: User, peer: string) => DirectAccess;
+  };
+  mirrorHooks?: {
+    // Called after remote content arrives; copies what active mirror sources have not taken yet.
+    pull: () => void;
   };
   xmppHooks?: {
     profile: (user: User) => void;
@@ -127,7 +133,7 @@ export class Store {
     const version = (
       this.db.prepare("PRAGMA user_version").get() as { user_version: number }
     ).user_version;
-    if (version > 11) throw new Error("Database is newer than this application");
+    if (version > 12) throw new Error("Database is newer than this application");
     if (version === 0)
       this.transaction(() =>
         this.db.exec(
@@ -201,6 +207,10 @@ export class Store {
     if (version < 11)
       this.transaction(() => this.db.exec(readFileSync(
         new URL("../migrations/011_xmpp_remote_rooms.sql", import.meta.url), "utf8",
+      )));
+    if (version < 12)
+      this.transaction(() => this.db.exec(readFileSync(
+        new URL("../migrations/012_bridges_mirrors.sql", import.meta.url), "utf8",
       )));
   }
   close() {
@@ -634,6 +644,11 @@ export class Store {
   requirePost(user: User, channel: Channel) {
     this.active(user.id);
     this.federationHooks?.write(user, channel);
+    if (this.mirrorState(channel.id) === "read-only")
+      throw new Problem(
+        403,
+        "This mirror is read-only until its owner opens it for writing.",
+      );
     if (
       this.rule(channel.id, user.id) === "block" ||
       !this.role(channel.id, user.id)
@@ -654,6 +669,34 @@ export class Store {
     )
       throw new Problem(403, "Only channel moderators can do that.");
   }
+  // Renaming changes a channel's address and deleting ends it, so neither is delegated to moderators.
+  requireOwner(user: User, channel: Channel) {
+    this.active(user.id);
+    if (channel.remote_actor)
+      throw new Problem(
+        403,
+        "Channel moderation belongs to its home instance.",
+      );
+    if (!user.admin && channel.owner_id !== user.id)
+      throw new Problem(403, "Only the channel owner can do that.");
+  }
+  // The room on another XMPP server this channel is bridged with, if any.
+  bridgeRoom(id: string) {
+    return (
+      (
+        this.db
+          .prepare("SELECT room FROM channel_bridges WHERE channel_id=?")
+          .get(id) as { room: string } | undefined
+      )?.room ?? null
+    );
+  }
+  // Whether the channel is a mirror of sources hosted elsewhere, and whether its owner opened it.
+  mirrorState(id: string) {
+    const row = this.db
+      .prepare("SELECT writable FROM channel_mirrors WHERE channel_id=?")
+      .get(id) as { writable: number } | undefined;
+    return row ? (row.writable ? ("writable" as const) : ("read-only" as const)) : null;
+  }
   channelInfo(user: User, channel: Channel) {
     const rule = this.rule(channel.id, user.id);
     return {
@@ -661,6 +704,8 @@ export class Store {
       actor_url:
         channel.remote_actor || `${this.baseUrl}/actors/channels/${channel.id}`,
       role: this.role(channel.id, user.id),
+      bridge_room: this.bridgeRoom(channel.id),
+      mirror: this.mirrorState(channel.id),
       readable: this.readable(user, channel),
       can_join:
         !channel.remote_actor &&
@@ -692,14 +737,18 @@ export class Store {
       )
       .map((c) => this.channelInfo(user, c));
   }
-  createChannel(user: User, input: Record<string, unknown>) {
-    this.active(user.id);
-    const name = text(input.name, "Channel name", 40).toLowerCase();
+  private channelName(value: unknown) {
+    const name = text(value, "Channel name", 40).toLowerCase();
     if (!/^[a-z0-9][a-z0-9_-]{1,39}$/.test(name))
       throw new Problem(
         400,
         "Use 2–40 lowercase letters, numbers, hyphens, or underscores.",
       );
+    return name;
+  }
+  createChannel(user: User, input: Record<string, unknown>) {
+    this.active(user.id);
+    const name = this.channelName(input.name);
     const description =
       typeof input.description === "string" ? input.description.trim() : "";
     if (description.length > 500)
@@ -743,6 +792,70 @@ export class Store {
       this.startReading(user.id, id);
       this.audit(user.id, "channel.create", id);
       return this.channelInfo(user, this.channel(id));
+    });
+  }
+  renameChannel(user: User, id: string, value: unknown) {
+    const channel = this.channel(id);
+    this.requireOwner(user, channel);
+    const name = this.channelName(value);
+    return this.transaction(() => {
+      if (name !== channel.name) {
+        if (
+          this.db
+            .prepare("SELECT 1 FROM channels WHERE name=? AND id!=?")
+            .get(name, id)
+        )
+          throw new Problem(409, "That channel name is already taken.");
+        this.db.prepare("UPDATE channels SET name=? WHERE id=?").run(name, id);
+        this.federationHooks?.channel(this.channel(id), "rename");
+        this.audit(
+          user.id,
+          "channel.rename",
+          JSON.stringify({ channel: id, from: channel.name, to: name }),
+        );
+      }
+      return this.channelInfo(user, this.channel(id));
+    });
+  }
+  // Removes the channel and everything said in it; the audit entry is all that remains.
+  deleteChannel(user: User, id: string) {
+    const channel = this.channel(id);
+    this.requireOwner(user, channel);
+    this.transaction(() => {
+      this.federationHooks?.channel(channel, "delete");
+      const said = "(SELECT id FROM messages WHERE channel_id=?)";
+      this.db
+        .prepare(
+          `DELETE FROM xmpp_events WHERE kind IN ('Create','Update','Delete') AND object_id IN ${said}`,
+        )
+        .run(id);
+      this.db
+        .prepare(`DELETE FROM xmpp_message_ids WHERE message_id IN ${said}`)
+        .run(id);
+      this.db.prepare("DELETE FROM messages WHERE channel_id=?").run(id);
+      // Members' occupants in a bridged room existed only for this channel.
+      this.db
+        .prepare(
+          "UPDATE xmpp_remote_rooms SET desired=0,state='left',role='none' WHERE bridged=1 AND room=(SELECT room FROM channel_bridges WHERE channel_id=?)",
+        )
+        .run(id);
+      for (const table of [
+        "mirror_sources",
+        "channel_mirrors",
+        "channel_bridge_seen",
+        "channel_bridges",
+        "topics",
+        "memberships",
+        "channel_rules",
+      ])
+        this.db.prepare(`DELETE FROM ${table} WHERE channel_id=?`).run(id);
+      this.db.prepare("DELETE FROM read_marks WHERE target=?").run(id);
+      this.db.prepare("DELETE FROM channels WHERE id=?").run(id);
+      this.audit(
+        user.id,
+        "channel.delete",
+        JSON.stringify({ channel: id, name: channel.name }),
+      );
     });
   }
   join(user: User, id: string) {
@@ -1112,7 +1225,11 @@ export class Store {
   }
   setUserBlock(user: User, peerValue: unknown, blocked: unknown) {
     this.active(user.id);
-    const peer = this.peerInfo(text(peerValue, "User", 2048)).peer;
+    const value = text(peerValue, "User", 2048);
+    // A room that hides its occupants' addresses leaves only the nickname there to block.
+    const peer = /^xmpp:[^@/:\s]+@[a-z0-9.-]+\/[^\x00-\x1f\x7f]{1,1000}$/.test(value)
+      ? value
+      : this.peerInfo(value).peer;
     if (peer === this.actorOf(user.id))
       throw new Problem(400, "You can't block yourself.");
     if (typeof blocked !== "boolean")

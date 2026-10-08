@@ -38,6 +38,8 @@ export interface Channel {
   topics?: Topic[];
   remote_actor: string | null;
   federation_enabled: number;
+  bridge_room?: string | null; // the room on another XMPP server this channel is bridged with
+  mirror?: "read-only" | "writable" | null; // a copy of sources hosted elsewhere, and whether it was opened
   dm?: Conversation; // a direct conversation, dressed as a channel for the chat view
 }
 // Someone you exchange direct messages with: here, or on another instance.

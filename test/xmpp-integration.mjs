@@ -200,13 +200,22 @@ Component "muc.remote.test" "muc"
   const foreignRoom = "lounge@muc.remote.test";
   await peer.native.send(xml("presence", { to: `${foreignRoom}/host` }, xml("x", { xmlns: "http://jabber.org/protocol/muc" })));
   await until(() => peer.received.find(s => s.is("presence") && s.attrs.from === `${foreignRoom}/host`), "foreign room creation");
-  await peer.native.iqCaller.request(xml("iq", { type: "set", to: foreignRoom }, xml("query", { xmlns: "http://jabber.org/protocol/muc#owner" }, xml("x", { xmlns: "jabber:x:data", type: "submit" }))));
+  await peer.native.iqCaller.request(xml("iq", { type: "set", to: foreignRoom }, xml("query", { xmlns: "http://jabber.org/protocol/muc#owner" }, xml("x", { xmlns: "jabber:x:data", type: "submit" },
+    xml("field", { var: "FORM_TYPE" }, xml("value", {}, "http://jabber.org/protocol/muc#roomconfig")),
+    xml("field", { var: "muc#roomconfig_whois" }, xml("value", {}, "anyone"))))));
   await peer.native.send(xml("message", { to: foreignRoom, type: "groupchat", id: "before-join" }, xml("body", {}, "History from the foreign room")));
   const subscription = xmpp.remoteRooms.join(alice, { room: foreignRoom, nick: "alice-browser" });
   await until(() => xmpp.remoteRooms.list(alice).find(r => r.id === subscription.id)?.state === "joined", "browser external room join", 15000);
   await until(() => xmpp.remoteRooms.history(alice, subscription.id).messages.some(m => m.body === "History from the foreign room"), "foreign room join history");
   await peer.native.send(xml("message", { to: foreignRoom, type: "groupchat", id: "foreign-live" }, xml("body", {}, "Live foreign room message")));
   await until(() => xmpp.remoteRooms.history(alice, subscription.id).messages.some(m => m.body === "Live foreign room message"), "foreign live archive");
+  // The room discloses addresses, so a live message names its sender; replayed history does not.
+  const attributed = body => xmpp.remoteRooms.history(alice, subscription.id).messages.find(m => m.body === body).sender_jid;
+  assert.equal(attributed("Live foreign room message"), "other@remote.test");
+  assert.equal(attributed("History from the foreign room"), null);
+  store.setUserBlock(alice, "xmpp:other@remote.test", true);
+  assert.equal(xmpp.remoteRooms.history(alice, subscription.id).messages.filter(m => m.blocked).length, 1);
+  store.setUserBlock(alice, "xmpp:other@remote.test", false);
   const outgoing = xmpp.remoteRooms.post(alice, subscription.id, "Browser posting to the foreign room");
   await until(() => peer.received.find(s => s.getChildText("body") === "Browser posting to the foreign room"), "browser foreign post");
   await until(() => xmpp.remoteRooms.history(alice, subscription.id).messages.find(m => m.id === outgoing.id)?.status === "confirmed", "room echo confirmation");
@@ -276,6 +285,32 @@ Component "muc.remote.test" "muc"
   await peer.native.send(xml("presence", { to: `${plazaJid}/guest`, id: "foreign-rejoin" }, xml("x", { xmlns: mucNs })));
   await until(() => peer.received.find(s => s.is("presence") && s.attrs.id === "foreign-rejoin" && s.attrs.type === "error"), "blocked foreign occupant cannot rejoin");
   console.log("PASS foreign home-server occupants: admission, join history, committed posts, live delivery, room MAM, removal and eviction");
+  // A bridged channel shares one conversation with a room on the ordinary peer, each author as themselves.
+  const everything = { federation_send: true, federation_receive: true, federation_subscribe: true, federation_post: true };
+  app.locals.federation.setPermissions(alice, bob.id, everything);
+  const annexRoom = "annex@muc.remote.test";
+  await peer.native.send(xml("presence", { to: `${annexRoom}/host` }, xml("x", { xmlns: "http://jabber.org/protocol/muc" })));
+  await until(() => peer.received.find(s => s.is("presence") && s.attrs.from === `${annexRoom}/host`), "bridged room creation");
+  await peer.native.iqCaller.request(xml("iq", { type: "set", to: annexRoom }, xml("query", { xmlns: "http://jabber.org/protocol/muc#owner" }, xml("x", { xmlns: "jabber:x:data", type: "submit" },
+    xml("field", { var: "FORM_TYPE" }, xml("value", {}, "http://jabber.org/protocol/muc#roomconfig")),
+    xml("field", { var: "muc#roomconfig_whois" }, xml("value", {}, "anyone"))))));
+  const annex = store.createChannel(alice, { name: "annex", mode: "timeline", visibility: "public", admission: "open" });
+  store.join(bob, annex.id);
+  xmpp.remoteRooms.setBridge(alice, annex.id, annexRoom);
+  await until(() => xmpp.remoteRooms.bridge(alice, annex.id).state === "joined", "bridge listener join", 15000);
+  await peer.native.send(xml("message", { to: annexRoom, type: "groupchat", id: "annex-in" }, xml("body", {}, "Room to channel")));
+  await until(() => store.messages(alice, annex.id).some(m => m.body === "Room to channel"), "room message bridged into the channel");
+  assert.equal(store.messages(alice, annex.id).find(m => m.body === "Room to channel").author_actor_url, "xmpp:other@remote.test");
+  store.post(bob, annex.id, { body: "Channel to room" });
+  await until(() => peer.received.find(s => s.getChildText("body") === "Channel to room" && s.attrs.from === `${annexRoom}/bob`), "channel message bridged into the room as its author", 20000);
+  await until(() => store.db.prepare("SELECT status FROM xmpp_remote_messages WHERE relay_of IS NOT NULL").get()?.status === "confirmed", "bridged echo confirmation");
+  await delay(1500);
+  assert.deepEqual(store.messages(alice, annex.id).map(m => m.body), ["Room to channel", "Channel to room"]);
+  assert.deepEqual(xmpp.remoteRooms.list(bob), []);
+  xmpp.remoteRooms.removeBridge(alice, annex.id);
+  await until(() => peer.received.find(s => s.is("presence") && s.attrs.from === `${annexRoom}/bob` && s.attrs.type === "unavailable"), "bridge removal retires its occupants");
+  app.locals.federation.setPermissions(alice, bob.id, { federation_send: false, federation_receive: false, federation_subscribe: false, federation_post: false });
+  console.log("PASS bridged channel: room messages enter once with their author, members speak in the room as themselves");
   store.setUserBlock(bob, `${store.baseUrl}/actors/users/${alice.id}`, true);
   await desktop.native.send(xml("message", { to: b.jid, type: "chat", id: "blocked-dm" }, xml("body", {}, "Must not arrive")));
   await until(() => desktop.received.find(s => s.attrs.id === "blocked-dm" && s.attrs.type === "error"), "blocked DM rejection");

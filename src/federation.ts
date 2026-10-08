@@ -97,6 +97,7 @@ export class Federation {
         )
           this.relay(message, type, user);
       },
+      channel: (channel, change) => this.channelChanged(channel, change),
       direct: (user, peer) => {
         let reachable = true;
         try {
@@ -311,6 +312,60 @@ export class Federation {
     `).all(user.id, user.id, user.id) as { actor: string }[]).map(r => r.actor);
     if (recipients.length) this.queue("Update", this.userActor(user), this.publicActor("users", user.id), recipients, "profile", user.id, null);
   }
+  private channelChanged(channel: Channel, change: "rename" | "delete") {
+    const actor = this.channelActor(channel),
+      announce = this.enabled() && !!channel.federation_enabled;
+    const follows = this.store.db
+      .prepare("SELECT * FROM federation_follows WHERE channel_id=?")
+      .all(channel.id) as unknown as {
+      actor: string;
+      follow_id: string;
+      status: string;
+    }[];
+    if (change === "rename") {
+      const recipients = follows
+        .filter((f) => f.status === "accepted")
+        .map((f) => f.actor);
+      if (announce && recipients.length)
+        this.queue(
+          "Update",
+          actor,
+          this.publicActor("channels", channel.id),
+          recipients,
+          "moderation",
+          null,
+          channel.id,
+        );
+      return;
+    }
+    // Nothing still queued for the channel may go out, but the delivery record stays.
+    this.store.db
+      .prepare(
+        "UPDATE federation_deliveries SET status='cancelled' WHERE status='pending' AND activity_id IN (SELECT id FROM federation_outgoing WHERE channel_id=?)",
+      )
+      .run(channel.id);
+    this.store.db
+      .prepare("UPDATE federation_outgoing SET channel_id=NULL WHERE channel_id=?")
+      .run(channel.id);
+    if (announce)
+      for (const follow of follows.filter((f) => f.status !== "blocked"))
+        this.queue(
+          "Reject",
+          actor,
+          { id: follow.follow_id, type: "Follow", actor: follow.actor, object: actor },
+          [follow.actor],
+          "cleanup",
+          null,
+          null,
+        );
+    for (const table of ["federation_follows", "federation_subscriptions"])
+      this.store.db
+        .prepare(`DELETE FROM ${table} WHERE channel_id=?`)
+        .run(channel.id);
+    this.store.db
+      .prepare("DELETE FROM federation_objects WHERE channel_actor=?")
+      .run(actor);
+  }
   async authenticate(req: Request, rawBody?: Buffer) {
     this.ensureEnabled();
     const values = signatureKey(req),
@@ -426,6 +481,8 @@ export class Federation {
     this.store.requireManage(user, channel);
     if (typeof enabled !== "boolean")
       throw new Problem(400, "Choose a boolean federation setting.");
+    if (enabled && this.store.mirrorState(id))
+      throw new Problem(400, "Mirrors cannot be federated.");
     if (enabled) this.ensureEnabled();
     this.store.transaction(() => {
       this.store.db
@@ -1604,7 +1661,14 @@ export class Federation {
     let snapshot: Awaited<ReturnType<Federation["snapshot"]>> | undefined;
     const profileUpdate = activity.type === "Update" && object?.type === "Person";
     const profileRelay = activity.type === "Announce" && sender.type === "Group" && object?.type === "Update" && object.object?.type === "Person";
-    if (profileUpdate) {
+    const channelUpdate = activity.type === "Update" && object?.type === "Group";
+    let renamed: Doc | undefined;
+    if (channelUpdate) {
+      if (sender.type !== "Group" || object.id !== sender.id)
+        throw new Problem(403, "Channel update must belong to its signing actor.");
+      // As with profiles, the channel's own endpoint is the authority on its name.
+      renamed = await this.actor(sender.id, true);
+    } else if (profileUpdate) {
       if (sender.type !== "Person" || object.id !== sender.id)
         throw new Problem(403, "Profile update must belong to its signing actor.");
       // Refresh from the actor's own endpoint; a profile activity cannot replace keys.
@@ -1664,7 +1728,14 @@ export class Federation {
           throw new Problem(409, "Conflicting activity.");
         return;
       }
-      if (profileUpdate || profileRelay) {
+      if (channelUpdate) {
+        const channel = this.store.db.prepare("SELECT id FROM channels WHERE remote_actor=?").get(sender.id) as { id: string } | undefined;
+        if (!channel) throw new Problem(403, "Unknown remote channel.");
+        const name = `${String(renamed!.preferredUsername).slice(0, 40)}@${new URL(sender.id).host}`;
+        if (!this.store.db.prepare("SELECT 1 FROM channels WHERE name=? AND id!=?").get(name, channel.id))
+          this.store.db.prepare("UPDATE channels SET name=?,description=? WHERE id=?")
+            .run(name, String(renamed!.summary || "").slice(0, 500), channel.id);
+      } else if (profileUpdate || profileRelay) {
         const author = profileUpdate ? sender.id : object.actor;
         const cached = this.store.db.prepare("SELECT document FROM federation_actors WHERE id=?").get(author) as { document: string };
         const remoteAuthor = this.remoteUser(JSON.parse(cached.document));
@@ -1887,6 +1958,7 @@ export class Federation {
         .prepare("INSERT INTO federation_incoming VALUES(?,?,?)")
         .run(activity.id, hash(raw.toString()), Date.now());
     });
+    this.store.mirrorHooks?.pull();
   }
   private deliveryAllowed(outgoing: Outgoing, recipient: string) {
     this.ensureEnabled();

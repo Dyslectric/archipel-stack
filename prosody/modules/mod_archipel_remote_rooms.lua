@@ -85,6 +85,13 @@ local function incoming(event)
   if entry then
     if jid.bare(stanza.attr.from) ~= entry.room then return true; end
     if stanza.name == "presence" then
+      -- Rooms that disclose real addresses name them in presence; remember who holds each nickname.
+      local nick, x = jid.resource(stanza.attr.from), stanza:get_child("x", user_ns);
+      local item = x and x:get_child("item");
+      if nick and stanza.attr.type ~= "error" then
+        entry.jids = entry.jids or {};
+        entry.jids[nick] = stanza.attr.type ~= "unavailable" and item and item.attr.jid and jid.bare(item.attr.jid) or nil;
+      end
       if stanza.attr.type == "error" then
         receive(entry, stanza, { kind = "state"; state = "error"; error = error_text(stanza) });
         occupants[entry.session] = nil;
@@ -119,8 +126,10 @@ local function incoming(event)
           end
           local delay = stanza:get_child("delay", "urn:xmpp:delay");
           local origin = stanza:get_child("origin-id", "urn:xmpp:sid:0");
+          -- History may predate whoever holds the nickname now, so only live messages are attributed.
+          local real = not delay and entry.jids and entry.jids[jid.resource(stanza.attr.from) or ""] or nil;
           receive(entry, stanza, { kind = "message"; body = body; id = stanza.attr.id; stable_id = stable;
-            origin_id = origin and origin.attr.id; stamp = delay and delay.attr.stamp });
+            origin_id = origin and origin.attr.id; stamp = delay and delay.attr.stamp; real_jid = real });
         end
       end
     end

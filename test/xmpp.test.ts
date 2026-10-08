@@ -243,10 +243,10 @@ test("version 8 migration preserves native IDs and archive correction references
   const room = store.createChannel(alice, { name: "legacy", mode: "timeline", visibility: "members", admission: "open" });
   const input = { from: `${credential.jid}/desktop`, credential: credential.id, operation: "post", to: `legacy@${xmpp.rooms}`, id: "old-id", body: "Old content" };
   const result = xmpp.operation(input) as { id: string };
-  store.db.exec("DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP INDEX xmpp_message_ids_sender; ALTER TABLE xmpp_message_ids DROP COLUMN scope; CREATE UNIQUE INDEX legacy_stanza_ids ON xmpp_message_ids(sender,stanza_id); PRAGMA user_version=8");
+  store.db.exec("DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP INDEX xmpp_message_ids_sender; ALTER TABLE xmpp_message_ids DROP COLUMN scope; CREATE UNIQUE INDEX legacy_stanza_ids ON xmpp_message_ids(sender,stanza_id); PRAGMA user_version=8");
   store.close(); store = new Store(path); xmpp = new Xmpp(store, config);
   t.after(() => { store.close(); rmSync(directory, { recursive: true, force: true }); });
-  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 11);
+  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 12);
   assert.equal(xmpp.archive(alice, { room: input.to }).messages[0].stanza_id, "old-id");
   xmpp.operation({ ...input, stream: "new-stream", id: "new-id", replace: "old-id", body: "Migrated correction" });
   assert.equal(store.message(result.id).body, "Migrated correction");
@@ -292,5 +292,23 @@ test("XMPP avatar reads, writes, cache responses and queued requests obey curren
   assert.ok(f.store.avatarUrl(f.bob.id));
   f.xmpp.revoke(f.bob, f.b.id);
   denied(() => f.xmpp.cacheAvatar({ ...f.input(f.b), operation: "set", image: null }), 401);
+  f.store.close();
+});
+test("renaming a channel moves its room and deleting it drops queued room events and occupants", () => {
+  const f = fixture();
+  const session = { jid: `${f.a.jid}/test`, credential: f.a.id };
+  const inventory = (room: string) => ({ after: 0, sessions: [session], occupants: [{ jid: session.jid, room }] });
+  f.xmpp.operation({ ...f.input(), operation: "post", to: f.roomJid, id: "native-1", body: "From a client" });
+  f.store.post(f.alice, f.room.id, { body: "From the web" });
+  assert.equal(f.xmpp.sync(inventory(f.roomJid)).messages.length, 2);
+  f.store.renameChannel(f.alice, f.room.id, "lobby");
+  const moved = `lobby@${f.xmpp.rooms}`;
+  assert.deepEqual(f.xmpp.sync(inventory(f.roomJid)).kick, [{ room: f.roomJid, jid: session.jid }]);
+  assert.equal(f.xmpp.sync(inventory(moved)).messages.length, 2);
+  assert.deepEqual(f.xmpp.status(f.alice).channels!.map(c => c.jid), [moved]);
+  f.store.deleteChannel(f.alice, f.room.id);
+  const after = f.xmpp.sync(inventory(moved));
+  assert.deepEqual(after.messages, []);
+  assert.deepEqual(after.kick, [{ room: moved, jid: session.jid }]);
   f.store.close();
 });

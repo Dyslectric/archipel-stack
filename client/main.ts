@@ -242,8 +242,8 @@ setInterval(() => {
         document.querySelector<HTMLDialogElement>("dialog")?.close();
         await boot();
         toast("Your session ended. Sign in again.");
-      } else if (error instanceof ApiError && error.status === 403) {
-        // Access to what's on screen was taken away.
+      } else if (error instanceof ApiError && [403, 404].includes(error.status)) {
+        // Access to what's on screen was taken away, or it was deleted.
         document.querySelector<HTMLDialogElement>("dialog")?.close();
         resetChat();
         localStorage.removeItem("archipel-channel");

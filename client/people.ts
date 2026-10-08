@@ -27,13 +27,18 @@ document.addEventListener("click", (e) => {
     const { user: actor = "", username = "", name: shown = "", avatar: picture = "" } = name.dataset,
       self = actor === state.session.user!.actor_url,
       remote = actor.startsWith("xmpp:") || !actor.startsWith(state.session.user!.actor_url!.slice(0, state.session.user!.actor_url!.lastIndexOf("/") + 1)),
-      blocked = state.userBlocks.includes(actor);
+      blocked = state.userBlocks.includes(actor),
+      // Someone in an XMPP room that hides its members' addresses: xmpp:room@host/nickname.
+      occupant = /^xmpp:[^/]+\/./.test(actor);
     const panel = popup(
       name,
-      `<div class="user-card">${avatar({ username, display_name: shown, avatar_url: picture }, "large")}<div class="grow"><strong>${esc(shown)}</strong><div class="handle">@${esc(username)}</div></div></div>
+      `<div class="user-card">${avatar({ username, display_name: shown, avatar_url: picture }, "large")}<div class="grow"><strong>${esc(shown)}</strong><div class="handle">${occupant ? `In ${esc(username.split("/")[0])}` : `@${esc(username)}`}</div></div></div>
       <div class="menu-section">${
         self
           ? `<a class="menu-item" href="#/settings/personal/profile">${icon("user")}<span class="grow">This is you. Edit your profile</span></a>`
+          : occupant
+            ? `<p class="muted small menu-note">This room hides its members' addresses, so they can't be messaged directly and are blocked by nickname.</p>
+             <button type="button" class="menu-item${blocked ? "" : " bad-text"}" data-user-block>${icon(blocked ? "check" : "block")}<span class="grow">${blocked ? "Unblock in this room" : "Block in this room"}</span></button>`
           : `<a class="menu-item" href="${esc(dmHref(actor))}">${icon("chat")}<span class="grow">${blocked ? "Open direct conversation" : "Send a direct message"}</span></a>
              ${remote ? `<button type="button" class="menu-item" data-contact-name>${icon("pencil")}<span class="grow">Set display name</span></button>` : ""}
              <button type="button" class="menu-item${blocked ? "" : " bad-text"}" data-user-block>${icon(blocked ? "check" : "block")}<span class="grow">${blocked ? "Unblock user" : "Block user"}</span></button>`

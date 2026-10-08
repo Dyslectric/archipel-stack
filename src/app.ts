@@ -13,6 +13,7 @@ import { Federation } from "./federation.js";
 import { createOidc, OidcFailure, type OidcStage } from "./oidc.js";
 import { logSignInFailure } from "./auth-log.js";
 import { Xmpp } from "./xmpp.js";
+import { Mirrors } from "./mirrors.js";
 
 function cookie(req: Request, name: string) {
   const value = (req.headers.cookie || "")
@@ -31,7 +32,9 @@ export function createApp(config: Config, store: Store) {
   store.initializeRegistration(config.registrationMode);
   const federation = new Federation(store, config);
   const xmpp = new Xmpp(store, config);
+  const mirrors = new Mirrors(store, xmpp);
   const app = express();
+  app.locals.mirrors = mirrors;
   app.locals.federation = federation;
   app.locals.xmpp = xmpp;
   app.set(
@@ -607,6 +610,61 @@ export function createApp(config: Config, store: Store) {
   );
   app.get("/api/channels/:id", (req, res) =>
     res.json(store.details(user(res), String(req.params.id))),
+  );
+  app.patch("/api/channels/:id", (req, res) =>
+    res.json(
+      store.renameChannel(user(res), String(req.params.id), req.body?.name),
+    ),
+  );
+  app.delete("/api/channels/:id", (req, res) => {
+    store.deleteChannel(user(res), String(req.params.id));
+    res.json({ ok: true });
+  });
+  app.post("/api/mirrors", (req, res) =>
+    res.status(201).json(mirrors.create(user(res), req.body || {})),
+  );
+  app.get("/api/channels/:id/mirror", (req, res) =>
+    res.json(mirrors.sources(user(res), String(req.params.id))),
+  );
+  app.patch("/api/channels/:id/mirror", (req, res) =>
+    res.json(
+      mirrors.setWritable(user(res), String(req.params.id), req.body?.writable),
+    ),
+  );
+  app.post("/api/channels/:id/mirror/sources", (req, res) =>
+    res
+      .status(201)
+      .json(mirrors.addSource(user(res), String(req.params.id), req.body || {})),
+  );
+  app.patch("/api/channels/:id/mirror/sources/:source", (req, res) =>
+    res.json(
+      mirrors.setSource(
+        user(res),
+        String(req.params.id),
+        String(req.params.source),
+        req.body || {},
+      ),
+    ),
+  );
+  app.delete("/api/channels/:id/mirror/sources/:source", (req, res) =>
+    res.json(
+      mirrors.removeSource(
+        user(res),
+        String(req.params.id),
+        String(req.params.source),
+      ),
+    ),
+  );
+  app.get("/api/channels/:id/bridge", (req, res) =>
+    res.json(xmpp.remoteRooms.bridge(user(res), String(req.params.id))),
+  );
+  app.put("/api/channels/:id/bridge", (req, res) =>
+    res.json(
+      xmpp.remoteRooms.setBridge(user(res), String(req.params.id), req.body?.room),
+    ),
+  );
+  app.delete("/api/channels/:id/bridge", (req, res) =>
+    res.json(xmpp.remoteRooms.removeBridge(user(res), String(req.params.id))),
   );
   app.post("/api/channels/:id/join", (req, res) => {
     store.join(user(res), String(req.params.id));

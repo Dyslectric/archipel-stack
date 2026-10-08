@@ -1,16 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { Problem, hash, text, type User } from "./store.js";
+import { Problem, hash, text, type Message as ChannelMessage, type User } from "./store.js";
 import type { Xmpp } from "./xmpp.js";
 
 type Input = Record<string, unknown>;
 type Room = {
   id: string; user_id: string; room: string; nick: string; session: string;
   desired: number; state: string; role: string; subject: string;
-  error: string | null; updated_at: number;
+  error: string | null; updated_at: number; bridged: number;
 };
+type Bridge = { channel_id: string; room: string; created_by: string; created_at: string };
 type Message = {
   seq: number; id: string; subscription_id: string; sender: string; body: string;
   created_at: string; source_key: string | null; status: string; error: string | null;
+  sender_jid: string | null;
 };
 
 /** Browser occupants live in Prosody; each account keeps its own room archive. */
@@ -49,9 +51,9 @@ export class RemoteRooms {
   }
   list(user: User) {
     this.store.active(user.id);
-    return (this.store.db.prepare("SELECT * FROM xmpp_remote_rooms WHERE user_id=? ORDER BY room").all(user.id) as Room[]).map(r => this.view(r));
+    return (this.store.db.prepare("SELECT * FROM xmpp_remote_rooms WHERE user_id=? AND bridged=0 ORDER BY room").all(user.id) as Room[]).map(r => this.view(r));
   }
-  join(user: User, input: Input) {
+  join(user: User, input: Input, bridged = false) {
     const room = this.address(input.room);
     this.check(user, room);
     const nick = text(input.nick || this.xmpp.account(user).node, "Nickname", 100);
@@ -63,9 +65,9 @@ export class RemoteRooms {
     if ((!old || !old.desired) && count.n >= 50) throw new Problem(400, "Leave a room before joining another (maximum 50).");
     const id = old?.id || randomUUID(), session = randomUUID();
     this.store.transaction(() => {
-      this.store.db.prepare(`INSERT INTO xmpp_remote_rooms(id,user_id,room,nick,session,updated_at) VALUES(?,?,?,?,?,?)
-        ON CONFLICT(user_id,room) DO UPDATE SET nick=excluded.nick,session=excluded.session,desired=1,state='joining',role='none',error=NULL,updated_at=excluded.updated_at`)
-        .run(id, user.id, room, nick, session, Date.now());
+      this.store.db.prepare(`INSERT INTO xmpp_remote_rooms(id,user_id,room,nick,session,updated_at,bridged) VALUES(?,?,?,?,?,?,?)
+        ON CONFLICT(user_id,room) DO UPDATE SET nick=excluded.nick,session=excluded.session,desired=1,state='joining',role='none',error=NULL,updated_at=excluded.updated_at,bridged=excluded.bridged`)
+        .run(id, user.id, room, nick, session, Date.now(), Number(bridged));
       this.failPending(id, "The room session changed. Send the message again.");
     });
     return this.view(this.owned(user, id));
@@ -88,7 +90,11 @@ export class RemoteRooms {
     if (!Number.isSafeInteger(cursor) || cursor < 1) throw new Problem(400, "Invalid history cursor.");
     const rows = this.store.db.prepare("SELECT * FROM xmpp_remote_messages WHERE subscription_id=? AND seq<? ORDER BY seq DESC LIMIT 101").all(id, cursor) as Message[];
     const more = rows.length > 100;
-    return { room: this.view(room), messages: rows.slice(0, 100).reverse(), more };
+    // Blocks name the occupant's own address where the room shows it, and otherwise the nickname in this room.
+    const blocked = (m: Message) => this.store.isUserBlocked(user.id, `xmpp:${m.sender}`) ||
+      (!!m.sender_jid && this.store.isUserBlocked(user.id, `xmpp:${m.sender_jid}`));
+    return { room: this.view(room), more, messages: rows.slice(0, 100).reverse().map(m => blocked(m)
+      ? { ...m, blocked: true, body: "This message is hidden because you blocked this user." } : { ...m, blocked: false }) };
   }
   post(user: User, id: string, value: unknown) {
     const room = this.owned(user, id);
@@ -131,14 +137,115 @@ export class RemoteRooms {
       const key = input.stable_id ? `room:${text(input.stable_id, "Room message ID", 200)}` :
         input.id ? hash(JSON.stringify([sender, text(input.id, "Message ID", 200)])) :
         input.stamp ? hash(JSON.stringify([sender, stamp, body])) : null;
+      let real: string | null = null;
+      try { if (input.real_jid) real = this.xmpp.remoteJid(String(input.real_jid).toLowerCase()); }
+      catch { /* An address the room reports in another form is simply not shown. */ }
       this.store.transaction(() => {
         const ownId = input.origin_id || input.id;
         const own = sender === `${room.room}/${room.nick}` && typeof ownId === "string" && this.store.db.prepare("SELECT id FROM xmpp_remote_messages WHERE id=? AND subscription_id=? AND status IN ('queued','sent','confirmed')").get(ownId, room.id);
         if (own) this.store.db.prepare("UPDATE xmpp_remote_messages SET status='confirmed',source_key=?,body=?,created_at=?,error=NULL WHERE id=?").run(key, body, stamp, ownId as string);
-        else this.store.db.prepare("INSERT OR IGNORE INTO xmpp_remote_messages(id,subscription_id,sender,body,created_at,source_key) VALUES(?,?,?,?,?,?)").run(randomUUID(), room.id, sender, body, stamp, key);
+        // An occupant that only speaks for a bridged channel keeps no private archive of the room.
+        else if (!room.bridged) this.store.db.prepare("INSERT OR IGNORE INTO xmpp_remote_messages(id,subscription_id,sender,body,created_at,source_key,sender_jid) VALUES(?,?,?,?,?,?,?)").run(randomUUID(), room.id, sender, body, stamp, key, real);
+        this.bridgeIn(room, sender, body, stamp, key, real, ownId);
       });
+      this.store.mirrorHooks?.pull();
     } else throw new Problem(400, "Unknown remote room event.");
     return { ok: true };
+  }
+  // ---- bridges: a local timeline channel and one external room carry the same conversation ----
+  private bridgeOf(channelId: string) {
+    return this.store.db.prepare("SELECT * FROM channel_bridges WHERE channel_id=?").get(channelId) as Bridge | undefined;
+  }
+  bridge(user: User, channelId: string) {
+    this.store.requireManage(user, this.store.channel(channelId));
+    const bridge = this.bridgeOf(channelId);
+    if (!bridge) return { room: null };
+    const listener = this.store.db.prepare("SELECT * FROM xmpp_remote_rooms WHERE user_id=? AND room=?").get(bridge.created_by, bridge.room) as Room | undefined;
+    const view = listener && this.view(listener);
+    return { room: bridge.room, state: view?.desired ? view.state : "left", error: view?.blocked || view?.error || null };
+  }
+  setBridge(user: User, channelId: string, value: unknown) {
+    this.xmpp.enabled();
+    const channel = this.store.channel(channelId);
+    this.store.requireOwner(user, channel);
+    if (channel.mode !== "timeline") throw new Problem(400, "Only timeline channels can be bridged with an XMPP room.");
+    if (this.store.mirrorState(channelId)) throw new Problem(400, "A mirror takes rooms as sources instead of a bridge.");
+    const room = this.address(value);
+    this.check(user, room, true);
+    return this.store.transaction(() => {
+      if (this.store.db.prepare("SELECT 1 FROM channel_bridges WHERE room=? AND channel_id!=?").get(room, channelId))
+        throw new Problem(409, "Another channel is already bridged with that room.");
+      if (this.bridgeOf(channelId)?.room !== room) {
+        this.unbridge(channelId);
+        this.store.db.prepare("INSERT INTO channel_bridges VALUES(?,?,?,?)").run(channelId, room, user.id, new Date().toISOString());
+        this.store.audit(user.id, "channel.bridge", JSON.stringify({ channel: channelId, room }));
+      }
+      this.occupy(user, room);
+      return this.bridge(user, channelId);
+    });
+  }
+  removeBridge(user: User, channelId: string) {
+    this.store.requireOwner(user, this.store.channel(channelId));
+    this.store.transaction(() => {
+      if (!this.bridgeOf(channelId)) return;
+      this.unbridge(channelId);
+      this.store.audit(user.id, "channel.bridge", JSON.stringify({ channel: channelId, room: null }));
+    });
+    return { room: null };
+  }
+  private unbridge(channelId: string) {
+    const bridge = this.bridgeOf(channelId);
+    if (!bridge) return;
+    for (const row of this.store.db.prepare("SELECT id FROM xmpp_remote_rooms WHERE room=? AND bridged=1").all(bridge.room) as { id: string }[]) {
+      this.store.db.prepare("UPDATE xmpp_remote_rooms SET desired=0,state='left',role='none',error=NULL,updated_at=? WHERE id=?").run(Date.now(), row.id);
+      this.failPending(row.id, "The channel is no longer bridged with this room.");
+    }
+    this.store.db.prepare("DELETE FROM channel_bridge_seen WHERE channel_id=?").run(channelId);
+    this.store.db.prepare("DELETE FROM channel_bridges WHERE channel_id=?").run(channelId);
+  }
+  /** Each author speaks in the room as themselves; a room they joined on their own account is reused. */
+  private occupy(user: User, room: string) {
+    const find = () => this.store.db.prepare("SELECT * FROM xmpp_remote_rooms WHERE user_id=? AND room=?").get(user.id, room) as Room | undefined;
+    const old = find();
+    if (old?.desired && ["joining", "joined"].includes(old.state)) return old;
+    this.join(user, { room, nick: old?.nick, reconnect: true }, true);
+    return find()!;
+  }
+  /** A local member's new channel message is repeated in the bridged room when their own grants allow it. */
+  relay(message: ChannelMessage) {
+    const bridge = this.bridgeOf(message.channel_id), author = this.store.user(message.author_id);
+    if (!bridge || author.remote_actor || message.remote_object) return;
+    try {
+      this.check(author, bridge.room, true);
+      const occupant = this.occupy(author, bridge.room);
+      this.store.db.prepare("INSERT INTO xmpp_remote_messages(id,subscription_id,sender,body,created_at,status,relay_of) VALUES(?,?,?,?,?,'queued',?)")
+        .run(randomUUID(), occupant.id, `${occupant.room}/${occupant.nick}`, message.body, message.created_at, message.id);
+    } catch (error) {
+      // Without the grants, or room, to speak there the message simply stays local.
+      if (!(error instanceof Problem)) throw error;
+    }
+  }
+  /** What the room says enters the channel once, whichever bridged occupants hear it. */
+  private bridgeIn(room: Room, sender: string, body: string, stamp: string, key: string | null, real: string | null, id: unknown) {
+    const bridge = this.store.db.prepare("SELECT * FROM channel_bridges WHERE room=?").get(room.room) as Bridge | undefined;
+    // A member's private subscription to the same room never feeds a channel someone else bridged.
+    if (!bridge || (!room.bridged && room.user_id !== bridge.created_by) || sender.length > 400) return;
+    if (!key && room.user_id !== bridge.created_by) return;
+    const known = typeof id === "string" ? this.store.db.prepare("SELECT m.relay_of,r.user_id FROM xmpp_remote_messages m JOIN xmpp_remote_rooms r ON r.id=m.subscription_id WHERE m.id=? AND r.room=?")
+      .get(id, room.room) as { relay_of: string | null; user_id: string } | undefined : undefined;
+    if (known?.relay_of) return;
+    if (key && !this.store.db.prepare("INSERT OR IGNORE INTO channel_bridge_seen VALUES(?,?)").run(bridge.channel_id, key).changes) return;
+    let author: User | null;
+    try {
+      author = known ? this.store.active(known.user_id)
+        : real?.endsWith(`@${this.xmpp.config.xmppDomain}`) ? this.xmpp.local(real)
+        : this.xmpp.identity(real || sender, real || sender.slice(sender.indexOf("/") + 1));
+    } catch { author = null; }
+    if (!author) return;
+    // Written directly, as for occupants of other servers: nothing here is relayed onward.
+    const messageId = randomUUID();
+    this.store.db.prepare("INSERT INTO messages(id,channel_id,author_id,body,created_at) VALUES(?,?,?,?,?)").run(messageId, bridge.channel_id, author.id, body, stamp);
+    this.store.db.prepare("INSERT INTO xmpp_events(kind,object_id) VALUES('Create',?)").run(messageId);
   }
   sync(input: Input) {
     const active = Array.isArray(input.active) ? input.active : [];

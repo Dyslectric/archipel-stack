@@ -3,7 +3,8 @@
 This is the initial Archipel-to-Archipel federation profile (`archipelVersion: 1`).
 It implements ActivityStreams actors and server-to-server activities with Archipel
 extensions for channel modes, topics, emoji, and origin proofs. Lemmy, PieFed,
-generic ActivityPub clients, mirrors, and writable failover are not supported yet.
+generic ActivityPub clients, federated mirrors, and writable failover are not
+supported yet. Local mirrors are described at the end of this document.
 
 ## Enable and grant access
 
@@ -130,3 +131,32 @@ asset URL; personal collections are not published as a public catalog.
 Receivers download and render cached local copies. A federated note carries the
 first eight distinct custom emoji used; further custom shortcodes remain text
 at peers. Standard Unicode emoji have no such image-transfer limit.
+
+## Mirrors
+
+A mirror is a local timeline channel that its creator owns and fills from
+sources hosted elsewhere: channels followed from other instances, and XMPP rooms
+the owner has joined. Channels hosted on this instance are never sources. Start
+one with **Mirror this channel** in a followed channel's settings, or **Mirror**
+in an XMPP room; add further sources to the same mirror the same way.
+
+- The mirror copies what the owner's own subscriptions receive, including what
+  they already hold when the source is added. Nothing is sent to a source, and
+  the mirror is not announced; the owner invites or tells whoever should know.
+- Copies are kept as they arrived. A later edit or removal at the source does
+  not change them; the mirror's owner and moderators moderate it.
+- Nobody can write in a mirror until its owner opens it. It is then a fork:
+  what is written there stays there, and its sources keep arriving alongside.
+- The owner can stop consuming a source, resume it (catching up on what their
+  subscription received meanwhile) or remove it. If the owner unfollows a
+  channel, leaves a room or loses the federation grants, that source stops and
+  what was copied stays.
+- Copies count as remote content: readers need the receive grant, personal
+  blocks apply, and they are not shown to XMPP clients of the mirror's own room.
+- A mirror has the format of its first source and only takes further sources
+  in that format: timeline, topical or threaded. Topics are matched by title,
+  thread titles and reply structure are kept, and a message the source had
+  already removed, or the owner never received, is kept as the same empty place
+  so its replies still hang from it. XMPP rooms are timelines.
+- A mirror cannot itself be federated or bridged, so it serves the members of
+  the instance that holds it.

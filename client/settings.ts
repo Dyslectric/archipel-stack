@@ -29,6 +29,7 @@ import {
   type User,
 } from "./shared.js";
 import { chatChannel, resetChat } from "./chat.js";
+import { mirrorDialog } from "./mirrors.js";
 
 // Settings are pages you can move between from the list on the left: yours, federation,
 // a channel's, and the instance's. Each section draws itself into the page and redraws
@@ -45,6 +46,7 @@ interface Section {
   icon: string;
   admin?: boolean; // instance administrators only
   mod?: boolean; // the channel's moderators only
+  mirror?: boolean; // mirrors only
   draw: (el: HTMLElement, ctx: Ctx) => Promise<void>;
 }
 const groups = {
@@ -510,8 +512,11 @@ const sections: Section[] = [
     about: "What this channel is and how it's set up.",
     icon: "hash",
     async draw(el, ctx) {
-      const c = ctx.channel!;
-      const address = `#${c.name}@${c.remote_actor ? new URL(c.remote_actor).host : state.session.instance}`;
+      const c = ctx.channel!,
+        owning =
+          !c.remote_actor &&
+          (!!state.session.user?.admin || c.role === "owner");
+      const address =`#${c.name}@${c.remote_actor ? new URL(c.remote_actor).host : state.session.instance}`;
       el.innerHTML =
         card(
           `${channelIcon(c)} ${esc(c.name)}`,
@@ -525,7 +530,53 @@ const sections: Section[] = [
                 ? "Unsubscribes you from this remote channel."
                 : "You can join again later if the channel allows it.",
             )
+          : "") +
+        (c.remote_actor && c.role
+          ? card(
+              "Mirror",
+              `<button type="button" class="secondary" id="mirror-channel">Mirror this channel</button>`,
+              "Keeps your own copy in a channel you own here, so the conversation stays readable if this one goes away.",
+            )
+          : "") +
+        (owning
+          ? card(
+              "Rename",
+              `<form class="stack narrow-form" id="rename-channel"><label>Channel name<span class="input-prefix"><span>#</span><input name="name" value="${esc(c.name)}" required minlength="2" maxlength="40" pattern="[a-zA-Z0-9][a-zA-Z0-9_\\-]{1,39}" autocomplete="off"></span></label>${error}<button>Rename channel</button></form>`,
+              "Renaming changes the channel's address. Links to it keep working; anyone using the old address, or its XMPP room, has to switch to the new one.",
+            ) +
+            card(
+              "Delete",
+              `<button type="button" class="danger" id="delete-channel">Delete this channel</button>`,
+              "Removes the channel and every message in it for everyone. This can't be undone.",
+            )
           : "");
+      if (owning) {
+        onSubmit($("#rename-channel", el), async (data) => {
+          await api(`/channels/${c.id}`, "PATCH", { name: data.get("name") });
+          state.channels = await api<Channel[]>("/channels");
+          if (chatChannel()?.id === c.id) resetChat();
+          toast("Channel renamed.");
+          ctx.refresh();
+        });
+        onClick(el, "#delete-channel", async () => {
+          if (
+            !(await confirmDialog(
+              `Delete #${c.name}?`,
+              `All of its messages${c.member_count > 1 ? ` and its ${c.member_count} memberships` : ""} will be removed permanently.`,
+              "Delete channel",
+            ))
+          )
+            return;
+          await api(`/channels/${c.id}`, "DELETE");
+          if (chatChannel()?.id === c.id) resetChat();
+          state.channels = await api<Channel[]>("/channels");
+          toast("Channel deleted.");
+          go("#/channels");
+        });
+      }
+      onClick(el, "#mirror-channel", async () =>
+        mirrorDialog("channel", c.id, `#${c.name}`, c.mode),
+      );
       onClick(el, "#leave-channel", async () => {
         if (
           !(await confirmDialog(
@@ -631,6 +682,140 @@ const sections: Section[] = [
       onClick(el, "[data-clear]", (button) =>
         change(button.dataset.clear, "clear"),
       );
+    },
+  },
+  {
+    group: "channel",
+    key: "mirror",
+    label: "Mirror",
+    about: "What this mirror copies, and whether people can write in it.",
+    icon: "globe",
+    mod: true,
+    mirror: true,
+    async draw(el, ctx) {
+      const c = ctx.channel!,
+        owning = !!state.session.user?.admin || c.role === "owner";
+      const mirror = await api<{
+        writable: boolean;
+        sources: {
+          id: string;
+          kind: string;
+          name: string;
+          state: string;
+          active: boolean;
+        }[];
+      }>(`/channels/${c.id}/mirror`);
+      const live = (state: string) => state === "following" || state === "joined";
+      el.innerHTML =
+        card(
+          "Sources",
+          `<ul class="plain mirror-sources">${
+            mirror.sources
+              .map(
+                (s) =>
+                  `<li class="row">${icon(s.kind === "xmpp" ? "globe" : "hash")}<strong class="grow">${esc(s.name)}</strong><span class="pill ${!s.active ? "" : live(s.state) ? "good" : "warn"}">${s.active ? esc(s.state) : "stopped"}</span>${owning ? `<button type="button" class="small secondary" data-source="${s.id}" data-active="${!s.active}">${s.active ? "Stop consuming" : "Resume"}</button><button type="button" class="small secondary bad-text" data-source="${s.id}" data-remove>Remove</button>` : ""}</li>`,
+              )
+              .join("") || '<li class="muted">No sources yet.</li>'
+          }</ul>`,
+          "Copied from the owner's own subscriptions, without telling the sources. To add one, use Mirror on a channel you follow from another instance (in its settings) or in an XMPP room you've joined. Copies stay as they arrived even if the source later edits or removes them.",
+        ) +
+        (owning
+          ? card(
+              "Writing",
+              mirror.writable
+                ? `<p>Members can write here. Sources keep arriving alongside.</p><button type="button" class="secondary" id="mirror-writable" data-writable="false">Make read-only again</button>`
+                : `<p>Nobody can write here yet.</p><button type="button" id="mirror-writable" data-writable="true">Open for writing</button>`,
+              "Opening the mirror makes it a fork: what is written here stays here and is not sent to the sources.",
+            )
+          : "");
+      onClick(el, "[data-source]", async (button) => {
+        const path = `/channels/${c.id}/mirror/sources/${button.dataset.source}`;
+        if ("remove" in button.dataset) {
+          if (
+            !(await confirmDialog(
+              "Remove this source?",
+              "The mirror stops copying it. Messages already copied stay.",
+              "Remove source",
+            ))
+          )
+            return;
+          await api(path, "DELETE");
+        } else
+          await api(path, "PATCH", { active: button.dataset.active === "true" });
+        ctx.refresh();
+      });
+      onClick(el, "#mirror-writable", async (button) => {
+        await api(`/channels/${c.id}/mirror`, "PATCH", {
+          writable: button.dataset.writable === "true",
+        });
+        state.channels = await api<Channel[]>("/channels");
+        if (chatChannel()?.id === c.id) resetChat();
+        ctx.refresh();
+      });
+    },
+  },
+  {
+    group: "channel",
+    key: "bridge",
+    label: "XMPP bridge",
+    about: "Carry this channel and a room on another XMPP server as one conversation.",
+    icon: "globe",
+    mod: true,
+    async draw(el, ctx) {
+      const c = ctx.channel!,
+        owning = !!state.session.user?.admin || c.role === "owner";
+      const bridge = await api<{
+        room: string | null;
+        state?: string;
+        error?: string | null;
+      }>(`/channels/${c.id}/bridge`);
+      const how =
+        "Messages from the room appear here under their authors' room names. What members write here is repeated in the room under their own XMPP identity, if their account may send and post to federated rooms; otherwise it stays in this channel. Edits and removals are not carried across.";
+      el.innerHTML = !state.xmppEnabled
+        ? '<p class="card empty muted">XMPP is not configured on this instance.</p>'
+        : c.mode !== "timeline"
+          ? '<p class="card empty muted">Only timeline channels can be bridged with an XMPP room.</p>'
+          : bridge.room
+            ? card(
+                "Bridged room",
+                `<dl class="info"><dt>Room</dt><dd><code>${esc(bridge.room)}</code></dd><dt>Connection</dt><dd><span class="pill ${bridge.state === "joined" ? "good" : bridge.state === "joining" ? "warn" : "bad"}">${esc(bridge.state)}</span></dd></dl>${bridge.error ? `<p class="flash error">${esc(bridge.error)}</p>` : ""}${owning ? `<div class="row"><button type="button" class="secondary" id="bridge-reconnect">Reconnect</button><button type="button" class="danger" id="bridge-remove">Remove bridge</button></div>` : ""}`,
+                how,
+              )
+            : owning
+              ? card(
+                  "Bridge with a room",
+                  `<form class="stack narrow-form" id="bridge-form"><label>Room address<input name="room" required maxlength="512" placeholder="lounge@muc.example.org" autocomplete="off"></label>${error}<button>Bridge channel</button></form>`,
+                  how,
+                )
+              : '<p class="card empty muted">This channel is not bridged. Only its owner can bridge it.</p>';
+      const form = el.querySelector<HTMLFormElement>("#bridge-form");
+      if (form)
+        onSubmit(form, async (data) => {
+          await api(`/channels/${c.id}/bridge`, "PUT", { room: data.get("room") });
+          state.channels = await api<Channel[]>("/channels");
+          if (chatChannel()?.id === c.id) resetChat();
+          toast("Channel bridged.");
+          ctx.refresh();
+        });
+      onClick(el, "#bridge-reconnect", async () => {
+        await api(`/channels/${c.id}/bridge`, "PUT", { room: bridge.room });
+        ctx.refresh();
+      });
+      onClick(el, "#bridge-remove", async () => {
+        if (
+          !(await confirmDialog(
+            "Remove the bridge?",
+            "The channel and the room go their separate ways. Messages already here stay.",
+            "Remove bridge",
+          ))
+        )
+          return;
+        await api(`/channels/${c.id}/bridge`, "DELETE");
+        state.channels = await api<Channel[]>("/channels");
+        if (chatChannel()?.id === c.id) resetChat();
+        toast("Bridge removed.");
+        ctx.refresh();
+      });
     },
   },
   {
@@ -820,7 +1005,10 @@ export async function showSettings(
     channels[0];
   const allowed = (s: Section) =>
     (!s.admin || admin) &&
-    (s.group !== "channel" || (!!listed && (!s.mod || canModerate(listed))));
+    (s.group !== "channel" ||
+      (!!listed &&
+        (!s.mod || canModerate(listed)) &&
+        (!s.mirror || !!listed.mirror)));
   const section = sections.find((s) => s.group === group && s.key === key);
   const href = (s: Section) =>
     `#/settings/${s.group}/${s.key}${s.group === "channel" ? `/${listed!.id}` : ""}`;

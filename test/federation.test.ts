@@ -8,6 +8,7 @@ import { Store, Problem } from "../src/store.js";
 import { createApp } from "../src/app.js";
 import { loadConfig } from "../src/config.js";
 import { Federation } from "../src/federation.js";
+import { Mirrors } from "../src/mirrors.js";
 import {
   peerUrl,
   publicAddress,
@@ -43,6 +44,7 @@ async function instance(t: TestContext) {
     } else liveApp(req, res);
   });
   const fed = app.locals.federation as Federation;
+  const mirrors = app.locals.mirrors as Mirrors;
   const alice = store.loginIdentity(
     "urn:archipel:development",
     "alice",
@@ -60,6 +62,7 @@ async function instance(t: TestContext) {
     config,
     store,
     fed,
+    mirrors,
     alice: store.user(alice.id),
     bob: store.user(bob.id),
     offline(value: boolean) {
@@ -849,4 +852,156 @@ test("an offline peer with a backlog cannot prevent delivery to another peer", a
   );
   await b.fed.tick();
   assert.equal(c.fed.directMessages(c.bob)[0].body, "Independent recipient");
+});
+test("renaming a home channel renames its remote copies and deleting it ends their subscriptions", async (t) => {
+  const a = await instance(t),
+    b = await instance(t);
+  const home = channel(a),
+    host = new URL(a.origin).host;
+  const sub = await b.fed.subscribe(b.bob, `#general@${host}`);
+  await drain(a, b);
+  await b.fed.remotePost(b.bob, sub.channel.id, { body: "Hello from remote" });
+  await drain(a, b);
+  a.store.renameChannel(a.alice, home.id, "lobby");
+  await drain(a, b);
+  assert.equal(b.store.channel(sub.channel.id).name, `lobby@${host}`);
+  assert.equal((await b.fed.resolve(`#lobby@${host}`)).id, a.fed.channelActor(home));
+  await assert.rejects(b.fed.resolve(`#general@${host}`));
+  a.store.post(a.alice, home.id, { body: "Still here" });
+  await drain(a, b);
+  assert.equal(b.store.messages(b.bob, sub.channel.id).at(-1)?.body, "Still here");
+  // A post that hadn't left yet must not be delivered for a channel that no longer exists.
+  a.store.post(a.alice, home.id, { body: "Never sent" });
+  a.store.deleteChannel(a.alice, home.id);
+  await drain(a, b);
+  assert.throws(() => a.store.channel(home.id), /Channel not found/);
+  assert.equal(
+    a.store.db.prepare("SELECT COUNT(*) AS n FROM federation_follows").get()!.n,
+    0,
+  );
+  assert.equal(b.store.role(sub.channel.id, b.bob.id), null);
+  assert.equal(b.fed.subscriptions(b.bob)[0].status, "rejected");
+  assert.equal(
+    b.store.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE body='Never sent'").get()!.n,
+    0,
+  );
+});
+
+test("a mirror copies followed channels for its owner, stays read-only until opened, and outlives its sources", async (t) => {
+  const a = await instance(t),
+    b = await instance(t),
+    c = await instance(t);
+  const settings = { name: "archive", description: "", visibility: "members", admission: "allowlist" };
+  const home = channel(a),
+    schism = channel(c, { name: "splinter" });
+  a.store.post(a.alice, home.id, { body: "Before the mirror" });
+  const followed = await b.fed.subscribe(b.bob, `#general@${new URL(a.origin).host}`);
+  const second = await b.fed.subscribe(b.bob, `#splinter@${new URL(c.origin).host}`);
+  await drain(a, b, c);
+  const local = b.store.createChannel(b.bob, { ...settings, name: "here", mode: "timeline" });
+  const mirror = b.mirrors.create(b.bob, settings);
+  assert.equal(mirror.mirror, "read-only");
+  assert.equal(mirror.mode, "timeline");
+  const bodies = () => b.store.messages(b.bob, mirror.id).map((m) => m.body);
+  const failing = (fn: () => unknown, status: number) =>
+    assert.throws(fn, (e: unknown) => e instanceof Problem && e.status === status);
+  // Only what is hosted elsewhere and followed by the owner can be a source.
+  failing(() => b.mirrors.addSource(b.bob, mirror.id, { kind: "channel", source: local.id }), 400);
+  failing(() => b.mirrors.addSource(b.alice, mirror.id, { kind: "channel", source: followed.channel.id }), 403);
+  failing(() => b.mirrors.addSource(b.bob, local.id, { kind: "channel", source: followed.channel.id }), 404);
+  b.mirrors.addSource(b.bob, mirror.id, { kind: "channel", source: followed.channel.id });
+  failing(() => b.mirrors.addSource(b.bob, mirror.id, { kind: "channel", source: followed.channel.id }), 409);
+  assert.deepEqual(bodies(), ["Before the mirror"]);
+  // Several sources feed one mirror; nothing is sent to any of them.
+  const queued = () => b.store.db.prepare("SELECT COUNT(*) AS n FROM federation_outgoing").get()!.n;
+  const before = queued();
+  b.mirrors.addSource(b.bob, mirror.id, { kind: "channel", source: second.channel.id });
+  const removed = a.store.post(a.alice, home.id, { body: "From the first" });
+  c.store.post(c.alice, schism.id, { body: "From the second" });
+  await drain(a, b, c);
+  assert.deepEqual(bodies(), ["Before the mirror", "From the first", "From the second"]);
+  assert.equal(queued(), before);
+  assert.equal(b.store.messages(b.bob, mirror.id)[1].author_actor_url, a.fed.userActor(a.alice));
+  // Read-only for everyone until the owner opens it; then a fork that keeps receiving.
+  failing(() => b.store.post(b.bob, mirror.id, { body: "Too early" }), 403);
+  failing(() => b.mirrors.setWritable(b.alice, local.id, true), 404);
+  failing(() => b.fed.setChannel(b.bob, mirror.id, true), 400);
+  assert.equal(b.mirrors.setWritable(b.bob, mirror.id, true).writable, true);
+  b.store.post(b.bob, mirror.id, { body: "Written in the fork" });
+  await drain(a, b, c);
+  assert.equal(a.store.messages(a.alice, home.id).some((m) => m.body === "Written in the fork"), false);
+  // The owner moderates: a removal at the source does not reach the copy, and the owner can remove it here.
+  a.store.deleteMessage(a.alice, removed.id);
+  await drain(a, b, c);
+  assert.equal(bodies()[1], "From the first");
+  b.store.deleteMessage(b.bob, b.store.messages(b.bob, mirror.id)[2].id);
+  assert.ok(b.store.messages(b.bob, mirror.id)[2].deleted_at);
+  // Pausing a source holds its place; resuming catches up; removing it ends it.
+  const [first] = b.mirrors.sources(b.bob, mirror.id).sources;
+  assert.deepEqual([first.name, first.state, first.active], [`#general@${new URL(a.origin).host}`, "following", true]);
+  b.mirrors.setSource(b.bob, mirror.id, first.id, { active: false });
+  a.store.post(a.alice, home.id, { body: "While paused" });
+  await drain(a, b, c);
+  assert.equal(bodies().includes("While paused"), false);
+  b.mirrors.setSource(b.bob, mirror.id, first.id, { active: true });
+  assert.equal(bodies().at(-1), "While paused");
+  // The mirror keeps everything once the owner stops following, or the source goes away.
+  b.fed.unsubscribe(b.bob, followed.channel.id);
+  await drain(a, b, c);
+  a.store.deleteChannel(a.alice, home.id);
+  await drain(a, b, c);
+  assert.equal(b.mirrors.sources(b.bob, mirror.id).sources[0].state, "left");
+  assert.equal(bodies().length, 5);
+  b.mirrors.removeSource(b.bob, mirror.id, first.id);
+  b.store.deleteChannel(b.bob, mirror.id);
+  assert.equal(b.store.db.prepare("SELECT COUNT(*) AS n FROM mirror_sources").get()!.n, 0);
+});
+
+test("mirrors of topical and threaded channels keep their topics, titles and replies", async (t) => {
+  const a = await instance(t),
+    b = await instance(t);
+  const host = new URL(a.origin).host;
+  const settings = { description: "", visibility: "members", admission: "allowlist" };
+  const threads = channel(a, { name: "threads", mode: "threaded" }),
+    topics = channel(a, { name: "topics", mode: "topical" });
+  const root = a.store.post(a.alice, threads.id, { title: "A thread", body: "Root" });
+  const gone = a.store.post(a.alice, threads.id, { body: "Removed before mirroring", parent_id: root.id });
+  a.store.post(a.alice, threads.id, { body: "Under the removed reply", parent_id: gone.id });
+  a.store.deleteMessage(a.alice, gone.id);
+  const news = a.store.createTopic(a.alice, topics.id, "News");
+  a.store.post(a.alice, topics.id, { topic_id: news.id, body: "In a topic" });
+  const followedThreads = await b.fed.subscribe(b.bob, `#threads@${host}`),
+    followedTopics = await b.fed.subscribe(b.bob, `#topics@${host}`);
+  await drain(a, b);
+  const threaded = b.mirrors.create(b.bob, { ...settings, name: "threads-copy", mode: "threaded" }),
+    topical = b.mirrors.create(b.bob, { ...settings, name: "topics-copy", mode: "topical" });
+  assert.equal(threaded.mode, "threaded");
+  // A mirror takes sources of its own format only.
+  assert.throws(
+    () => b.mirrors.addSource(b.bob, threaded.id, { kind: "channel", source: followedTopics.channel.id }),
+    (e: unknown) => e instanceof Problem && e.status === 400,
+  );
+  b.mirrors.addSource(b.bob, threaded.id, { kind: "channel", source: followedThreads.channel.id });
+  b.mirrors.addSource(b.bob, topical.id, { kind: "channel", source: followedTopics.channel.id });
+  a.store.post(a.alice, threads.id, { body: "A later reply", parent_id: root.id });
+  a.store.post(a.alice, topics.id, { topic_id: news.id, body: "Later in the topic" });
+  await drain(a, b);
+  const tree = b.store.messages(b.bob, threaded.id);
+  const at = (body: string) => tree.find((m) => m.body === body)!;
+  assert.equal(at("Root").title, "A thread");
+  assert.equal(at("Root").parent_id, null);
+  const removed = tree.find((m) => m.deleted_at)!;
+  // A reply removed before the owner followed arrives without its place in the thread, here as there.
+  assert.equal(removed.parent_id, null);
+  assert.equal(at("Under the removed reply").parent_id, removed.id);
+  assert.equal(at("A later reply").parent_id, at("Root").id);
+  const details = b.store.details(b.bob, topical.id);
+  assert.deepEqual((details.topics as { title: string }[]).map((topic) => topic.title), ["News"]);
+  const inTopic = b.store.messages(b.bob, topical.id);
+  assert.deepEqual(inTopic.map((m) => m.body), ["In a topic", "Later in the topic"]);
+  assert.ok(inTopic.every((m) => m.topic_id === (details.topics as { id: string }[])[0].id));
+  // Once opened, members reply inside the copied structure.
+  b.mirrors.setWritable(b.bob, threaded.id, true);
+  const reply = b.store.post(b.bob, threaded.id, { body: "Forked reply", parent_id: at("Root").id });
+  assert.equal(reply.parent_id, at("Root").id);
 });

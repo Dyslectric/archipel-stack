@@ -992,3 +992,51 @@ test("message edits and custom image APIs enforce CSRF, authorship and administr
     200,
   );
 });
+
+test("channel rename and delete APIs enforce CSRF and ownership", async (t) => {
+  const { origin } = await application(t);
+  const bob = browser(origin),
+    charlie = browser(origin);
+  await bob.login("bob");
+  await charlie.login("charlie");
+  const c = await (
+    await bob.request("/api/channels", "POST", {
+      name: "temporary",
+      mode: "timeline",
+      visibility: "public",
+      admission: "open",
+    })
+  ).json();
+  await charlie.request(`/api/channels/${c.id}/join`, "POST", {});
+  for (const [method, body] of [
+    ["PATCH", { name: "renamed" }],
+    ["DELETE", undefined],
+  ] as const)
+    assert.equal(
+      (await charlie.request(`/api/channels/${c.id}`, method, body)).status,
+      403,
+    );
+  assert.equal(
+    (
+      await bob.request(`/api/channels/${c.id}`, "DELETE", undefined, {
+        "X-CSRF-Token": "wrong",
+      })
+    ).status,
+    403,
+  );
+  const renamed = await bob.request(`/api/channels/${c.id}`, "PATCH", {
+    name: "Renamed",
+  });
+  assert.equal(renamed.status, 200);
+  assert.equal((await renamed.json()).name, "renamed");
+  assert.equal(
+    (await bob.request(`/api/channels/${c.id}`, "PATCH", { name: "x" })).status,
+    400,
+  );
+  assert.equal(
+    (await bob.request(`/api/channels/${c.id}`, "DELETE")).status,
+    200,
+  );
+  assert.equal((await charlie.request(`/api/channels/${c.id}`)).status, 404);
+  assert.deepEqual(await (await charlie.request("/api/channels")).json(), []);
+});

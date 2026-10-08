@@ -535,7 +535,7 @@ test("version-two emoji messages keep their image metadata through the federatio
     { id: "asset", name: "island", url: "/api/emojis/asset/image" },
   ]);
   assert.equal(store.user("author").federation_send, 0);
-  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 11);
+  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 12);
 });
 
 test("direct messages reach both members, and only the reader's own are news to them", () => {
@@ -644,7 +644,7 @@ test("personal blocks persist across restarts and upgrade an existing version 4 
   let store = new Store(path);
   const alice = store.loginIdentity("https://id.example", "alice", "alice", []);
   const bob = store.loginIdentity("https://id.example", "bob", "bob", []);
-  store.db.exec("DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; DROP TABLE user_blocks; PRAGMA user_version=4;");
+  store.db.exec("DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; DROP TABLE user_blocks; PRAGMA user_version=4;");
   store.close();
   store = new Store(path);
   const peer = `${store.baseUrl}/actors/users/${alice.id}`;
@@ -694,7 +694,7 @@ test("profile picture migration preserves identities and pictures survive restar
   const path = join(directory, "db.sqlite");
   let store = new Store(path);
   const alice = store.loginIdentity("https://id.example", "alice", "alice", []);
-  store.db.exec("DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; PRAGMA user_version=5;");
+  store.db.exec("DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; PRAGMA user_version=5;");
   store.close();
   store = new Store(path);
   const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
@@ -742,9 +742,9 @@ test("version 9 avatar migration preserves pictures and XMPP cursors and remote 
   const image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
   store.setAvatar(alice, image);
   store.db.prepare("INSERT INTO xmpp_events(seq,kind,object_id) VALUES(50,'Direct','old-message')").run();
-  store.db.exec("DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; PRAGMA user_version=9");
+  store.db.exec("DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; PRAGMA user_version=9");
   store.close(); store = new Store(path);
-  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 11);
+  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 12);
   assert.equal(Buffer.from(store.avatarImage(alice.id).image).toString("base64"), image);
   assert.equal(store.db.prepare("SELECT seq FROM xmpp_events WHERE object_id='old-message'").get()?.seq, 50);
   const next = store.db.prepare("INSERT INTO xmpp_events(kind,object_id) VALUES('Profile',?)").run(alice.id);
@@ -759,4 +759,41 @@ test("version 9 avatar migration preserves pictures and XMPP cursors and remote 
   assert.equal(store.peerInfo(peer, alice).display_name, "Friend");
   store.cacheRemoteAvatar(peer, null, "");
   assert.equal(store.peerInfo(peer).avatar_url, null);
+});
+test("owners rename and delete channels; deletion removes the conversation without touching others", () => {
+  const { store, alice, bob, charlie } = fixture();
+  const c = store.createChannel(alice, channelInput({ mode: "threaded" }));
+  const other = store.createChannel(bob, channelInput({ name: "other" }));
+  store.join(bob, c.id);
+  store.setMember(alice, c.id, bob.id, { role: "moderator" });
+  denied(() => store.renameChannel(bob, c.id, "lobby"));
+  denied(() => store.deleteChannel(bob, c.id));
+  denied(() => store.deleteChannel(charlie, c.id));
+  denied(() => store.renameChannel(alice, c.id, "other"), 409);
+  denied(() => store.renameChannel(alice, c.id, "No spaces"), 400);
+  assert.equal(store.renameChannel(alice, c.id, "Lobby").name, "lobby");
+  assert.equal(store.renameChannel(alice, c.id, "lobby").name, "lobby");
+  assert.equal(store.createChannel(charlie, channelInput()).name, "general");
+  const root = store.post(alice, c.id, { title: "Thread", body: "Root" });
+  store.post(bob, c.id, { body: "Reply", parent_id: root.id });
+  store.setMember(alice, c.id, charlie.id, { rule: "block" });
+  const kept = store.post(bob, other.id, { body: "Kept" });
+  store.deleteChannel(alice, c.id);
+  denied(() => store.channel(c.id), 404);
+  denied(() => store.message(root.id), 404);
+  assert.deepEqual(
+    store.listChannels(bob).map((channel) => channel.name),
+    ["general", "other"],
+  );
+  assert.deepEqual(store.overview(bob).unread, {});
+  assert.equal(store.message(kept.id).body, "Kept");
+  for (const table of ["memberships", "channel_rules", "messages"])
+    assert.equal(
+      store.db
+        .prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE channel_id=?`)
+        .get(c.id)!.n,
+      0,
+    );
+  assert.equal(store.createChannel(alice, channelInput({ name: "lobby" })).name, "lobby");
+  store.close();
 });

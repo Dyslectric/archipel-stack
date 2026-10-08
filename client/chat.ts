@@ -118,6 +118,8 @@ function postBlocked() {
   const c = current!,
     s = state.session;
   if (c.dm) return c.dm.blocked || null;
+  if (c.mirror === "read-only")
+    return "This mirror is read-only until its owner opens it for writing.";
   if (
     c.federation_enabled &&
     (!s.federation_enabled ||
@@ -136,6 +138,7 @@ export function chatFrame(view: HTMLElement) {
   view.innerHTML = `<div class="workspace"><aside class="sidebar" id="sidebar" aria-label="Conversations">
       <nav id="channel-list" aria-label="Your conversations"></nav>
       <a class="side-foot" href="#/channels">${icon("compass")}<span>Browse all channels</span></a>
+      <a class="side-foot" href="#/settings/federation/remote">${icon("globe")}<span>Join a federated channel</span></a>
       <a class="side-foot" href="#/xmpp">${icon("globe")}<span>Join an XMPP room</span></a>
       <button type="button" class="side-foot" data-new-dm>${icon("pencil")}<span>New direct message</span></button></aside>
       <main class="conversation" id="main"><header class="channel-header"><div id="channel-heading"></div><div class="header-actions" id="channel-actions"></div></header>
@@ -233,7 +236,7 @@ function renderHeader() {
     return;
   }
   $("#channel-heading").innerHTML =
-    `<h1>${channelIcon(c)}<strong>${esc(c.name)}</strong>${topic ? `${icon("chevron-right", "sep")}<span class="topic-name">${esc(topic.title)}</span>` : ""}</h1><span class="pill">${modeLabel(c.mode)}</span>${c.remote_actor ? '<span class="pill new">Remote</span>' : c.federation_enabled ? '<span class="pill new">Federated</span>' : ""}${c.description ? `<span class="desc muted small">${esc(c.description)}</span>` : ""}`;
+    `<h1>${channelIcon(c)}<strong>${esc(c.name)}</strong>${topic ? `${icon("chevron-right", "sep")}<span class="topic-name">${esc(topic.title)}</span>` : ""}</h1><span class="pill">${modeLabel(c.mode)}</span>${c.remote_actor ? '<span class="pill new">Remote</span>' : c.federation_enabled ? '<span class="pill new">Federated</span>' : ""}${c.bridge_room ? `<span class="pill new" title="Bridged with the XMPP room ${esc(c.bridge_room)}">Bridged</span>` : ""}${c.mirror ? `<span class="pill new">${c.mirror === "writable" ? "Fork" : "Mirror"}</span>` : ""}${c.description ? `<span class="desc muted small">${esc(c.description)}</span>` : ""}`;
   $("#channel-actions").innerHTML =
     `<a class="act" id="members" href="#/settings/channel/members/${c.id}" title="Members of #${esc(c.name)}">${icon("people")}<span>${c.member_count} member${c.member_count === 1 ? "" : "s"}</span></a><a class="icon-button" href="#/settings/channel/overview/${c.id}" aria-label="Channel settings" title="Channel settings">${icon("settings")}</a>`;
 }

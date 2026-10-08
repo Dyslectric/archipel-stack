@@ -1,8 +1,9 @@
-import { $, action, api, avatar, clock, dayLabel, esc, full, go, icon, onSubmit, sameDay, state, type XmppRoom } from "./shared.js";
+import { $, action, api, avatar, clock, dayLabel, esc, full, go, icon, nameButton, onSubmit, sameDay, state, type XmppRoom } from "./shared.js";
 import { chatFrame, resetChat } from "./chat.js";
 import { renderSidebar } from "./sidebar.js";
+import { mirrorDialog } from "./mirrors.js";
 
-type Message = { id: string; seq: number; sender: string; body: string; created_at: string; status: string; error: string | null };
+type Message = { id: string; seq: number; sender: string; sender_jid: string | null; blocked: boolean; body: string; created_at: string; status: string; error: string | null };
 type Page = { room: XmppRoom; messages: Message[]; more: boolean };
 let selected: string | undefined, generation = 0, more = false;
 let messages = new Map<string, Message>();
@@ -38,7 +39,8 @@ export async function showXmppRooms(view: HTMLElement, id?: string) {
 
 function paint(room: XmppRoom) {
   $("#channel-heading").innerHTML = `<h1>${icon("globe")}<span class="topic-name">${esc(room.room)}</span></h1><span class="desc">${esc(room.state)} · ${esc(room.nick)}${room.role !== "none" ? ` · ${esc(room.role)}` : ""}</span>`;
-  $("#channel-actions").innerHTML = `<a class="button secondary" href="#/xmpp">Join another room</a><button type="button" class="secondary" id="xmpp-rejoin">${room.desired && room.state === "joined" ? "Reconnect" : "Join again"}</button>${room.desired ? '<button type="button" class="secondary" id="xmpp-leave">Leave room</button>' : ""}`;
+  $("#channel-actions").innerHTML = `<a class="button secondary" href="#/xmpp">Join another room</a><button type="button" class="secondary" id="xmpp-mirror" title="Keep your own copy of this room in a channel you own">Mirror</button><button type="button" class="secondary" id="xmpp-rejoin">${room.desired && room.state === "joined" ? "Reconnect" : "Join again"}</button>${room.desired ? '<button type="button" class="secondary" id="xmpp-leave">Leave room</button>' : ""}`;
+  $("#xmpp-mirror").addEventListener("click", () => mirrorDialog("xmpp", room.id, room.room));
   $("#xmpp-rejoin").addEventListener("click", () => action(async () => {
     await api("/xmpp/rooms", "POST", { room: room.room, nick: room.nick, reconnect: true });
     await tickXmppRooms();
@@ -59,7 +61,8 @@ function paint(room: XmppRoom) {
     more = page.more; paint(page.room);
   }));
   const rows = $("#rows"), feed = $("#message-list"), bottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
-  // The same day groups and message rows as a channel; authors are room nicknames.
+  // The same day groups and message rows as a channel. Authors are room nicknames, with their own
+  // address beside it when the room discloses one; otherwise they can only be blocked by nickname.
   let html = "", prev: Message | undefined;
   for (const m of [...messages.values()].sort((a, b) => a.seq - b.seq)) {
     const nick = m.sender.slice(m.sender.indexOf("/") + 1);
@@ -69,8 +72,11 @@ function paint(room: XmppRoom) {
     const time = `<time datetime="${esc(m.created_at)}" title="${esc(full(m.created_at))}">${esc(clock(m.created_at))}</time>`;
     const note = status ? `<span class="edited">${esc(status)}</span>` : "";
     if (day) html += `${prev ? "</div></section>" : ""}<section class="day-group"><div class="day-divider"><span>${esc(dayLabel(m.created_at))}</span></div><div class="group-body">`;
-    html += `<article class="message xmpp-message${cont ? " cont" : ""}"><div class="msg-gutter">${cont ? time : avatar({ username: m.sender, display_name: nick })}</div>
-      <div class="message-content">${cont ? "" : `<div class="message-meta"><span class="author" title="${esc(m.sender)}">${esc(nick)}</span>${time}${note}</div>`}<div class="message-body">${esc(m.body)}</div>${cont ? note : ""}</div></article>`;
+    const own = m.sender === `${room.room}/${room.nick}`, who = { username: m.sender_jid || m.sender, display_name: nick };
+    const name = own ? `<span class="author" title="${esc(m.sender)}">${esc(nick)}</span>`
+      : `${nameButton(who, `xmpp:${m.sender_jid || m.sender}`)}${m.sender_jid ? ` <span class="handle">${esc(m.sender_jid)}</span>` : ""}`;
+    html += `<article class="message xmpp-message${cont ? " cont" : ""}"><div class="msg-gutter">${cont ? time : avatar(who)}</div>
+      <div class="message-content">${cont ? "" : `<div class="message-meta">${name}${time}${note}</div>`}<div class="message-body${m.blocked ? " faded" : ""}">${esc(m.body)}</div>${cont ? note : ""}</div></article>`;
     prev = m;
   }
   if (prev) html += "</div></section>";
