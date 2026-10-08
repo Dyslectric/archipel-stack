@@ -78,7 +78,7 @@ export class Xmpp {
     if (!this.config.xmppDomain) return { enabled: false };
     return {
       enabled: true, jid: this.jid(user), domain: this.config.xmppDomain,
-      rooms: this.rooms, port: 5222,
+      rooms: this.rooms, port: this.config.xmppClientPort,
       credentials: this.store.db.prepare("SELECT id,label,created_at FROM xmpp_credentials WHERE user_id=? AND revoked_at IS NULL ORDER BY created_at")
         .all(user.id),
       channels: this.store.listChannels(user).filter(c => !c.remote_actor && c.mode === "timeline")

@@ -29,6 +29,25 @@ test("XMPP configuration requires explicit valid domain and private bridge secre
     assert.throws(() => loadConfig({ XMPP_DOMAIN: domain, XMPP_BRIDGE_SECRET: secret }), /XMPP_DOMAIN/);
   assert.throws(() => loadConfig({ XMPP_DOMAIN: "chat.example" }), /XMPP_BRIDGE_SECRET/);
 });
+
+test("XMPP ports default to standard listeners and configured client ports are advertised", () => {
+  const f = fixture();
+  assert.equal(f.config.xmppClientPort, 5222);
+  assert.equal(f.config.xmppServerPort, 5269);
+  assert.equal(f.xmpp.status(f.alice).port, 5222);
+  const env = { DEV_AUTH: "true", XMPP_DOMAIN: "chat.example", XMPP_BRIDGE_SECRET: secret, XMPP_CLIENT_PORT: "55222", XMPP_SERVER_PORT: "55269" };
+  const config = loadConfig(env);
+  assert.equal(new Xmpp(f.store, config).status(f.alice).port, 55222);
+  assert.equal(config.xmppServerPort, 55269);
+  for (const key of ["XMPP_CLIENT_PORT", "XMPP_SERVER_PORT"]) {
+    for (const value of ["0", "65536", "-1", "5222.5", "5e3", "0x1466", "invalid"]) {
+      assert.throws(() => loadConfig({ ...env, [key]: value }), new RegExp(key));
+    }
+    assert.doesNotThrow(() => loadConfig({ ...env, [key]: "65535" }));
+  }
+  assert.throws(() => loadConfig({ ...env, XMPP_SERVER_PORT: "55222" }), /ports must differ/);
+  f.store.close();
+});
 test("app credentials use explicit stable account bindings and are revocable without linking matching OIDC names", () => {
   const f = fixture();
   assert.deepEqual(f.xmpp.verify({ username: "alice", password: f.a.password }), { valid: true, credential: f.a.id });

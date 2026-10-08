@@ -27,6 +27,32 @@ def defaults(_label, value, secret=False):
 
 
 class SetupTests(unittest.TestCase):
+    def test_xmpp_ports_are_prompted_validated_and_preserved_on_reconfiguration(self):
+        prompts = []
+        def custom_ports(label, value, secret=False):
+            prompts.append(label)
+            return {"XMPP client STARTTLS port": "55222", "XMPP federation port": "55269"}.get(label, value)
+        settings = setup.collect_setup({"XMPP_DOMAIN": "chat.example.org"}, custom_ports)
+        self.assertIn("XMPP client STARTTLS port", prompts)
+        self.assertEqual(settings["XMPP_CLIENT_PORT"], "55222")
+        self.assertEqual(settings["XMPP_SERVER_PORT"], "55269")
+        with tempfile.TemporaryDirectory() as directory:
+            setup.write_setup(directory, settings)
+            public = setup.parse_env((Path(directory) / ".env").read_text())
+            raw = setup.parse_raw_env((Path(directory) / ".env.container").read_text())
+            restored = setup.collect_setup({**public, "XMPP_BRIDGE_SECRET": raw["XMPP_BRIDGE_SECRET"]}, defaults)
+            self.assertEqual(restored["XMPP_CLIENT_PORT"], "55222")
+            self.assertEqual(restored["XMPP_SERVER_PORT"], "55269")
+        default = setup.collect_setup({"XMPP_DOMAIN": "chat.example.org"}, defaults)
+        self.assertEqual(default["XMPP_CLIENT_PORT"], "5222")
+        self.assertEqual(default["XMPP_SERVER_PORT"], "5269")
+        for key in ("XMPP_CLIENT_PORT", "XMPP_SERVER_PORT"):
+            for value in ("0", "65536", "-1", "5222.5", "5e3", "0x1466", "invalid"):
+                with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, key):
+                    setup.collect_setup({"XMPP_DOMAIN": "chat.example.org", key: value}, defaults)
+        with self.assertRaisesRegex(ValueError, "ports must differ"):
+            setup.collect_setup({"XMPP_DOMAIN": "chat.example.org", "XMPP_CLIENT_PORT": "5269"}, defaults)
+
     def test_xmpp_setup_selects_prosody_and_keeps_bridge_secret_private_and_stable(self):
         settings = setup.collect_setup({"XMPP_DOMAIN": "chat.example.org"}, defaults)
         self.assertIn("compose.xmpp.yaml", settings["COMPOSE_FILE"])
@@ -232,6 +258,16 @@ class ComposeTests(unittest.TestCase):
                         self.assertEqual(service["ports"][0]["host_ip"], "127.0.0.1")
                     if mode == "traefik":
                         self.assertEqual(service["labels"]["traefik.http.routers.archipel.tls.certresolver"], "letsencrypt")
+            settings = setup.collect_setup({"XMPP_DOMAIN": "chat.example.org", "XMPP_CLIENT_PORT": "55222", "XMPP_SERVER_PORT": "55269"}, defaults)
+            setup.write_setup(directory, settings)
+            env = {key: value for key, value in os.environ.items() if key not in (*settings, "COMPOSE_FILE", "COMPOSE_PROJECT_NAME")}
+            result = subprocess.run([*command, "config", "--format", "json"], cwd=directory, env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            services = json.loads(result.stdout)["services"]
+            for service in ("archipel", "prosody"):
+                self.assertEqual(services[service]["environment"]["XMPP_CLIENT_PORT"], "55222")
+                self.assertEqual(services[service]["environment"]["XMPP_SERVER_PORT"], "55269")
+            self.assertEqual({(p["published"], p["target"]) for p in services["prosody"]["ports"]}, {("55222", 55222), ("55269", 55269)})
 
 
 if __name__ == "__main__":

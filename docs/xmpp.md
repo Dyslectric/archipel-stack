@@ -35,10 +35,12 @@ Room nicknames are assigned from the local account's stable XMPP node.
 1. Run `python3 scripts/setup.py` and supply a lowercase **XMPP account domain**,
    such as `chat.example.org`. Setup adds `compose.xmpp.yaml` and generates a
    random bridge secret in `.env.container`. Re-running setup preserves that
-   secret. Keep this file private.
+   secret. Keep this file private. The client STARTTLS port defaults to 5222 and
+   the federation port to 5269; setup prompts for both when XMPP is enabled.
 2. Set up A/AAAA records for that domain and `channels.chat.example.org`, pointing
    to the server. Publish `_xmpp-client._tcp.chat.example.org` and
-   `_xmpp-server._tcp.chat.example.org` SRV records for TCP 5222 and 5269.
+   `_xmpp-server._tcp.chat.example.org` SRV records using your configured client
+   and federation ports (defaults 5222 and 5269).
    Publish a server SRV record for `channels.chat.example.org` as well. The SRV
    target must be a DNS host, not an IP literal.
 3. Obtain certificates covering `chat.example.org` and
@@ -49,14 +51,15 @@ Room nicknames are assigned from the local account's stable XMPP node.
    and `chat.example.org.key`; Prosody discovers its subject alternative names.
    The Prosody container user must be able to read the keys. Its default UID is
    100; confirm it for your platform with the pinned image's `id prosody`.
-4. Allow inbound TCP 5222 (clients) and 5269 (federation), outbound TCP 5269,
-   and DNS queries. Web proxy/Traefik HTTPS certificates and port 443 do not
+4. Allow inbound TCP on your configured client and federation ports, outbound
+   connections to remote XMPP server ports (usually 5269), and DNS queries.
+   Web proxy/Traefik HTTPS certificates and port 443 do not
    automatically configure XMPP TLS. Only publish IPv6 records when IPv6 works.
 5. Run `docker compose config --quiet`, then `docker compose up --build -d`.
    Inspect `docker compose logs prosody` and run
    `docker compose exec prosody prosodyctl check config`.
 6. Sign in through OIDC, then open **Settings → XMPP clients**. Create a password
-   for each client and use the displayed JID with STARTTLS on port 5222. Passwords
+   for each client and use the displayed JID and port with STARTTLS. Passwords
    are shown once. Do not use your OIDC password or ID token.
 
 The overlay uses the official Prosody 13.0 image pinned to the tested digest.
@@ -73,6 +76,27 @@ For a manually configured Archipel process, set `XMPP_DOMAIN` and
 Mount the supplied modules under `/etc/prosody/archipel-modules`. Optional
 `XMPP_CA_FILE` can select a private PKI trust anchor for Prosody; public servers
 normally use system certificate roots.
+
+### Custom listener ports
+
+For example, set these values in `.env` or enter them during setup:
+
+```dotenv
+XMPP_CLIENT_PORT=55222
+XMPP_SERVER_PORT=5269
+```
+
+Both ports accept integers from 1 to 65535 and must differ. Compose publishes
+the configured ports, and Prosody listens on the same ports inside its container.
+Archipel's **Settings → XMPP clients** displays the configured client port.
+Changing a port preserves account addresses, passwords and history.
+
+After changing the client port, update `_xmpp-client._tcp.<XMPP_DOMAIN>` to that
+port, adjust the firewall, and run `docker compose up --build -d`. Clients using
+automatic discovery read the SRV record; clients with a manual port setting need
+the new value. If you change the federation port, update the server SRV records
+for both the account domain and `channels.<XMPP_DOMAIN>` as well. These remain
+STARTTLS listeners; changing the port does not enable direct TLS.
 
 ## Policy, archive, and protocol boundaries
 

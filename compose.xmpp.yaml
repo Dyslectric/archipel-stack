@@ -4,6 +4,8 @@ services:
       - xmpp
     environment:
       XMPP_DOMAIN: ${XMPP_DOMAIN:?Set XMPP_DOMAIN before enabling Prosody}
+      XMPP_CLIENT_PORT: ${XMPP_CLIENT_PORT:-5222}
+      XMPP_SERVER_PORT: ${XMPP_SERVER_PORT:-5269}
     # XMPP_BRIDGE_SECRET is read from .env.container, never a Compose label.
   prosody:
     image: prosodyim/prosody:13.0@sha256:0d4efc7c11018dfd863c9a25495efe706027de357a58a18ef02f8c484fb264ed
@@ -19,10 +21,12 @@ services:
         format: raw
     environment:
       XMPP_DOMAIN: ${XMPP_DOMAIN:?Set XMPP_DOMAIN}
+      XMPP_CLIENT_PORT: ${XMPP_CLIENT_PORT:-5222}
+      XMPP_SERVER_PORT: ${XMPP_SERVER_PORT:-5269}
       ARCHIPEL_API_URL: http://archipel:8788/internal/xmpp
     ports:
-      - "${XMPP_BIND_ADDRESS:-0.0.0.0}:5222:5222"
-      - "${XMPP_BIND_ADDRESS:-0.0.0.0}:5269:5269"
+      - "${XMPP_BIND_ADDRESS:-0.0.0.0}:${XMPP_CLIENT_PORT:-5222}:${XMPP_CLIENT_PORT:-5222}"
+      - "${XMPP_BIND_ADDRESS:-0.0.0.0}:${XMPP_SERVER_PORT:-5269}:${XMPP_SERVER_PORT:-5269}"
     volumes:
       - ./prosody/prosody.cfg.lua:/etc/prosody/prosody.cfg.lua:ro
       - ./prosody/modules:/etc/prosody/archipel-modules:ro

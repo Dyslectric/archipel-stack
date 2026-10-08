@@ -19,7 +19,8 @@ const remoteName = `${name}-remote`, network = `${name}-network`;
 const temporary = mkdtempSync(join(tmpdir(), "archipel-xmpp-test-"));
 const store = new Store(":memory:");
 const secret = randomToken();
-const config = loadConfig({ DEV_AUTH: "true", XMPP_DOMAIN: "chat.test", XMPP_BRIDGE_SECRET: secret });
+const clientPort = 55222;
+const config = loadConfig({ DEV_AUTH: "true", XMPP_DOMAIN: "chat.test", XMPP_BRIDGE_SECRET: secret, XMPP_CLIENT_PORT: String(clientPort) });
 const app = createApp(config, store), xmpp = app.locals.xmpp;
 const server = app.listen(0, "0.0.0.0");
 await new Promise(resolve => server.once("listening", resolve));
@@ -56,13 +57,14 @@ try {
     "--network-alias", "chat.test", "--network-alias", "channels.chat.test", "--add-host", "host.docker.internal:host-gateway",
     "--env", "XMPP_DOMAIN=chat.test", "--env", `XMPP_BRIDGE_SECRET=${secret}`,
     "--env", `ARCHIPEL_API_URL=http://host.docker.internal:${port}/internal/xmpp`,
-    "--env", "XMPP_CERTS_PATH=/tmp/test-certs", "--publish", "127.0.0.1::5222",
+    "--env", "XMPP_CERTS_PATH=/tmp/test-certs", "--env", `XMPP_CLIENT_PORT=${clientPort}`, "--publish", `127.0.0.1::${clientPort}`,
     "--env", "XMPP_CA_FILE=/tmp/test-certs/chat.test.crt",
     "--mount", `type=bind,src=${join(temporary, "local.cfg.lua")},dst=/etc/prosody/prosody.cfg.lua,readonly`,
     "--mount", `type=bind,src=${resolve("prosody/modules")},dst=/etc/prosody/archipel-modules,readonly`,
     "--entrypoint", "sh", image, "-c",
     'mkdir -p /tmp/test-certs; openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/test-certs/chat.test.key -out /tmp/test-certs/chat.test.crt -days 1 -subj /CN=chat.test -addext subjectAltName=DNS:chat.test,DNS:channels.chat.test,DNS:remote.test >/dev/null 2>&1 && chown -R prosody:prosody /tmp/test-certs && exec /entrypoint.sh prosody');
-  xmppPort = Number(JSON.parse(await docker("inspect", name))[0].NetworkSettings.Ports["5222/tcp"][0].HostPort);
+  xmppPort = Number(JSON.parse(await docker("inspect", name))[0].NetworkSettings.Ports[`${clientPort}/tcp`][0].HostPort);
+  assert.equal(xmpp.status(alice).port, clientPort);
   await delay(1500);
   await docker("cp", `${name}:/tmp/test-certs/chat.test.crt`, join(temporary, "ca.crt"));
   tls.setDefaultCACertificates([...tls.getCACertificates(), readFileSync(join(temporary, "ca.crt"), "utf8")]);
@@ -72,7 +74,7 @@ try {
   await delay(2500);
   assert.equal(desktop.native.status, "online", "A DM-only client must stay connected without room occupants");
   assert.equal(phone.native.status, "online");
-  console.log("PASS TLS, SASL app-password authentication and resource binding");
+  console.log(`PASS TLS, SASL app-password authentication and resource binding on custom client port ${clientPort}`);
   await desktop.native.send(xml("presence")); await phone.native.send(xml("presence"));
   await desktop.native.send(xml("presence", { to: `${roomJid}/Alice's phone`, id: "join-alice" }, xml("x", { xmlns: "http://jabber.org/protocol/muc" })));
   await phone.native.send(xml("presence", { to: `${roomJid}/bob`, id: "join-bob" }, xml("x", { xmlns: "http://jabber.org/protocol/muc" })));

@@ -15,6 +15,8 @@ export interface Config {
   registrationMode: "open" | "invite_only";
   xmppDomain: string;
   xmppBridgeSecret: string;
+  xmppClientPort: number;
+  xmppServerPort: number;
 }
 
 export function isLoopback(host: string) {
@@ -29,6 +31,16 @@ export function loadConfig(env = process.env): Config {
   const xmppBridgeSecret = env.XMPP_BRIDGE_SECRET || "";
   if (xmppDomain && !/^[A-Za-z0-9_-]{43,128}$/.test(xmppBridgeSecret))
     throw new Error("XMPP_BRIDGE_SECRET must be a random base64url secret of at least 43 characters");
+  const xmppPort = (key: string, fallback: number) => {
+    const value = env[key] || String(fallback);
+    if (!/^[0-9]{1,5}$/.test(value) || Number(value) < 1 || Number(value) > 65535)
+      throw new Error(`${key} must be an integer between 1 and 65535`);
+    return Number(value);
+  };
+  const xmppClientPort = xmppPort("XMPP_CLIENT_PORT", 5222);
+  const xmppServerPort = xmppPort("XMPP_SERVER_PORT", 5269);
+  if (xmppDomain && xmppClientPort === xmppServerPort)
+    throw new Error("XMPP client and server ports must differ");
   const registrationMode = env.REGISTRATION_MODE || "open";
   if (!["open", "invite_only"].includes(registrationMode))
     throw new Error("REGISTRATION_MODE must be open or invite_only");
@@ -97,6 +109,8 @@ export function loadConfig(env = process.env): Config {
     registrationMode: registrationMode as Config["registrationMode"],
     xmppDomain,
     xmppBridgeSecret,
+    xmppClientPort,
+    xmppServerPort,
     adminSubjects: (env.ADMIN_SUBJECTS || "")
       .split(",")
       .map((s) => s.trim())

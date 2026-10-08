@@ -20,8 +20,13 @@ s2s_secure_auth = true
 certificates = ENV_XMPP_CERTS_PATH or "/etc/prosody/certs"
 -- Optional private PKI trust anchor; normal deployments use system trust roots.
 ssl = { cafile = ENV_XMPP_CA_FILE }
-c2s_ports = { 5222 }
-s2s_ports = { 5269 }
+local client_port = Lua.tonumber(ENV_XMPP_CLIENT_PORT or "5222")
+local server_port = Lua.tonumber(ENV_XMPP_SERVER_PORT or "5269")
+Lua.assert(client_port and client_port >= 1 and client_port <= 65535 and client_port % 1 == 0, "Invalid XMPP_CLIENT_PORT")
+Lua.assert(server_port and server_port >= 1 and server_port <= 65535 and server_port % 1 == 0, "Invalid XMPP_SERVER_PORT")
+Lua.assert(client_port ~= server_port, "XMPP client and server ports must differ")
+c2s_ports = { client_port }
+s2s_ports = { server_port }
 http_ports = {}
 https_ports = {}
 authentication = "archipel"
