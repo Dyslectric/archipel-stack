@@ -114,7 +114,27 @@ class SetupTests(unittest.TestCase):
         self.assertIn("compose.xmpp-acme-http.yaml", http["COMPOSE_FILE"])
         self.assertEqual((http["XMPP_ACME_HTTP"], http["XMPP_ACME_DNS_PROVIDER"], http["XMPP_ACME_DNS_CREDENTIALS"]), ("true", "", ""))
         with self.assertRaisesRegex(ValueError, "port 80"):
-            setup.collect_setup({**PROXY, **acme, "XMPP_ACME_CHALLENGE": "http"}, defaults, "traefik")
+            setup.collect_setup({**PROXY, **acme, "XMPP_ACME_CHALLENGE": "http"}, defaults, "proxy")
+
+    def test_xmpp_http_challenges_use_a_separate_traefik_entrypoint(self):
+        inputs = {**PROXY, "XMPP_DOMAIN": "chat.example.org", "XMPP_CERT_SOURCE": "acme",
+                  "XMPP_ACME_EMAIL": "admin@example.org", "XMPP_ACME_ACCEPT_TOS": "true", "XMPP_ACME_CHALLENGE": "http"}
+        settings = setup.collect_setup(inputs, defaults, "traefik")
+        self.assertEqual(settings["XMPP_ACME_HTTP_ENTRYPOINT"], "web")
+        self.assertEqual(settings["TRAEFIK_ENTRYPOINT"], "websecure")
+        self.assertIn("compose.xmpp-acme-traefik.yaml", settings["COMPOSE_FILE"])
+        self.assertNotIn("compose.xmpp-acme-http.yaml", settings["COMPOSE_FILE"])
+        custom = setup.collect_setup({**settings, "XMPP_ACME_HTTP_ENTRYPOINT": "http"}, defaults)
+        self.assertEqual(custom["XMPP_ACME_HTTP_ENTRYPOINT"], "http")
+        self.assertEqual(custom["TRAEFIK_ENTRYPOINT"], "websecure")
+        for entrypoint in ("web,websecure", "web/", "web\nlabel=true"):
+            with self.subTest(entrypoint=entrypoint), self.assertRaisesRegex(ValueError, "XMPP_ACME_HTTP_ENTRYPOINT"):
+                setup.collect_setup({**inputs, "XMPP_ACME_HTTP_ENTRYPOINT": entrypoint}, defaults, "traefik")
+        standalone = setup.collect_setup(settings, defaults, "container")
+        self.assertIn("compose.xmpp-acme-http.yaml", standalone["COMPOSE_FILE"])
+        self.assertNotIn("compose.xmpp-acme-traefik.yaml", standalone["COMPOSE_FILE"])
+        manual = setup.collect_setup({**settings, "XMPP_CERT_SOURCE": "manual"}, defaults)
+        self.assertNotIn("compose.xmpp-acme-traefik.yaml", manual["COMPOSE_FILE"])
 
     def test_xmpp_can_reuse_the_traefik_resolver_and_its_certificate_store(self):
         traefik = {**PROXY, "TRAEFIK_CERT_RESOLVER": "letsencrypt", "XMPP_DOMAIN": "chat.example.org", "XMPP_CERT_SOURCE": "traefik"}
@@ -251,7 +271,7 @@ class SetupTests(unittest.TestCase):
 
     def run_cli(self, directory, mode="traefik", extra_env=None, arguments=()):
         # Empty PATH proves setup cannot invoke Node/npm or other host programs.
-        env = {key: value for key, value in os.environ.items() if key not in (*setup.APP_KEYS, "SETUP_MODE", "PROXY_NETWORK", "TRAEFIK_ENTRYPOINT", "TRAEFIK_CERT_RESOLVER")}
+        env = {key: value for key, value in os.environ.items() if key not in (*setup.APP_KEYS, *setup.XMPP_SETUP_KEYS, "SETUP_MODE", "PROXY_NETWORK", "TRAEFIK_ENTRYPOINT", "TRAEFIK_CERT_RESOLVER")}
         env.update({**{key:value for key,value in PROXY.items() if key!='OIDC_AUTH_METHOD'}, "PATH": "", **(extra_env or {})})
         return subprocess.run([sys.executable, str(ROOT / "scripts/setup.py"), "--non-interactive", "--mode", mode, "--directory", str(directory), *arguments], capture_output=True, text=True, env=env)
 
@@ -264,6 +284,18 @@ class SetupTests(unittest.TestCase):
             self.assertIn("https://chat.example.org/auth/callback", result.stdout)
             self.assertEqual(setup.parse_raw_env((Path(directory) / ".env.container").read_text())["OIDC_CLIENT_SECRET"], "private$#secret")
             self.assertNotIn("npm", result.stdout)
+
+    def test_cli_routes_http_challenges_through_the_supplied_entrypoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_cli(directory, extra_env={"XMPP_DOMAIN": "chat.example.org", "XMPP_CERT_SOURCE": "acme",
+                "XMPP_ACME_EMAIL": "admin@example.org", "XMPP_ACME_ACCEPT_TOS": "true", "XMPP_ACME_CHALLENGE": "http", "XMPP_ACME_HTTP_ENTRYPOINT": "http"})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            settings = setup.parse_env((Path(directory) / ".env").read_text())
+            self.assertEqual(settings["XMPP_ACME_HTTP_ENTRYPOINT"], "http")
+            self.assertIn("compose.xmpp-acme-traefik.yaml", settings["COMPOSE_FILE"])
+            self.assertNotIn("compose.xmpp-acme-http.yaml", settings["COMPOSE_FILE"])
+            self.assertIn("--entryPoints.http.allowACMEByPass=true", result.stdout)
+            self.assertIn("no extra host port", result.stdout)
 
     def test_cli_reuses_previous_secret_and_can_clear_it_explicitly(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -374,6 +406,30 @@ class ComposeTests(unittest.TestCase):
             result = config()
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout)["services"]["xmpp-acme"]["ports"][0]["target"], 80)
+            for entrypoint in ("web", "http"):
+                settings = setup.collect_setup({**settings, **PROXY, "COMPOSE_PROJECT_NAME": "archipel2", "XMPP_ACME_HTTP_ENTRYPOINT": entrypoint,
+                    "TRAEFIK_CERT_RESOLVER": "letsencrypt"}, defaults, "traefik")
+                setup.write_setup(directory, settings)
+                result = config()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                parsed = json.loads(result.stdout)
+                acme_service = parsed["services"]["xmpp-acme"]
+                self.assertNotIn("ports", acme_service)
+                self.assertEqual(set(acme_service["networks"]), {"proxy"})
+                self.assertEqual(parsed["networks"]["proxy"]["name"], "edge")
+                labels = acme_service["labels"]
+                router = "traefik.http.routers.archipel2-xmpp-acme."
+                self.assertEqual(labels["traefik.docker.network"], "edge")
+                self.assertEqual(labels[router + "entrypoints"], entrypoint)
+                self.assertEqual(labels[router + "rule"], "(Host(`chat.example.org`) || Host(`channels.chat.example.org`)) && PathPrefix(`/.well-known/acme-challenge/`)")
+                self.assertEqual(labels[router + "service"], "archipel2-xmpp-acme")
+                self.assertEqual(labels["traefik.http.services.archipel2-xmpp-acme.loadbalancer.server.port"], "80")
+                self.assertFalse(any(".tls" in key or "archipel-xmpp" in key for key in labels))
+                self.assertEqual(acme_service["environment"]["LEGO_HTTP"], "true")
+                self.assertNotIn("CLOUDFLARE_DNS_API_TOKEN", acme_service["environment"])
+                app_labels = parsed["services"]["archipel"]["labels"]
+                self.assertEqual(app_labels["traefik.http.routers.archipel2.entrypoints"], "websecure")
+                self.assertEqual(app_labels["traefik.http.routers.archipel2.tls.certresolver"], "letsencrypt")
             settings = setup.collect_setup({**PROXY, "TRAEFIK_CERT_RESOLVER": "letsencrypt", "XMPP_DOMAIN": "chat.example.org", "XMPP_CERT_SOURCE": "traefik",
                 "XMPP_TRAEFIK_ACME_DIR": "/srv/traefik", "XMPP_TRAEFIK_ACME_NAME": "acme.json"}, defaults, "traefik")
             setup.write_setup(directory, settings)

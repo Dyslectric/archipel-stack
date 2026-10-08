@@ -1,0 +1,14 @@
+# With compose.xmpp-acme.yaml and compose.proxy.yaml: let the existing Traefik
+# forward HTTP-01 challenges to lego without publishing another host port 80.
+services:
+  xmpp-acme:
+    networks:
+      - proxy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${PROXY_NETWORK:?Set PROXY_NETWORK}
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME:?Set COMPOSE_PROJECT_NAME}-xmpp-acme.rule=(Host(`${XMPP_DOMAIN:?Set XMPP_DOMAIN}`) || Host(`channels.${XMPP_DOMAIN}`)) && PathPrefix(`/.well-known/acme-challenge/`)
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-xmpp-acme.entrypoints=${XMPP_ACME_HTTP_ENTRYPOINT:-web}
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-xmpp-acme.priority=10000
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-xmpp-acme.service=${COMPOSE_PROJECT_NAME}-xmpp-acme
+      - traefik.http.services.${COMPOSE_PROJECT_NAME}-xmpp-acme.loadbalancer.server.port=80

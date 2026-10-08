@@ -195,9 +195,15 @@ of it being issued; until then clients and other servers cannot connect.
     credentials that provider documents, as `NAME=value` pairs
     (`CLOUDFLARE_DNS_API_TOKEN=...`). They are kept in `.env.acme`, readable only
     by the certificate service. Use a token limited to editing that DNS zone.
-  - `http` answers on this machine's port 80 (`compose.xmpp-acme-http.yaml`).
-    Both names must resolve directly to the machine. It is offered in
-    `container` mode only, because a proxy already owns port 80 in the others.
+  - `http` uses public port 80. In `container` mode lego binds the host port
+    directly (`compose.xmpp-acme-http.yaml`), so that port must be free. In
+    `traefik` mode setup adds `compose.xmpp-acme-traefik.yaml` and attaches lego
+    to `PROXY_NETWORK`. Traefik forwards only `/.well-known/acme-challenge/`
+    requests for the account and channels domains to lego's container port 80,
+    without publishing a host port. Setup asks for the existing HTTP entrypoint
+    (`XMPP_ACME_HTTP_ENTRYPOINT`, default `web`); the app's HTTPS entrypoint stays
+    separate. Both names must reach that Traefik on public port 80. Generic
+    `proxy` mode supports DNS challenges instead.
 
   Follow issuance with `docker compose logs -f xmpp-acme`. A failed request is
   retried hourly. Set `XMPP_ACME_SERVER=letsencrypt-staging` in `.env` to
@@ -214,6 +220,56 @@ of it being issued; until then clients and other servers cannot connect.
   Prosody process itself cannot read Traefik's other keys.
 - **`manual`** keeps the previous behaviour: you place the files in
   `XMPP_CERTS_PATH` and reload Prosody after renewing them.
+
+### HTTP challenges through an existing Traefik
+
+Run `python3 scripts/setup.py --mode traefik`. Keep your existing proxy network
+and HTTPS entrypoint, choose `acme` certificates and the `http` challenge, and
+answer `web` for **Existing Traefik HTTP challenge entrypoint**. For an existing
+configuration, the relevant settings in `.env` are:
+
+```dotenv
+XMPP_CERT_SOURCE=acme
+XMPP_ACME_CHALLENGE=http
+XMPP_ACME_HTTP_ENTRYPOINT=web
+```
+
+Re-run setup after editing these settings so it selects the correct Compose
+overlays and regenerates `.env.acme`. A contact email and agreement to the CA's
+terms are also required. Setup does not modify the existing Traefik service.
+
+If Traefik redirects `web` to HTTPS or uses its own HTTP ACME resolver on `web`,
+enable challenge routing in Traefik's **static** configuration:
+
+```yaml
+entryPoints:
+  web:
+    address: ":80"
+    allowACMEByPass: true
+```
+
+The CLI equivalent is `--entryPoints.web.allowACMEByPass=true`. Restart Traefik
+after changing its static configuration. On current Traefik, this allows custom
+challenge routers to precede its internal ACME handler and excludes challenge
+paths from entrypoint HTTPS redirects; see the
+[Traefik entrypoint documentation](https://doc.traefik.io/traefik/reference/install-configuration/entrypoints/#allowacmebypass).
+If your version still redirects these requests, lower the entrypoint redirect
+priority with `--entryPoints.web.http.redirections.entryPoint.priority=1` so the
+challenge router (priority 10000) wins. Any authentication or redirect middleware
+attached to the HTTP entrypoint must also allow challenge requests through.
+
+Ensure both `XMPP_DOMAIN` and `channels.<XMPP_DOMAIN>` reach Traefik on public
+port 80, then run:
+
+```sh
+docker compose config --quiet
+docker compose up --build -d
+docker compose logs -f xmpp-acme
+```
+
+Lego's challenge listener runs during validation; a 404 or 502 outside an active
+challenge does not by itself indicate a routing failure. Certificate files and
+renewal continue to use the shared ACME volume and Prosody reload mechanism.
 
 ### Behind Cloudflare or another HTTP proxy
 
@@ -260,8 +316,11 @@ _xmpp-server._tcp.channels.two.example.org. SRV 0 5 5270 xmpp.example.org.
 ```
 
 Open all four ports in the firewall. Each instance obtains its own
-certificates; with the `acme` source and an `http` challenge only one instance
-can hold port 80, so use `dns` or `traefik` for the others. The instances federate with each other like any two servers, including when
+certificates. In `traefik` mode, multiple instances can use `acme` with `http`
+through the same `web` entrypoint: each router matches its own XMPP domains and
+uses its unique instance name. In `container` mode, only one instance can bind
+host port 80, so use DNS challenges or Traefik routing for the others.
+The instances federate with each other like any two servers, including when
 they share an address: accounts exchange direct messages and can join the other
 instance's public timeline channels that opted into federation.
 

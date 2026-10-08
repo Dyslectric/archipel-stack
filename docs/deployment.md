@@ -93,7 +93,9 @@ Setup selects the Compose overlays using `COMPOSE_FILE` in `.env`:
 - `compose.acme.yaml`: optional certificate resolver label.
 - `compose.xmpp.yaml`: Prosody, when an XMPP account domain is set.
 - `compose.xmpp-acme.yaml`, `compose.xmpp-acme-http.yaml`: optional ACME client
-  for Prosody's certificates, and its port 80 listener for HTTP challenges.
+  for Prosody's certificates, and its direct host port 80 listener in container mode.
+- `compose.xmpp-acme-traefik.yaml`: HTTP challenges forwarded through the existing
+  Traefik HTTP entrypoint (default `web`), with no host port published.
 - `compose.xmpp-traefik-certs.yaml`: optional reuse of Traefik's resolver and
   certificate store for Prosody.
 

@@ -27,7 +27,7 @@ APP_KEYS = (
 XMPP_SETUP_KEYS = (
     "XMPP_SRV_TARGET", "XMPP_CERT_SOURCE", "XMPP_ACME_EMAIL", "XMPP_ACME_ACCEPT_TOS",
     "XMPP_ACME_CHALLENGE", "XMPP_ACME_DNS_PROVIDER", "XMPP_ACME_DNS_CREDENTIALS",
-    "XMPP_ACME_SERVER", "XMPP_TRAEFIK_ACME_DIR", "XMPP_TRAEFIK_ACME_NAME",
+    "XMPP_ACME_SERVER", "XMPP_ACME_HTTP_ENTRYPOINT", "XMPP_TRAEFIK_ACME_DIR", "XMPP_TRAEFIK_ACME_NAME",
 )
 MODES = ("container", "proxy", "traefik")
 CERT_SOURCES = ("manual", "acme", "traefik")
@@ -241,8 +241,10 @@ def validate_setup(settings):
             challenge = settings.get("XMPP_ACME_CHALLENGE")
             if challenge not in ("dns", "http"):
                 raise ValueError("XMPP_ACME_CHALLENGE must be dns or http")
-            if challenge == "http" and mode != "container":
-                raise ValueError("XMPP_ACME_CHALLENGE=http needs this machine's port 80, which a proxy already uses; choose dns, or traefik certificates")
+            if challenge == "http" and mode == "proxy":
+                raise ValueError("XMPP_ACME_CHALLENGE=http requires container mode for direct port 80 access or traefik mode to route challenges through the proxy; choose dns for other proxies")
+            if challenge == "http" and mode == "traefik" and not re.fullmatch(r"[a-zA-Z0-9_.-]+", settings.get("XMPP_ACME_HTTP_ENTRYPOINT", "")):
+                raise ValueError("Invalid XMPP_ACME_HTTP_ENTRYPOINT")
             if challenge == "dns" and not re.fullmatch(r"[a-z0-9-]+", settings.get("XMPP_ACME_DNS_PROVIDER", "")):
                 raise ValueError("XMPP_ACME_DNS_PROVIDER must be a lego DNS provider code, such as cloudflare")
             parse_credentials(settings.get("XMPP_ACME_DNS_CREDENTIALS", ""))
@@ -327,7 +329,7 @@ def collect_setup(previous, ask, requested_mode=None, in_use=lambda port: False)
             xmpp["XMPP_ACME_EMAIL"] = ask("Contact email for the certificate authority", xmpp["XMPP_ACME_EMAIL"])
             agreed = ask("Agree to the certificate authority's terms of service? (yes / no)", "yes" if xmpp["XMPP_ACME_ACCEPT_TOS"] == "true" else "no")
             xmpp["XMPP_ACME_ACCEPT_TOS"] = "true" if agreed == "yes" else "false"
-            challenge = ask("ACME challenge (dns / http; http answers on this machine's port 80)", xmpp["XMPP_ACME_CHALLENGE"] or "dns")
+            challenge = ask("ACME challenge (dns / http; http uses Traefik's HTTP entrypoint in traefik mode, otherwise host port 80)", xmpp["XMPP_ACME_CHALLENGE"] or "dns")
             xmpp["XMPP_ACME_CHALLENGE"] = challenge
             if challenge == "dns":
                 xmpp["XMPP_ACME_DNS_PROVIDER"] = ask("DNS provider code for lego (for example cloudflare)", xmpp["XMPP_ACME_DNS_PROVIDER"])
@@ -336,7 +338,11 @@ def collect_setup(previous, ask, requested_mode=None, in_use=lambda port: False)
                 xmpp["XMPP_ACME_DNS_PROVIDER"] = xmpp["XMPP_ACME_DNS_CREDENTIALS"] = ""
             files.append("compose.xmpp-acme.yaml")
             if challenge == "http":
-                files.append("compose.xmpp-acme-http.yaml")
+                if mode == "traefik":
+                    xmpp["XMPP_ACME_HTTP_ENTRYPOINT"] = ask("Existing Traefik HTTP challenge entrypoint", xmpp["XMPP_ACME_HTTP_ENTRYPOINT"] or "web")
+                    files.append("compose.xmpp-acme-traefik.yaml")
+                else:
+                    files.append("compose.xmpp-acme-http.yaml")
         elif source == "traefik":
             store = ask("Host path of Traefik's acme.json", xmpp["XMPP_TRAEFIK_ACME_DIR"].rstrip("/") + "/" + xmpp["XMPP_TRAEFIK_ACME_NAME"] if xmpp["XMPP_TRAEFIK_ACME_NAME"] else "")
             directory, _, xmpp["XMPP_TRAEFIK_ACME_NAME"] = store.rpartition("/")
@@ -458,7 +464,12 @@ def main(argv=None):
         if source == "acme":
             print(f"Certificates for {domain} and channels.{domain} are requested when the stack starts; follow them with: docker compose logs -f xmpp-acme")
             if settings["XMPP_ACME_CHALLENGE"] == "http":
-                print("Both names must resolve to this machine, with port 80 reachable, for the HTTP challenge.")
+                if settings["SETUP_MODE"] == "traefik":
+                    print(f"HTTP challenges are routed through Traefik's {settings['XMPP_ACME_HTTP_ENTRYPOINT']} entrypoint to lego; no extra host port is published.")
+                    print(f"If Traefik redirects HTTP to HTTPS or handles its own HTTP challenges, enable --entryPoints.{settings['XMPP_ACME_HTTP_ENTRYPOINT']}.allowACMEByPass=true in Traefik's static configuration. See docs/xmpp.md.")
+                    print("Both names must reach this Traefik on public port 80 for the HTTP challenge.")
+                else:
+                    print("Both names must resolve to this machine, with port 80 reachable, for the HTTP challenge.")
         elif source == "traefik":
             print(f"Traefik's resolver {settings['TRAEFIK_CERT_RESOLVER']} must be able to issue {domain} and channels.{domain}; Prosody reads them from {settings['XMPP_TRAEFIK_ACME_DIR'].rstrip('/')}/{settings['XMPP_TRAEFIK_ACME_NAME']}.")
         else:
