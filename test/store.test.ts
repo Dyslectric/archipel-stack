@@ -496,7 +496,6 @@ test("version-one databases upgrade without losing membership and persist commun
 test("version-two emoji messages keep their image metadata through the federation migration", (t) => {
   const directory = mkdtempSync(join(tmpdir(), "archipel-emoji-upgrade-")),
     path = join(directory, "db.sqlite");
-  t.after(() => rmSync(directory, { recursive: true }));
   const legacy = new DatabaseSync(path);
   legacy.exec(
     readFileSync(
@@ -528,10 +527,208 @@ test("version-two emoji messages keep their image metadata through the federatio
     );
   legacy.close();
   const store = new Store(path);
-  t.after(() => store.close());
+  t.after(() => {
+    store.close();
+    rmSync(directory, { recursive: true });
+  });
   assert.deepEqual(JSON.parse(store.message("message").emoji_tags), [
     { id: "asset", name: "island", url: "/api/emojis/asset/image" },
   ]);
   assert.equal(store.user("author").federation_send, 0);
-  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 3);
+  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 9);
+});
+
+test("direct messages reach both members, and only the reader's own are news to them", () => {
+  const { store, alice, bob, charlie } = fixture();
+  const local = (id: string) => `${store.baseUrl}/actors/users/${id}`;
+  assert.equal(store.localRecipient("@BOB"), bob.id);
+  assert.equal(store.localRecipient(local(bob.id)), bob.id);
+  assert.equal(store.localRecipient("bob@elsewhere.example"), null);
+  denied(() => store.localRecipient("nobody"), 404);
+  denied(() => store.sendDirect(alice, alice.id, "To myself"), 400);
+  store.sendDirect(alice, bob.id, "Hello Bob");
+  store.sendDirect(bob, alice.id, "Hello Alice");
+  assert.deepEqual(
+    store.directHistory(bob, local(alice.id)).messages.map((m) => [
+      m.username,
+      m.body,
+    ]),
+    [
+      ["alice", "Hello Bob"],
+      ["bob", "Hello Alice"],
+    ],
+  );
+  assert.deepEqual(store.directHistory(charlie, local(alice.id)).messages, []);
+  assert.deepEqual(store.conversations(charlie), []);
+  const [conversation] = store.conversations(bob);
+  assert.equal(conversation.username, "alice");
+  assert.equal(conversation.unread, 1);
+  assert.deepEqual(
+    store.inbox(bob).map((m) => [m.kind, m.body]),
+    [["dm", "Hello Bob"]],
+  );
+  store.markRead(bob, { target: `dm:${local(alice.id)}` });
+  assert.equal(store.conversations(bob)[0].unread, 0);
+  assert.deepEqual(store.inbox(bob), []);
+  store.close();
+});
+test("the inbox holds what was said in joined channels since the reader last looked", () => {
+  const { store, alice, bob, charlie } = fixture();
+  const c = store.createChannel(alice, channelInput());
+  store.post(alice, c.id, { body: "Before Bob joined" });
+  store.join(bob, c.id);
+  assert.deepEqual(store.overview(bob).unread, {});
+  const first = store.post(alice, c.id, { body: "First" });
+  store.post(alice, c.id, { body: "Second" });
+  store.post(bob, c.id, { body: "Bob's own" });
+  assert.deepEqual(store.overview(bob).unread, { [c.id]: 2 });
+  assert.deepEqual(store.overview(charlie).unread, {});
+  assert.deepEqual(
+    store.inbox(bob).map((m) => m.body),
+    ["Second", "First"],
+  );
+  store.markRead(bob, { target: c.id, seq: first.seq });
+  assert.deepEqual(
+    store.inbox(bob).map((m) => m.body),
+    ["Second"],
+  );
+  denied(() => store.markRead(charlie, { target: c.id }));
+  store.post(alice, c.id, { body: "Third" });
+  store.markRead(bob, { all: "dms" });
+  assert.equal(store.overview(bob).unread[c.id], 2);
+  store.markRead(bob, { all: "channels" });
+  assert.deepEqual(store.overview(bob).unread, {});
+  store.close();
+});
+test("personal blocks stop direct messages, redact channel content and preserve other readers and replies", () => {
+  const { store, alice, bob, charlie } = fixture();
+  const peer = `${store.baseUrl}/actors/users/${alice.id}`;
+  const bobPeer = `${store.baseUrl}/actors/users/${bob.id}`;
+  const c = store.createChannel(alice, channelInput({ mode: "threaded" }));
+  store.join(bob, c.id);
+  store.join(charlie, c.id);
+  const root = store.post(alice, c.id, { body: "Hidden content", title: "Hidden title" });
+  const reply = store.post(charlie, c.id, { body: "Visible reply", parent_id: root.id });
+  store.sendDirect(alice, bob.id, "Previous direct message");
+  store.setUserBlock(bob, peer, true);
+  store.setUserBlock(bob, peer, true);
+  assert.deepEqual(store.userBlocks(bob), [peer]);
+  assert.deepEqual(store.userBlocks(charlie), []);
+  denied(() => store.sendDirect(alice, bob.id, "Blocked incoming"));
+  denied(() => store.sendDirect(bob, alice.id, "Blocked outgoing"));
+  store.sendDirect(alice, charlie.id, "Other people still receive messages");
+  const hidden = store.messages(bob, c.id)[0];
+  assert.equal(hidden.id, root.id);
+  assert.equal(hidden.body, "This message is hidden because you blocked this user.");
+  assert.equal(hidden.title, "Hidden thread");
+  assert.equal(store.messages(bob, c.id)[1].parent_id, root.id);
+  assert.equal(store.messages(charlie, c.id)[0].body, "Hidden content");
+  assert.equal(store.message(root.id).body, "Hidden content");
+  assert.equal(store.conversations(bob)[0].unread, 0);
+  assert.deepEqual(store.overview(bob).unread, { [c.id]: 1 });
+  assert.deepEqual(store.inbox(bob).map((m) => m.id), [reply.id]);
+  assert.equal(store.directHistory(bob, peer).messages[0].body, "Previous direct message");
+  denied(() => store.setUserBlock(bob, bobPeer, true), 400);
+  denied(() => store.setUserBlock(bob, peer, "true"), 400);
+  store.setUserBlock(bob, peer, false);
+  assert.equal(store.messages(bob, c.id)[0].body, "Hidden content");
+  assert.equal(store.messages(bob, c.id)[0].title, "Hidden title");
+  store.sendDirect(alice, bob.id, "Allowed again");
+  store.sendDirect(bob, alice.id, "Reply again");
+  store.close();
+});
+
+test("personal blocks persist across restarts and upgrade an existing version 4 database", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "archipel-blocks-"));
+  const path = join(directory, "db.sqlite");
+  let store = new Store(path);
+  const alice = store.loginIdentity("https://id.example", "alice", "alice", []);
+  const bob = store.loginIdentity("https://id.example", "bob", "bob", []);
+  store.db.exec("DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; DROP TABLE user_blocks; PRAGMA user_version=4;");
+  store.close();
+  store = new Store(path);
+  const peer = `${store.baseUrl}/actors/users/${alice.id}`;
+  store.setUserBlock(bob, peer, true);
+  store.close();
+  store = new Store(path);
+  t.after(() => {
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  assert.deepEqual(store.userBlocks(bob), [peer]);
+  denied(() => store.sendDirect(alice, bob.id, "Still blocked"));
+});
+
+test("profile pictures are shared through profiles, messages and DMs and invalid replacements preserve them", () => {
+  const { store, alice, bob } = fixture();
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
+  assert.equal(store.profile(alice).avatar_url, null);
+  const uploaded = store.setAvatar(alice, png);
+  assert.ok(uploaded.avatar_url);
+  assert.equal(store.profile(alice).avatar_url, uploaded.avatar_url);
+  assert.equal(store.profile(bob).avatar_url, null);
+  const c = store.createChannel(alice, channelInput());
+  store.post(alice, c.id, { body: "With picture" });
+  assert.equal(store.messages(bob, c.id)[0].avatar_url, uploaded.avatar_url);
+  store.sendDirect(alice, bob.id, "With picture privately");
+  const peer = `${store.baseUrl}/actors/users/${alice.id}`;
+  assert.equal(store.conversations(bob)[0].avatar_url, uploaded.avatar_url);
+  assert.equal(store.directHistory(bob, peer).messages[0].avatar_url, uploaded.avatar_url);
+  assert.equal(store.directory(bob).find((u) => u.id === alice.id)?.avatar_url, uploaded.avatar_url);
+  assert.equal(store.avatarImage(alice.id).mime, "image/png");
+  assert.equal(Buffer.from(store.avatarImage(alice.id).image).toString("base64"), png);
+  denied(() => store.setAvatar(alice, Buffer.from('<svg onload="alert(1)"></svg>').toString("base64")), 400);
+  denied(() => store.setAvatar(alice, Buffer.alloc(2097153).toString("base64")), 400);
+  assert.equal(store.avatarUrl(alice.id), uploaded.avatar_url);
+  const replacement = store.setAvatar(alice, png);
+  assert.notEqual(replacement.avatar_url, uploaded.avatar_url);
+  store.removeAvatar(alice);
+  assert.equal(store.avatarUrl(alice.id), null);
+  assert.equal(store.messages(bob, c.id)[0].avatar_url, null);
+  denied(() => store.avatarImage(alice.id), 404);
+  store.close();
+});
+
+test("profile picture migration preserves identities and pictures survive restarting", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "archipel-avatars-"));
+  const path = join(directory, "db.sqlite");
+  let store = new Store(path);
+  const alice = store.loginIdentity("https://id.example", "alice", "alice", []);
+  store.db.exec("DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; PRAGMA user_version=5;");
+  store.close();
+  store = new Store(path);
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
+  const uploaded = store.setAvatar(alice, png);
+  store.close();
+  store = new Store(path);
+  t.after(() => { store.close(); rmSync(directory, { recursive: true }); });
+  assert.equal(store.profile(store.user(alice.id)).avatar_url, uploaded.avatar_url);
+  assert.equal(Buffer.from(store.avatarImage(alice.id).image).toString("base64"), png);
+});
+
+test("a sidebar layout is kept per member and cleaned on the way in", () => {
+  const { store, alice, bob } = fixture();
+  assert.equal(store.overview(alice).layout, null);
+  const saved = store.setLayout(alice, {
+    channels: {
+      collapsed: true,
+      items: ["a", "a", 7],
+      groups: [{ id: "g1", name: " Work ", items: ["b"], extra: true }],
+    },
+  });
+  assert.deepEqual(saved, {
+    dms: { collapsed: false, items: [], groups: [] },
+    channels: {
+      collapsed: true,
+      items: ["a"],
+      groups: [{ id: "g1", name: "Work", collapsed: false, items: ["b"] }],
+    },
+  });
+  assert.deepEqual(store.overview(alice).layout, saved);
+  assert.equal(store.overview(bob).layout, null);
+  denied(
+    () => store.setLayout(alice, { dms: { groups: [{ id: "g", name: "" }] } }),
+    400,
+  );
+  store.close();
 });

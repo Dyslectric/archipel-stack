@@ -23,3 +23,8 @@ The Archipel Plan:
       how we will provide identities to jitsi calls for voice channels
     - We want to use activitypub protocols as much as possible and also want to
       be able to send messages to and receive from lemmy/piefed instances.
+    - We want XMPP support using Prosody as the backend, with Archipel providing
+      the browser frontend and integration with its identities and channels.
+    - Eventually the complete application, including its Prosody backend, should
+      be distributable as a single executable without separately installing
+      Node, Lua, Prosody, or Docker. See docs/xmpp-packaging.md for the proposal.

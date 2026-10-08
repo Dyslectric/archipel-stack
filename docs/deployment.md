@@ -13,6 +13,11 @@ values as prompt defaults. Press Enter to retain a value or enter `-` to clear i
 Client secrets are hidden while typing and omitted from the printed summary.
 Setup configures deployment; it does not start containers or change your proxy.
 
+Setup also asks for an optional XMPP account domain. Supplying it adds a pinned
+Prosody service and keeps a generated bridge secret in `.env.container`. Provide
+XMPP TLS certificates, DNS, and TCP ports before starting that service; web proxy
+TLS does not configure XMPP TLS. See [Prosody deployment](xmpp.md).
+
 Choose one of three modes. Setup defaults to `container`; `--mode local` is a
 compatibility alias for that same loopback Docker deployment.
 

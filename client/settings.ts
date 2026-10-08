@@ -1,0 +1,913 @@
+import {
+  $,
+  $$,
+  action,
+  api,
+  avatar,
+  canModerate,
+  channelIcon,
+  confirmDialog,
+  emojiHtml,
+  esc,
+  full,
+  go,
+  hooks,
+  icon,
+  imageBase64,
+  modeLabel,
+  nameButton,
+  onSubmit,
+  socialsHtml,
+  state,
+  themeSeg,
+  toast,
+  when,
+  refreshTimes,
+  type Channel,
+  type CustomEmoji,
+  type Session,
+  type User,
+} from "./shared.js";
+import { chatChannel, resetChat } from "./chat.js";
+
+// Settings are pages you can move between from the list on the left: yours, federation,
+// a channel's, and the instance's. Each section draws itself into the page and redraws
+// (ctx.refresh) after a change.
+interface Ctx {
+  channel: Channel | null;
+  refresh: () => Promise<void>;
+}
+interface Section {
+  group: "personal" | "federation" | "channel" | "instance";
+  key: string;
+  label: string;
+  about: string;
+  icon: string;
+  admin?: boolean; // instance administrators only
+  mod?: boolean; // the channel's moderators only
+  draw: (el: HTMLElement, ctx: Ctx) => Promise<void>;
+}
+const groups = {
+  personal: "Personal",
+  federation: "Federation",
+  channel: "Channel",
+  instance: "Instance",
+};
+const card = (title: string, body: string, about = "") =>
+  `<section class="card settings-section"><h2>${title}</h2>${about ? `<p class="muted small">${about}</p>` : ""}${body}</section>`;
+const error = '<p class="form-error" role="alert"></p>';
+const shortcode =
+  'required maxlength="64" pattern="[a-z0-9][a-z0-9_-]*" autocomplete="off"';
+const images =
+  'type="file" accept="image/png,image/jpeg,image/gif,image/webp" required';
+const federationFlags = [
+  ["federation_send", "Send federated messages"],
+  ["federation_receive", "Receive federated messages"],
+  ["federation_subscribe", "Subscribe to remote channels"],
+  ["federation_post", "Post in federated channels"],
+] as const;
+const person = (u: User, note: string, controls = "") =>
+  `<li class="member-row">${avatar(u)}<div class="grow">${nameButton(u, u.actor_url)} <span class="muted">@${esc(u.username)}</span><div class="muted small">${note}</div></div>${controls}</li>`;
+// Buttons that carry out one change and redraw the section.
+function onClick(
+  el: HTMLElement,
+  selector: string,
+  fn: (button: HTMLButtonElement) => Promise<void>,
+) {
+  for (const button of $$<HTMLButtonElement>(selector, el))
+    button.addEventListener("click", () =>
+      action(async () => {
+        button.disabled = true;
+        try {
+          await fn(button);
+        } finally {
+          button.disabled = false;
+        }
+      }),
+    );
+}
+
+async function drawDirectMessages(root: ParentNode = document) {
+  const list = root.querySelector<HTMLElement>("#federated-direct-list");
+  if (!list) return;
+  const messages = await api<
+    {
+      id: string;
+      peer: string;
+      body: string;
+      direction: string;
+      created_at: string;
+      emojis: CustomEmoji[];
+    }[]
+  >("/federation/messages");
+  const html = messages.length
+    ? messages
+        .map(
+          (m) =>
+            `<li class="direct-message"><div class="meta small"><span class="pill ${m.direction === "incoming" ? "new" : ""}">${m.direction === "incoming" ? "From" : "To"}</span> <span class="author">${esc(m.peer)}</span> · ${when(m.created_at)}</div><div class="message-body">${emojiHtml(m.body, m.emojis)}</div></li>`,
+        )
+        .join("")
+    : '<li class="muted">No federated direct messages.</li>';
+  if (list.dataset.html !== html) list.innerHTML = list.dataset.html = html;
+  refreshTimes(list);
+}
+
+const sections: Section[] = [
+  {
+    group: "personal",
+    key: "xmpp",
+    label: "XMPP clients",
+    about: "Use your Archipel account in another messaging app.",
+    icon: "chat",
+    async draw(el, ctx) {
+      const connection = await api<{
+        enabled: boolean; jid?: string; domain?: string; port?: number;
+        credentials?: { id: string; label: string; created_at: string }[];
+        channels?: { name: string; jid: string }[];
+      }>("/xmpp");
+      if (!connection.enabled) {
+        el.innerHTML = card("XMPP clients", '<p class="muted">XMPP connections have not been enabled by your instance administrator.</p>');
+        return;
+      }
+      el.innerHTML = card("Connect a client", `<p>Account address: <strong>${esc(connection.jid)}</strong></p><p class="muted small">Connect to ${esc(connection.domain)} on port ${connection.port} using STARTTLS. Create a separate password for each app. Your identity-provider password is not used here.</p>
+        <form class="stack narrow-form" id="xmpp-password-form"><label>App name<input name="label" maxlength="80" placeholder="My phone" required></label>${error}<button>Create app password</button></form><div id="xmpp-new-password" aria-live="polite"></div>`) +
+        card("App passwords", `<ul class="member-list">${connection.credentials!.length ? connection.credentials!.map(item => `<li class="member-row"><div class="grow"><strong>${esc(item.label)}</strong><div class="muted small">Created ${when(item.created_at)}</div></div><button class="secondary" type="button" data-revoke-xmpp="${esc(item.id)}">Revoke</button></li>`).join("") : '<li class="muted">No active app passwords.</li>'}</ul>`, "Revoking a password disconnects that app. Your other apps keep their own passwords.") +
+        card("Rooms", `<ul>${connection.channels!.map(room => `<li><strong>#${esc(room.name)}</strong> · <a href="xmpp:${esc(room.jid)}?join">${esc(room.jid)}</a></li>`).join("") || '<li class="muted">No timeline channels available.</li>'}</ul>`, "Timeline channels are available as XMPP rooms. Membership and moderation are managed in Archipel. Topics and threaded channels use the browser.");
+        onSubmit($("#xmpp-password-form", el), async data => {
+          const owner = state.session.user!.id, route = location.hash;
+          const credential = await api<{ password: string; jid: string }>("/xmpp/credentials", "POST", { label: data.get("label") });
+          if (!el.isConnected || state.session.user?.id !== owner || location.hash !== route) return;
+          await ctx.refresh();
+          const output = document.querySelector<HTMLElement>("#xmpp-new-password");
+          if (output && state.session.user?.id === owner && location.hash === route) output.innerHTML = `<p>Save this password now; it will only be shown once.</p><input readonly aria-label="New XMPP app password" value="${esc(credential.password)}" autocomplete="off">`;
+      });
+      onClick(el, "[data-revoke-xmpp]", async button => {
+        await api(`/xmpp/credentials/${button.dataset.revokeXmpp}`, "DELETE");
+        toast("App password revoked.");
+        await ctx.refresh();
+      });
+    },
+  },
+  {
+    group: "personal",
+    key: "profile",
+    label: "Profile",
+    about: "Who you are to the people you talk with.",
+    icon: "user",
+    async draw(el, ctx) {
+      const u = state.session.user!;
+      el.innerHTML =
+        card(
+          "Profile",
+          `<div class="profile-heading"><span id="profile-picture-preview">${avatar(u, "large")}</span><div><strong>@${esc(u.username)}</strong><div class="muted small">${esc(state.session.instance)}</div></div></div>
+          <form class="stack narrow-form profile-picture-form" id="profile-picture-form"><label>Profile picture<input name="image" ${images} aria-describedby="profile-picture-help"></label><p class="muted small" id="profile-picture-help">PNG, JPEG, GIF or WebP, up to 2 MiB. Pictures fill a square.</p>${error}<div class="row"><button>Upload picture</button>${u.avatar_url ? '<button type="button" class="secondary" id="remove-profile-picture">Remove picture</button>' : ""}</div></form>
+          <form class="stack narrow-form" id="profile-form"><label>Display name<input name="display_name" maxlength="80" value="${esc(u.display_name)}" required></label>
+          <label class="check"><input type="checkbox" name="share_socials" ${u.share_socials ? "checked" : ""}> Share verified socials with other members</label><p class="muted small">Your login works whether you share or not.</p>${error}<button>Save profile</button></form>`,
+        ) +
+        card(
+          "Verified socials",
+          socialsHtml(u.verified_socials),
+          "Supplied by your identity provider when you sign in.",
+        ) +
+        card(
+          "Session",
+          `<button type="button" class="secondary" id="sign-out">${icon("logout")} Sign out</button>`,
+          `Signed in to ${esc(state.session.instance)}.`,
+        );
+      onSubmit($("#profile-form", el), async (data) => {
+        state.session.user = await api<User>("/profile", "PATCH", {
+          display_name: data.get("display_name"),
+          share_socials: data.get("share_socials") === "on",
+        });
+        hooks.account();
+        toast("Profile saved.");
+        ctx.refresh();
+      });
+      onClick(el, "#sign-out", hooks.signOut);
+      const pictureForm = $<HTMLFormElement>("#profile-picture-form", el);
+      const pictureInput = $<HTMLInputElement>('input[name="image"]', pictureForm);
+      pictureInput.addEventListener("change", () => {
+        const file = pictureInput.files?.[0];
+        $(".form-error", pictureForm).textContent = "";
+        if (!file) {
+          $("#profile-picture-preview", el).innerHTML = avatar(u, "large");
+          return;
+        }
+        void imageBase64(file, 2097152).then((encoded) => {
+          if (pictureInput.files?.[0] !== file) return;
+          if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.type))
+            throw new Error("Choose a PNG, JPEG, GIF or WebP picture.");
+          $("#profile-picture-preview", el).innerHTML = avatar({ ...u, avatar_url: `data:${file.type};base64,${encoded}` }, "large");
+        }).catch((e: Error) => {
+          if (!pictureInput.isConnected || pictureInput.files?.[0] !== file) return;
+          $(".form-error", pictureForm).textContent = e.message;
+          $("#profile-picture-preview", el).innerHTML = avatar(u, "large");
+        });
+      });
+      const pictureChanged = (user: User) => {
+        state.session.user = user;
+        hooks.account();
+        ctx.refresh();
+      };
+      onSubmit(pictureForm, async (data) => {
+        pictureChanged(await api<User>("/profile/avatar", "POST", {
+          image: await imageBase64(data.get("image") as File, 2097152),
+        }));
+        toast("Profile picture uploaded.");
+      });
+      onClick(el, "#remove-profile-picture", async () => {
+        pictureChanged(await api<User>("/profile/avatar", "DELETE"));
+        toast("Profile picture removed.");
+      });
+    },
+  },
+  {
+    group: "personal",
+    key: "appearance",
+    label: "Appearance",
+    about: "How Archipel looks in this browser.",
+    icon: "sun",
+    async draw(el) {
+      el.innerHTML = card(
+        "Theme",
+        themeSeg(),
+        "Kept for this browser only, so each device can have its own. Device follows your system's light or dark setting.",
+      );
+    },
+  },
+  {
+    group: "personal",
+    key: "emoji",
+    label: "Your emoji",
+    about:
+      "Your shortcodes are personal. Other readers see the emoji you used in a message.",
+    icon: "smile",
+    async draw(el, ctx) {
+      const saved =
+        await api<(CustomEmoji & { source_url: string })[]>("/personal-emojis");
+      el.innerHTML =
+        card(
+          "Saved emoji",
+          `<ul class="plain personal-emoji-list">${saved.length ? saved.map((e) => `<li class="row" data-emoji-row="${e.id}"><span class="emoji-sample">${emojiHtml(`:${e.name}:`, [e])}</span><code class="grow">:${esc(e.name)}:</code><button type="button" class="small secondary" data-rename-emoji="${e.id}">Rename</button><button type="button" class="small secondary bad-text" data-delete-personal="${e.id}">Remove</button></li>`).join("") : '<li class="muted">You have no personal emoji yet.</li>'}</ul>`,
+        ) +
+        `<div class="grid2">${card(
+          "Upload an emoji",
+          `<form class="stack" id="personal-upload"><label>Personal shortcode<input name="name" ${shortcode} placeholder="my_wave"></label><label>Personal emoji image<input name="image" ${images}></label>${error}<button>Upload personal emoji</button></form>`,
+          "PNG, JPEG, GIF or WebP, up to 256 KiB.",
+        )}${card(
+          "Adopt from another instance",
+          `<form class="stack" id="personal-adopt"><label>Remote instance URL<input name="instance" type="url" placeholder="https://chat.example.org" required></label><button type="button" id="load-source-emojis" class="secondary">Load instance emoji</button><label>Remote emoji<select name="source_name" required><option value="">Load a catalog above</option></select></label><label>Save as shortcode<input name="name" ${shortcode}></label>${error}<button>Adopt emoji</button></form>`,
+          "Copies one of their custom emoji to your own set.",
+        )}</div>`;
+      const changed = async () => {
+        state.emojis = await api<CustomEmoji[]>("/emojis");
+        ctx.refresh();
+      };
+      onSubmit($("#personal-upload", el), async (data) => {
+        await api("/personal-emojis", "POST", {
+          name: data.get("name"),
+          image: await imageBase64(data.get("image") as File),
+        });
+        await changed();
+      });
+      const adopt = $<HTMLFormElement>("#personal-adopt", el);
+      onSubmit(adopt, async (data) => {
+        await api("/personal-emojis/adopt", "POST", Object.fromEntries(data));
+        await changed();
+      });
+      onClick(el, "#load-source-emojis", async () => {
+        const failed = $(".form-error", adopt);
+        failed.textContent = "";
+        try {
+          const catalog = await api<{ name: string }[]>(
+            `/emoji-sources?instance=${encodeURIComponent(new FormData(adopt).get("instance") as string)}`,
+          );
+          $("select", adopt).innerHTML = catalog.length
+            ? catalog
+                .map(
+                  (e) =>
+                    `<option value="${esc(e.name)}">:${esc(e.name)}:</option>`,
+                )
+                .join("")
+            : '<option value="">No instance emoji available</option>';
+          $<HTMLInputElement>('input[name="name"]', adopt).value =
+            catalog[0]?.name || "";
+        } catch (e) {
+          failed.textContent = (e as Error).message;
+        }
+      });
+      onClick(el, "[data-delete-personal]", async (button) => {
+        await api(`/personal-emojis/${button.dataset.deletePersonal}`, "DELETE");
+        await changed();
+      });
+      // Renaming happens in the row itself.
+      for (const button of $$("[data-rename-emoji]", el))
+        button.addEventListener("click", () => {
+          const emoji = saved.find((e) => e.id === button.dataset.renameEmoji)!,
+            row = button.closest("li")!;
+          row.innerHTML = `<form class="row grow"><span class="emoji-sample">${emojiHtml(`:${emoji.name}:`, [emoji])}</span><label class="grow">New shortcode<input name="name" value="${esc(emoji.name)}" ${shortcode}></label><button class="small">Save shortcode</button><button type="button" class="small secondary" data-cancel>Cancel</button>${error}</form><p class="muted small">Older messages keep their original emoji.</p>`;
+          $("[data-cancel]", row).addEventListener("click", ctx.refresh);
+          $<HTMLInputElement>("input", row).select();
+          onSubmit($("form", row), async (data) => {
+            await api(`/personal-emojis/${emoji.id}`, "PATCH", {
+              name: data.get("name"),
+            });
+            await changed();
+          });
+        });
+    },
+  },
+  {
+    group: "federation",
+    key: "remote",
+    label: "Remote channels",
+    about: "Channels hosted on other instances that you follow from here.",
+    icon: "globe",
+    async draw(el, ctx) {
+      const s = state.session;
+      const subscriptions = await api<
+        { channel_id: string; name: string; status: string }[]
+      >("/federation/subscriptions");
+      const allowed =
+        s.federation_enabled &&
+        s.user?.federation_subscribe &&
+        s.user?.federation_receive;
+      el.innerHTML =
+        `<p class="flash ${allowed ? "" : "warn-flash"}">${s.federation_enabled ? (allowed ? "Your administrator controls which federation actions your account may use." : "Your administrator has not allowed your account to subscribe to and receive remote channels.") : "Federation is disabled on this instance."}</p>` +
+        card(
+          "Subscribe to a channel",
+          `<form class="stack narrow-form" id="remote-subscribe"><label>Channel address<input name="address" placeholder="#general@chat.example.org or an actor URL" required></label>${error}<button ${allowed ? "" : "disabled"}>Subscribe to channel</button></form>`,
+        ) +
+        card(
+          "Your subscriptions",
+          `<ul class="plain remote-subscriptions">${subscriptions.length ? subscriptions.map((sub) => `<li class="row">${icon("globe")}<strong class="grow">${esc(sub.name)}</strong><span class="pill ${sub.status === "accepted" ? "good" : sub.status === "pending" ? "warn" : "bad"}">${esc(sub.status)}</span>${sub.status === "accepted" ? `<button type="button" class="small" data-open-remote="${sub.channel_id}">Open channel</button>` : ""}${["pending", "accepted"].includes(sub.status) ? `<button type="button" class="small secondary bad-text" data-unsubscribe="${sub.channel_id}">Unsubscribe</button>` : ""}</li>`).join("") : '<li class="muted">You follow no remote channels.</li>'}</ul><button type="button" id="refresh-subscriptions" class="small secondary">Refresh subscriptions</button>`,
+          "A subscription is pending until the channel's home instance accepts it.",
+        );
+      onSubmit($("#remote-subscribe", el), async (data) => {
+        await api("/federation/subscriptions", "POST", Object.fromEntries(data));
+        ctx.refresh();
+      });
+      onClick(el, "#refresh-subscriptions", async () => ctx.refresh());
+      onClick(el, "[data-open-remote]", async (button) => {
+        state.channels = await api<Channel[]>("/channels");
+        go(`#/c/${button.dataset.openRemote}`);
+      });
+      onClick(el, "[data-unsubscribe]", async (button) => {
+        await api(
+          `/federation/subscriptions/${button.dataset.unsubscribe}`,
+          "DELETE",
+        );
+        state.channels = await api<Channel[]>("/channels");
+        ctx.refresh();
+      });
+    },
+  },
+  {
+    group: "federation",
+    key: "direct",
+    label: "Direct messages",
+    about: "Private messages with people on other instances.",
+    icon: "chat",
+    async draw(el) {
+      const s = state.session,
+        allowed = s.federation_enabled && s.user?.federation_send;
+      el.innerHTML =
+        card(
+          "Send a message",
+          `<form class="stack narrow-form" id="remote-direct"><label>Remote user address<input name="address" placeholder="user@chat.example.org or an actor URL" required></label><label>Direct message<textarea name="body" required maxlength="8000" rows="3"></textarea></label>${error}<button ${allowed ? "" : "disabled"}>Send federated message</button></form>`,
+          allowed
+            ? ""
+            : s.federation_enabled
+              ? "Your administrator has not allowed your account to send federated messages."
+              : "Federation is disabled on this instance.",
+        ) +
+        card(
+          "Messages",
+          '<ul class="plain" id="federated-direct-list"></ul>',
+        );
+      const form = $<HTMLFormElement>("#remote-direct", el);
+      onSubmit(form, async (data) => {
+        await api("/federation/messages", "POST", Object.fromEntries(data));
+        $<HTMLTextAreaElement>("textarea", form).value = "";
+        await drawDirectMessages();
+        toast("Direct message queued for delivery.");
+      });
+      await drawDirectMessages(el);
+    },
+  },
+  {
+    group: "federation",
+    key: "instance",
+    label: "Instance federation",
+    about:
+      "Federation and every user permission start disabled. Local conversations remain available either way.",
+    icon: "shield",
+    admin: true,
+    async draw(el) {
+      const [status, users] = await Promise.all([
+        api<{ enabled: boolean }>("/admin/federation"),
+        api<User[]>("/users"),
+      ]);
+      el.innerHTML =
+        card(
+          "Federation",
+          `<form class="stack" id="federation-enable"><label class="check"><input type="checkbox" name="enabled" ${status.enabled ? "checked" : ""}> Enable federation for this instance</label>${error}<button>Save federation setting</button></form>`,
+        ) +
+        card(
+          "User permissions",
+          `<form class="stack narrow-form" id="federation-permissions"><label>Local user<select name="user">${users.map((u) => `<option value="${u.id}">@${esc(u.username)}</option>`).join("")}</select></label>${federationFlags.map(([flag, label]) => `<label class="check"><input type="checkbox" name="${flag}"> ${label}</label>`).join("")}${error}<button>Save user permissions</button></form>`,
+          "Changes apply to queued deliveries and open browser sessions.",
+        );
+      const permissions = $<HTMLFormElement>("#federation-permissions", el);
+      const fill = () => {
+        const selected = users.find(
+          (u) => u.id === new FormData(permissions).get("user"),
+        );
+        for (const [flag] of federationFlags)
+          $<HTMLInputElement>(`input[name="${flag}"]`, permissions).checked =
+            !!selected?.[flag];
+      };
+      fill();
+      $("select", permissions).addEventListener("change", fill);
+      onSubmit($("#federation-enable", el), async (data) => {
+        await api("/admin/federation", "PATCH", {
+          enabled: data.get("enabled") === "on",
+        });
+        state.session = await api<Session>("/session");
+        toast("Federation setting saved.");
+      });
+      onSubmit(permissions, async (data) => {
+        const updated = await api<User>(
+          `/admin/users/${data.get("user")}/federation`,
+          "PATCH",
+          Object.fromEntries(
+            federationFlags.map(([flag]) => [flag, data.get(flag) === "on"]),
+          ),
+        );
+        Object.assign(users.find((u) => u.id === updated.id)!, updated);
+        state.session = await api<Session>("/session");
+        toast("Federation permissions saved.");
+      });
+    },
+  },
+  {
+    group: "federation",
+    key: "blocks",
+    label: "Remote blocks",
+    about: "Instances and remote actors this instance refuses to talk to.",
+    icon: "lock",
+    admin: true,
+    async draw(el, ctx) {
+      const status = await api<{ blocks: { target: string; kind: string }[] }>(
+        "/admin/federation",
+      );
+      el.innerHTML =
+        card(
+          "Block a remote target",
+          `<form class="stack narrow-form" id="federation-block"><label>Block type<select name="kind"><option value="instance">Whole instance</option><option value="actor">Remote user or channel actor</option></select></label><label>Remote HTTPS URL<input name="target" type="url" required></label>${error}<button class="danger">Block remote target</button></form>`,
+        ) +
+        card(
+          "Blocked",
+          `<ul class="plain">${status.blocks.length ? status.blocks.map((b) => `<li class="row"><span class="pill bad">${esc(b.kind)}</span><code class="grow">${esc(b.target)}</code><button type="button" class="small secondary" data-unblock="${esc(b.target)}" data-kind="${esc(b.kind)}">Unblock</button></li>`).join("") : '<li class="muted">Nothing is blocked.</li>'}</ul>`,
+        );
+      onSubmit($("#federation-block", el), async (data) => {
+        await api("/admin/federation/blocks", "POST", {
+          ...Object.fromEntries(data),
+          blocked: true,
+        });
+        ctx.refresh();
+      });
+      onClick(el, "[data-unblock]", async (button) => {
+        await api("/admin/federation/blocks", "POST", {
+          target: button.dataset.unblock,
+          kind: button.dataset.kind,
+          blocked: false,
+        });
+        ctx.refresh();
+      });
+    },
+  },
+  {
+    group: "federation",
+    key: "deliveries",
+    label: "Deliveries",
+    about: "The most recent messages queued for other instances.",
+    icon: "send",
+    admin: true,
+    async draw(el) {
+      const status = await api<{
+        recent: { recipient: string; status: string; error: string | null }[];
+      }>("/admin/federation");
+      el.innerHTML = status.recent.length
+        ? `<table class="list"><thead><tr><th>Status</th><th>Recipient</th><th>Error</th></tr></thead><tbody>${status.recent.map((d) => `<tr><td><span class="pill ${d.status === "delivered" ? "good" : d.error ? "bad" : "warn"}">${esc(d.status)}</span></td><td><code>${esc(d.recipient)}</code></td><td class="muted">${esc(d.error || "")}</td></tr>`).join("")}</tbody></table>`
+        : '<p class="card empty muted">No queued deliveries yet.</p>';
+    },
+  },
+  {
+    group: "channel",
+    key: "overview",
+    label: "Overview",
+    about: "What this channel is and how it's set up.",
+    icon: "hash",
+    async draw(el, ctx) {
+      const c = ctx.channel!;
+      const address = `#${c.name}@${c.remote_actor ? new URL(c.remote_actor).host : state.session.instance}`;
+      el.innerHTML =
+        card(
+          `${channelIcon(c)} ${esc(c.name)}`,
+          `<dl class="info"><dt>Address</dt><dd><code>${esc(address)}</code></dd><dt>Description</dt><dd>${esc(c.description || "None")}</dd><dt>Conversation style</dt><dd>${modeLabel(c.mode)}</dd><dt>Who can read</dt><dd>${c.visibility === "members" ? "Members only" : "Everyone on this instance"}</dd><dt>Who can join</dt><dd>${c.admission === "allowlist" ? "Invited users only" : "Anyone on this instance"}</dd><dt>Members</dt><dd><a href="#/settings/channel/members/${c.id}">${c.member_count}</a></dd><dt>Your role</dt><dd>${esc(c.role || "Not a member")}</dd><dt>Federation</dt><dd>${c.remote_actor ? "Hosted on another instance" : c.federation_enabled ? "Federated" : "Local only"}</dd></dl><p><a class="button secondary" href="#/c/${c.id}">${icon("chat")} Open channel</a></p>`,
+        ) +
+        (c.role && c.role !== "owner"
+          ? card(
+              "Leave",
+              `<button type="button" class="danger" id="leave-channel">Leave this channel</button>`,
+              c.remote_actor
+                ? "Unsubscribes you from this remote channel."
+                : "You can join again later if the channel allows it.",
+            )
+          : "");
+      onClick(el, "#leave-channel", async () => {
+        if (
+          !(await confirmDialog(
+            `Leave #${c.name}?`,
+            "You'll stop seeing it in your channels.",
+            "Leave channel",
+          ))
+        )
+          return;
+        await api(`/channels/${c.id}/leave`, "POST", {});
+        if (chatChannel()?.id === c.id) resetChat();
+        state.channels = await api<Channel[]>("/channels");
+        go("#/channels");
+      });
+    },
+  },
+  {
+    group: "channel",
+    key: "members",
+    label: "Members",
+    about: "The people in this channel.",
+    icon: "people",
+    async draw(el, ctx) {
+      const c = ctx.channel!,
+        moderating = canModerate(c),
+        promoting = !!state.session.user?.admin || c.role === "owner";
+      el.innerHTML = card(
+        `${c.member_count} member${c.member_count === 1 ? "" : "s"}`,
+        `<ul class="plain member-list">${(c.members || [])
+          .map((u) =>
+            person(
+              u,
+              `<span class="pill ${u.role === "owner" ? "kept" : u.role === "moderator" ? "new" : ""}">${esc(u.role)}</span>${u.verified_socials.length ? `<details class="socials"><summary>Shared socials</summary>${socialsHtml(u.verified_socials)}</details>` : ""}`,
+              moderating && u.role !== "owner"
+                ? `${promoting ? `<button type="button" class="small secondary" data-member="${u.id}" data-role="${u.role === "moderator" ? "member" : "moderator"}">${u.role === "moderator" ? "Make member" : "Make moderator"}</button>` : ""}<button type="button" class="small secondary bad-text" data-member="${u.id}" data-remove>Remove</button>`
+                : "",
+            ),
+          )
+          .join("")}</ul>`,
+        moderating
+          ? `Invite or block people under <a href="#/settings/channel/access/${c.id}">Access rules</a>.`
+          : "",
+      );
+      onClick(el, "[data-member]", async (button) => {
+        await api(
+          `/channels/${c.id}/members/${button.dataset.member}`,
+          "PATCH",
+          "remove" in button.dataset
+            ? { remove: true }
+            : { role: button.dataset.role },
+        );
+        toast("Channel permissions updated.");
+        ctx.refresh();
+      });
+    },
+  },
+  {
+    group: "channel",
+    key: "access",
+    label: "Access rules",
+    about: "Who is invited to, or blocked from, this channel.",
+    icon: "lock",
+    mod: true,
+    async draw(el, ctx) {
+      const c = ctx.channel!;
+      const [users, rules] = await Promise.all([
+        api<User[]>("/users"),
+        api<{ user_id: string; rule: string; username: string }[]>(
+          `/channels/${c.id}/rules`,
+        ),
+      ]);
+      el.innerHTML =
+        card(
+          "Change someone's access",
+          `<form class="stack narrow-form" id="access-form"><label>Person<select name="user">${users
+            .filter((u) => u.id !== c.owner_id)
+            .map((u) => `<option value="${u.id}">@${esc(u.username)}</option>`)
+            .join(
+              "",
+            )}</select></label><label>Action<select name="action"><option value="allow">Allow to join</option><option value="block">Block and remove membership</option><option value="clear">Clear access rule</option><option value="remove">Remove membership</option>${state.session.user?.admin || c.role === "owner" ? '<option value="moderator">Make moderator</option><option value="member">Make member</option>' : ""}</select></label>${error}<button>Apply change</button></form>`,
+          `${c.visibility === "members" ? "Members-only" : "Public"} · ${c.admission === "allowlist" ? "invitation required" : "open membership"}`,
+        ) +
+        card(
+          "Access rules",
+          `<ul class="plain rules-list">${rules.length ? rules.map((r) => `<li class="row"><span class="grow">@${esc(r.username)}</span><span class="pill ${r.rule === "block" ? "bad" : "good"}">${esc(r.rule)}</span><button type="button" class="small secondary" data-clear="${r.user_id}">Clear</button></li>`).join("") : '<li class="muted">No individual access rules.</li>'}</ul>`,
+        );
+      const change = async (user: unknown, selected: string) => {
+        await api(
+          `/channels/${c.id}/members/${user}`,
+          "PATCH",
+          ["moderator", "member"].includes(selected)
+            ? { role: selected }
+            : selected === "remove"
+              ? { remove: true }
+              : { rule: selected },
+        );
+        toast("Channel permissions updated.");
+        ctx.refresh();
+      };
+      onSubmit($("#access-form", el), (data) =>
+        change(data.get("user"), data.get("action") as string),
+      );
+      onClick(el, "[data-clear]", (button) =>
+        change(button.dataset.clear, "clear"),
+      );
+    },
+  },
+  {
+    group: "channel",
+    key: "federation",
+    label: "Federation",
+    about: "Whether other instances can follow this channel, and who does.",
+    icon: "globe",
+    mod: true,
+    async draw(el, ctx) {
+      const c = ctx.channel!;
+      const followers = await api<{ actor: string; status: string }[]>(
+        `/channels/${c.id}/followers`,
+      );
+      el.innerHTML =
+        card(
+          "Federation",
+          `<form class="stack" id="channel-federation"><label class="check"><input type="checkbox" name="enabled" ${c.federation_enabled ? "checked" : ""}> Allow this channel to federate</label>${error}<button>Save channel federation</button></form>`,
+          "Open channels accept remote subscribers automatically. Invited channels require approval here. Turning federation off stops channel delivery and removes remote admission.",
+        ) +
+        card(
+          "Remote followers",
+          `<ul class="plain remote-followers">${followers.length ? followers.map((f) => `<li class="row"><code class="grow">${esc(f.actor)}</code><span class="pill ${f.status === "accepted" ? "good" : f.status === "blocked" ? "bad" : "warn"}">${esc(f.status)}</span>${f.status !== "accepted" ? `<button type="button" class="small" data-follower="${esc(f.actor)}" data-decision="accepted">Accept follower</button>` : ""}${f.status !== "blocked" ? `<button type="button" class="small secondary bad-text" data-follower="${esc(f.actor)}" data-decision="blocked">Block follower</button>` : ""}</li>`).join("") : '<li class="muted">No remote follows yet.</li>'}</ul>`,
+        );
+      onSubmit($("#channel-federation", el), async (data) => {
+        await api(`/channels/${c.id}/federation`, "PATCH", {
+          enabled: data.get("enabled") === "on",
+        });
+        toast("Channel federation saved.");
+        ctx.refresh();
+      });
+      onClick(el, "[data-follower]", async (button) => {
+        await api(`/channels/${c.id}/followers`, "PATCH", {
+          actor: button.dataset.follower,
+          status: button.dataset.decision,
+        });
+        ctx.refresh();
+      });
+    },
+  },
+  {
+    group: "instance",
+    key: "membership",
+    label: "Membership",
+    about: "Who may join this instance, and the people waiting to.",
+    icon: "shield",
+    admin: true,
+    async draw(el, ctx) {
+      const [applications, settings] = await Promise.all([
+        api<
+          (User & {
+            created_at: string;
+            identities: { issuer: string; subject: string }[];
+          })[]
+        >("/admin/applications"),
+        api<{ registration_mode: string }>("/admin/settings"),
+      ]);
+      el.innerHTML =
+        card(
+          "Membership policy",
+          `<form class="stack narrow-form" id="registration-form"><label>New user access<select name="registration_mode"><option value="open" ${settings.registration_mode === "open" ? "selected" : ""}>Open: admit new users automatically</option><option value="invite_only" ${settings.registration_mode === "invite_only" ? "selected" : ""}>Invite only: require administrator approval</option></select></label>${error}<button>Save membership policy</button></form>`,
+          "Existing members keep access. Pending or declined applications still need a decision when registration is opened.",
+        ) +
+        card(
+          `Applications${applications.length ? ` <span class="count">${applications.length}</span>` : ""}`,
+          `<div class="applications">${applications.length ? applications.map((u) => `<article class="application" data-application="${u.id}"><div class="row">${avatar(u)}<div class="grow">${nameButton(u, u.actor_url)} <span class="muted">@${esc(u.username)}</span><div class="muted small"><span class="pill ${u.admission_status === "rejected" ? "bad" : "warn"}">${esc(u.admission_status)}</span> Applied ${esc(full(u.created_at))}${u.banned ? " · also suspended" : ""}</div></div><button type="button" class="small" data-review="${u.id}" data-decision="approved">Approve</button>${u.admission_status !== "rejected" ? `<button type="button" class="small secondary bad-text" data-review="${u.id}" data-decision="rejected">Decline</button>` : ""}</div>${u.identities.map((identity) => `<dl class="info small"><dt>Issuer</dt><dd><code>${esc(identity.issuer)}</code></dd><dt>Subject</dt><dd><code>${esc(identity.subject)}</code></dd></dl>`).join("")}<h3>Provider-verified socials</h3>${socialsHtml(u.verified_socials)}</article>`).join("") : '<p class="muted">No applications waiting for review.</p>'}</div>`,
+        );
+      onSubmit($("#registration-form", el), async (data) => {
+        const result = await api<{
+          registration_mode: Session["registration_mode"];
+        }>("/admin/settings", "PATCH", {
+          registration_mode: data.get("registration_mode"),
+        });
+        state.session.registration_mode = result.registration_mode;
+        toast("Membership policy saved.");
+      });
+      onClick(el, "[data-review]", async (button) => {
+        await api(`/admin/applications/${button.dataset.review}`, "PATCH", {
+          admission_status: button.dataset.decision,
+        });
+        ctx.refresh();
+      });
+    },
+  },
+  {
+    group: "instance",
+    key: "people",
+    label: "People",
+    about: "Everyone with an account on this instance.",
+    icon: "people",
+    admin: true,
+    async draw(el, ctx) {
+      const users = await api<User[]>("/users");
+      el.innerHTML = card(
+        `${users.length} account${users.length === 1 ? "" : "s"}`,
+        `<ul class="plain admin-users">${users
+          .map((u) =>
+            person(
+              u,
+              `<span class="pill ${u.admin ? "kept" : u.banned ? "bad" : "good"}">${u.admin ? "Administrator" : u.banned ? "Suspended" : "Active"}</span>`,
+              u.admin
+                ? ""
+                : `<button type="button" class="small secondary ${u.banned ? "" : "bad-text"}" data-ban="${u.id}" data-status="${u.banned ? "false" : "true"}">${u.banned ? "Restore" : "Suspend"}</button>`,
+            ),
+          )
+          .join("")}</ul>`,
+      );
+      onClick(el, "[data-ban]", async (button) => {
+        await api(`/admin/users/${button.dataset.ban}`, "PATCH", {
+          banned: button.dataset.status === "true",
+        });
+        ctx.refresh();
+      });
+    },
+  },
+  {
+    group: "instance",
+    key: "emoji",
+    label: "Custom emoji",
+    about: "Emoji everyone on this instance can use by :shortcode:.",
+    icon: "smile",
+    admin: true,
+    async draw(el, ctx) {
+      const emojis = await api<CustomEmoji[]>("/admin/emojis");
+      el.innerHTML =
+        card(
+          "Add an emoji",
+          `<form class="stack narrow-form" id="emoji-form"><label>Emoji shortcode<input name="name" ${shortcode} placeholder="island_wave"></label><label>Emoji image<input name="image" ${images}></label>${error}<button>Add emoji</button></form>`,
+          "PNG, JPEG, GIF or WebP, up to 256 KiB. Standard emoji names are reserved.",
+        ) +
+        card(
+          "Instance emoji",
+          `<ul class="plain admin-emojis">${emojis.length ? emojis.map((e) => `<li class="row"><span class="emoji-sample">${emojiHtml(`:${e.name}:`, [e])}</span><code class="grow">:${esc(e.name)}:</code><button type="button" class="small secondary bad-text" data-remove-emoji="${esc(e.name)}">Remove</button></li>`).join("") : '<li class="muted">No custom emoji yet.</li>'}</ul>`,
+        );
+      const changed = async () => {
+        state.emojis = await api<CustomEmoji[]>("/emojis");
+        ctx.refresh();
+      };
+      onSubmit($("#emoji-form", el), async (data) => {
+        await api("/admin/emojis", "POST", {
+          name: data.get("name"),
+          image: await imageBase64(data.get("image") as File),
+        });
+        await changed();
+      });
+      onClick(el, "[data-remove-emoji]", async (button) => {
+        await api(`/admin/emojis/${button.dataset.removeEmoji}`, "DELETE");
+        await changed();
+      });
+    },
+  },
+  {
+    group: "instance",
+    key: "moderation",
+    label: "Moderation log",
+    about: "The last hundred administrative and moderation actions.",
+    icon: "shield",
+    admin: true,
+    async draw(el) {
+      const audit = await api<
+        { action: string; username: string; created_at: string; target: string }[]
+      >("/admin/audit");
+      el.innerHTML = audit.length
+        ? `<table class="list"><thead><tr><th>Action</th><th>By</th><th>When</th><th>Target</th></tr></thead><tbody>${audit.map((a) => `<tr><td>${esc(a.action.replaceAll(".", " "))}</td><td>@${esc(a.username)}</td><td class="nowrap">${when(a.created_at)}</td><td><code>${esc(a.target || "")}</code></td></tr>`).join("")}</tbody></table>`
+        : '<p class="card empty muted">No moderation actions yet.</p>';
+    },
+  },
+];
+
+let token = 0;
+export async function showSettings(
+  view: HTMLElement,
+  group?: string,
+  key?: string,
+  id?: string,
+) {
+  const mine = ++token,
+    admin = !!state.session.user?.admin;
+  // Channels whose settings can be opened: the ones you're in, and for administrators every local one.
+  const channels = state.channels.filter(
+    (c) => c.role || (admin && c.readable && !c.remote_actor),
+  );
+  const listed =
+    channels.find((c) => c.id === id) ||
+    state.channels.find((c) => c.id === id && c.readable) ||
+    channels.find((c) => c.id === chatChannel()?.id) ||
+    channels[0];
+  const allowed = (s: Section) =>
+    (!s.admin || admin) &&
+    (s.group !== "channel" || (!!listed && (!s.mod || canModerate(listed))));
+  const section = sections.find((s) => s.group === group && s.key === key);
+  const href = (s: Section) =>
+    `#/settings/${s.group}/${s.key}${s.group === "channel" ? `/${listed!.id}` : ""}`;
+  if (group && (!section || !allowed(section))) {
+    const fallback = sections.find((s) => s.group === group && allowed(s));
+    return go(fallback ? href(fallback) : "#/settings");
+  }
+  // On a wide screen there's always a section open; on a phone the list comes first.
+  if (!section && matchMedia("(min-width: 721px)").matches)
+    return go("#/settings/personal/profile");
+  if (section?.group === "channel" && id !== listed!.id)
+    return go(href(section));
+  const nav = (Object.keys(groups) as Section["group"][])
+    .map((g) => {
+      const links = sections
+        .filter((s) => s.group === g && allowed(s))
+        .map(
+          (s) =>
+            `<a class="menu-item${s === section ? " on" : ""}" href="${href(s)}"${s === section ? ' aria-current="page"' : ""}>${icon(s.icon)}<span class="grow">${s.label}</span></a>`,
+        )
+        .join("");
+      if (g === "channel")
+        return `<div class="nav-group"><div class="menu-label">Channel</div>${channels.length || listed ? `<select id="settings-channel" aria-label="Channel">${[...new Set([...(listed ? [listed] : []), ...channels])].map((c) => `<option value="${c.id}" ${c.id === listed!.id ? "selected" : ""}>#${esc(c.name)}</option>`).join("")}</select>${links}` : '<p class="muted small menu-note">Join a channel to see its settings.</p>'}</div>`;
+      return links
+        ? `<div class="nav-group"><div class="menu-label">${groups[g]}</div>${links}</div>`
+        : "";
+    })
+    .join("");
+  // The frame and the list stay put between sections: only the list's markup (when it
+  // changed) and the page beside it are replaced, once the new page is ready to show.
+  let page = view.querySelector<HTMLElement>(".page.settings-page");
+  if (!page) {
+    view.innerHTML = `<div class="page settings-page"><div class="page-inner settings-layout"><nav class="settings-nav" aria-label="Settings"></nav><section class="settings-body"></section></div></div>`;
+    page = $(".page", view);
+    $(".settings-nav", view).addEventListener("change", (e) => {
+      const select = e.target as HTMLSelectElement,
+        [, at, was] = location.hash.split("/").slice(1);
+      if (select.id === "settings-channel")
+        go(
+          `#/settings/channel/${at === "channel" && was ? was : "overview"}/${select.value}`,
+        );
+    });
+  }
+  const list = $(".settings-nav", view),
+    body = $(".settings-body", view),
+    same = page.dataset.at === location.hash,
+    html = `<h1>Settings</h1>${nav}`;
+  if (list.dataset.html !== html) {
+    const at = list.scrollTop;
+    list.innerHTML = list.dataset.html = html;
+    list.scrollTop = at;
+  }
+  $(".settings-layout", view).classList.toggle("at-index", !section);
+  if (!section) {
+    page.dataset.at = location.hash;
+    body.innerHTML = "";
+    return;
+  }
+  const show = (content: HTMLElement, detail: Channel | null) => {
+    const scrolled = same ? page.scrollTop : 0;
+    body.innerHTML = `<a class="back-link" href="#/settings">${icon("chevron-left")} Settings</a><div class="feed-head"><div><p class="muted small crumb">${groups[section.group]}${detail ? ` · #${esc(detail.name)}` : ""}</p><h1>${section.label}</h1><p class="muted">${section.about}</p></div></div>`;
+    content.id = "section";
+    body.append(content);
+    refreshTimes(content);
+    page.dataset.at = location.hash;
+    page.scrollTop = scrolled;
+  };
+  const content = document.createElement("div");
+  let detail: Channel | null = null;
+  try {
+    if (section.group === "channel")
+      detail = await api<Channel>(`/channels/${listed!.id}`);
+    if (mine !== token) return;
+    await section.draw(content, {
+      channel: detail,
+      refresh: () => showSettings(view, group, key, id),
+    });
+    if (mine !== token) return;
+    show(content, detail);
+  } catch (e) {
+    if (mine !== token) return;
+    content.innerHTML = `<p class="flash error">${esc((e as Error).message)}</p>`;
+    show(content, detail);
+  }
+}
+export async function tickSettings() {
+  await drawDirectMessages();
+  const section = document.querySelector("#section");
+  if (section) refreshTimes(section);
+}

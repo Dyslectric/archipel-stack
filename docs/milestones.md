@@ -96,3 +96,37 @@ and logout/revocation stops subsequent push. An authorized member receives a
 token scoped to the requested conversation; an outsider, banned user, or blocked
 member cannot obtain one. Document and test active-call removal separately from
 token expiration.
+
+## 7. Prosody XMPP backend
+
+Implemented first profile: Prosody client streams, explicit account bindings,
+revocable app passwords, local timeline MUC rooms, shared direct messages,
+authorized MAM archives, and TLS XMPP direct-message federation. Archipel retains
+identity, admission, membership, and archive authority. See [XMPP operations and
+supported profile](xmpp.md). Remote room participation and richer channel
+mappings remain future work.
+
+The Docker integration establishes the authority model and ordinary-client
+interoperability. A relocatable bundled Prosody runtime still needs a packaging
+prototype. Rich conversation mappings and cross-protocol bridging follow basic
+interoperability and have explicit supported semantics.
+
+Acceptance: an ordinary XMPP client authenticates and exchanges messages with
+the Archipel browser; a user on a separate XMPP server participates in a supported
+room. Admission, suspension, bans, owner protections, and history permissions
+hold across interfaces, including existing sessions after revocation. Replay
+does not duplicate messages or change their provenance.
+
+## 8. Single-executable distribution
+
+Future requirement; not implemented. Ship one executable per supported target
+with the frontend, application server, migrations, and Prosody runtime included.
+Do not require separately installed Node, Lua, Prosody, Docker, or dependency
+downloads at startup. Keep configuration and all persistent state outside the
+replaceable executable. Extraction and platform targets need prototype validation.
+
+Acceptance: on each advertised clean target, one executable starts both interfaces
+without separate application runtimes. Test launch from another working directory,
+restart, child failure, coordinated shutdown, executable replacement, and complete
+backup/restore. Updates preserve accounts, policy, history, and keys; shutdown
+leaves no managed child running. Native Windows support needs its own validation.

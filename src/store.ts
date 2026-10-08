@@ -1,4 +1,4 @@
-import { decodeEmojiImage } from "./emoji-image.js";
+import { decodeEmojiImage, decodeRasterImage } from "./emoji-image.js";
 import { standardEmojis, type CustomEmoji } from "./emojis.js";
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, readFileSync } from "node:fs";
@@ -60,6 +60,20 @@ export interface Message {
   username: string;
   display_name: string;
 }
+interface DirectRow {
+  seq: number;
+  peer: string;
+  direction: "incoming" | "outgoing";
+  body: string;
+  emoji_tags: string;
+  created_at: string;
+}
+// What a member may see of, and say to, a peer on another instance.
+export interface DirectAccess {
+  incoming: boolean;
+  outgoing: boolean;
+  blocked: string | null;
+}
 export const hash = (value: string) =>
   createHash("sha256").update(value).digest("hex");
 export const randomToken = () => randomBytes(32).toString("base64url");
@@ -91,6 +105,12 @@ export class Store {
       actor: User,
     ) => void;
     read: (user: User, channel: Channel) => void;
+    direct: (user: User, peer: string) => DirectAccess;
+  };
+  xmppHooks?: {
+    message: (message: Message, kind: "Create" | "Update" | "Delete") => void;
+    direct: (id: string, sender: User, recipient: User) => void;
+    access: (user: User, peer: string) => DirectAccess;
   };
   constructor(
     path: string,
@@ -105,7 +125,7 @@ export class Store {
     const version = (
       this.db.prepare("PRAGMA user_version").get() as { user_version: number }
     ).user_version;
-    if (version > 3) throw new Error("Database is newer than this application");
+    if (version > 9) throw new Error("Database is newer than this application");
     if (version === 0)
       this.transaction(() =>
         this.db.exec(
@@ -133,6 +153,45 @@ export class Store {
           ),
         ),
       );
+    if (version < 4)
+      this.transaction(() =>
+        this.db.exec(
+          readFileSync(
+            new URL("../migrations/004_inbox.sql", import.meta.url),
+            "utf8",
+          ),
+        ),
+      );
+    if (version < 5)
+      this.transaction(() =>
+        this.db.exec(
+          readFileSync(
+            new URL("../migrations/005_user_blocks.sql", import.meta.url),
+            "utf8",
+          ),
+        ),
+      );
+    if (version < 6)
+      this.transaction(() =>
+        this.db.exec(
+          readFileSync(
+            new URL("../migrations/006_user_avatars.sql", import.meta.url),
+            "utf8",
+          ),
+        ),
+      );
+    if (version < 7)
+      this.transaction(() => this.db.exec(readFileSync(
+        new URL("../migrations/007_xmpp.sql", import.meta.url), "utf8",
+      )));
+    if (version < 8)
+      this.transaction(() => this.db.exec(readFileSync(
+        new URL("../migrations/008_contact_names.sql", import.meta.url), "utf8",
+      )));
+    if (version < 9)
+      this.transaction(() => this.db.exec(readFileSync(
+        new URL("../migrations/009_xmpp_stream_ids.sql", import.meta.url), "utf8",
+      )));
   }
   close() {
     this.db.close();
@@ -174,6 +233,7 @@ export class Store {
     return {
       id: user.id,
       actor_url: user.remote_actor || `${this.baseUrl}/actors/users/${user.id}`,
+      avatar_url: this.avatarUrl(user.id),
       username: user.username,
       display_name: user.display_name,
       ...(own
@@ -294,6 +354,9 @@ export class Store {
           "DELETE FROM sessions WHERE user_id NOT IN (SELECT user_id FROM oidc_bindings WHERE issuer=? OR (?=1 AND issuer='urn:archipel:development'))",
         )
         .run(issuer, Number(devAuth));
+      this.db.prepare(
+        "UPDATE xmpp_credentials SET revoked_at=? WHERE revoked_at IS NULL AND user_id NOT IN (SELECT user_id FROM oidc_bindings WHERE issuer=? OR (?=1 AND issuer='urn:archipel:development'))",
+      ).run(now(), issuer, Number(devAuth));
     });
   }
   initializeRegistration(mode: "open" | "invite_only") {
@@ -667,6 +730,7 @@ export class Store {
       this.db
         .prepare("INSERT INTO memberships VALUES(?,?,?)")
         .run(id, user.id, "owner");
+      this.startReading(user.id, id);
       this.audit(user.id, "channel.create", id);
       return this.channelInfo(user, this.channel(id));
     });
@@ -687,6 +751,7 @@ export class Store {
     this.db
       .prepare("INSERT INTO memberships VALUES(?,?,?)")
       .run(id, user.id, "member");
+    this.startReading(user.id, id);
   }
   leave(user: User, id: string) {
     this.active(user.id);
@@ -710,7 +775,10 @@ export class Store {
       .all(id);
     return {
       ...this.channelInfo(user, channel),
-      members: members.map((u) => ({ ...this.profile(u), role: u.role })),
+      members: members.map((u) => ({
+        ...this.profile(u), role: u.role,
+        display_name: u.remote_actor ? this.contactName(user, u.remote_actor) ?? u.display_name : u.display_name,
+      })),
       topics,
     };
   }
@@ -868,6 +936,7 @@ export class Store {
         );
       const result = this.message(messageId);
       this.federationHooks?.message(result, "Create", user);
+      this.xmppHooks?.message(result, "Create");
       return result;
     });
   }
@@ -880,27 +949,35 @@ export class Store {
     if (!result) throw new Problem(404, "Message not found.");
     return this.messageInfo(result);
   }
-  messageInfo(message: Message) {
+  messageInfo(message: Message, viewer?: User) {
+    const author = this.user(message.author_id);
     return {
       ...message,
+      ...(viewer && author.remote_actor
+        ? { display_name: this.contactName(viewer, author.remote_actor) ?? message.display_name }
+        : {}),
       ...(message.history_placeholder
         ? { username: "history", display_name: "Earlier message" }
         : {}),
       object_url:
         message.remote_object ||
         `${this.baseUrl}/objects/messages/${message.id}`,
-      emojis: (JSON.parse(message.emoji_tags) as CustomEmoji[]).filter(
-        (e) =>
-          !!this.db
-            .prepare(
-              "SELECT 1 FROM custom_emojis WHERE id=? UNION ALL SELECT 1 FROM personal_emojis WHERE id=? UNION ALL SELECT 1 FROM remote_emoji_cache WHERE id=?",
-            )
-            .get(e.id, e.id, e.id),
-      ),
+      emojis: this.liveEmojis(message.emoji_tags),
       author_actor_url:
-        this.user(message.author_id).remote_actor ||
+        author.remote_actor ||
         `${this.baseUrl}/actors/users/${message.author_id}`,
+      avatar_url: message.history_placeholder ? null : this.avatarUrl(message.author_id),
     };
+  }
+  private liveEmojis(tags: string) {
+    return (JSON.parse(tags) as CustomEmoji[]).filter(
+      (e) =>
+        !!this.db
+          .prepare(
+            "SELECT 1 FROM custom_emojis WHERE id=? UNION ALL SELECT 1 FROM personal_emojis WHERE id=? UNION ALL SELECT 1 FROM remote_emoji_cache WHERE id=?",
+          )
+          .get(e.id, e.id, e.id),
+    );
   }
   messages(user: User, id: string, before?: number) {
     this.requireRead(user, this.channel(id));
@@ -916,7 +993,20 @@ export class Store {
         ) as unknown as Message[]
     )
       .reverse()
-      .map((m) => this.messageInfo(m));
+      .map((m) => this.messageFor(user, m));
+  }
+  messageFor(user: User, message: Message) {
+    const info = this.messageInfo(message, user);
+    return this.isUserBlocked(user.id, info.author_actor_url)
+      ? {
+          ...info,
+          body: "This message is hidden because you blocked this user.",
+          title: info.title === null ? null : "Hidden thread",
+          emoji_tags: "[]",
+          emojis: [],
+          edited_at: null,
+        }
+      : info;
   }
   editMessage(user: User, id: string, input: Record<string, unknown>) {
     this.active(user.id);
@@ -972,6 +1062,7 @@ export class Store {
           id,
         );
       this.federationHooks?.message(this.message(id), "Update", user);
+      this.xmppHooks?.message(this.message(id), "Update");
       this.audit(user.id, "message.edit", id);
     });
     return this.message(id);
@@ -989,8 +1080,521 @@ export class Store {
         )
         .run(now(), id);
       this.federationHooks?.message(this.message(id), "Delete", user);
+      this.xmppHooks?.message(this.message(id), "Delete");
       this.audit(user.id, "message.delete", id);
     });
+  }
+  // ---- direct messages: one row per reader, so each side keeps its own copy ----
+  userBlocks(user: User) {
+    this.active(user.id);
+    return (
+      this.db
+        .prepare("SELECT peer FROM user_blocks WHERE user_id=? ORDER BY peer")
+        .all(user.id) as { peer: string }[]
+    ).map((row) => row.peer);
+  }
+  isUserBlocked(userId: string, peer: string) {
+    return !!this.db
+      .prepare("SELECT 1 FROM user_blocks WHERE user_id=? AND peer=?")
+      .get(userId, peer);
+  }
+  setUserBlock(user: User, peerValue: unknown, blocked: unknown) {
+    this.active(user.id);
+    const peer = this.peerInfo(text(peerValue, "User", 2048)).peer;
+    if (peer === this.actorOf(user.id))
+      throw new Problem(400, "You can't block yourself.");
+    if (typeof blocked !== "boolean")
+      throw new Problem(400, "Choose a boolean block status.");
+    if (blocked)
+      this.db
+        .prepare("INSERT OR IGNORE INTO user_blocks VALUES(?,?)")
+        .run(user.id, peer);
+    else
+      this.db
+        .prepare("DELETE FROM user_blocks WHERE user_id=? AND peer=?")
+        .run(user.id, peer);
+    return { peer, blocked };
+  }
+  private actorOf(id: string) {
+    return `${this.baseUrl}/actors/users/${id}`;
+  }
+  private localPeer(peer: string) {
+    const prefix = this.actorOf("");
+    return peer.startsWith(prefix) ? peer.slice(prefix.length) : null;
+  }
+  private directAccess(user: User, peer: string): DirectAccess {
+    if (this.isUserBlocked(user.id, peer))
+      return {
+        incoming: true,
+        outgoing: true,
+        blocked: "You blocked this user. Unblock them from their name menu to send direct messages.",
+      };
+    const local = this.localPeer(peer);
+    if (peer.startsWith("xmpp:")) return this.xmppHooks?.access(user, peer) || {
+      incoming: false, outgoing: false, blocked: "XMPP is disabled on this instance.",
+    };
+    if (local !== null) {
+      const target = this.db
+        .prepare("SELECT * FROM users WHERE id=? AND remote_actor IS NULL")
+        .get(local) as unknown as User | undefined;
+      return {
+        incoming: true,
+        outgoing: true,
+        blocked:
+          !target || target.banned || target.admission_status !== "approved" ||
+          this.isUserBlocked(target.id, this.actorOf(user.id))
+            ? "This member can no longer receive direct messages."
+            : target.id === user.id
+              ? "You can't send a direct message to yourself."
+              : null,
+      };
+    }
+    return (
+      this.federationHooks?.direct(user, peer) || {
+        incoming: false,
+        outgoing: false,
+        blocked: "Federation is disabled on this instance.",
+      }
+    );
+  }
+  private contactName(user: User, peer: string) {
+    return (this.db.prepare("SELECT display_name FROM contact_names WHERE user_id=? AND peer=?")
+      .get(user.id, peer) as { display_name: string } | undefined)?.display_name ?? null;
+  }
+  setContactName(user: User, peerValue: unknown, value: unknown) {
+    const me = this.active(user.id), peer = text(peerValue, "User", 2048);
+    const localDomain = this.db.prepare("SELECT value FROM instance_settings WHERE key='xmpp_domain'").get()?.value;
+    if (!this.peerIdentity(peer).remote || (localDomain && peer.startsWith("xmpp:") && peer.slice(peer.lastIndexOf("@") + 1) === localDomain))
+      throw new Problem(400, "Contact names can only be set for users on other hosts.");
+    if (value !== null && typeof value !== "string")
+      throw new Problem(400, "Display name must be text or null.");
+    const name = value === null || !value.trim() ? null : text(value, "Display name", 80);
+    if (name === null)
+      this.db.prepare("DELETE FROM contact_names WHERE user_id=? AND peer=?").run(me.id, peer);
+    else
+      this.db.prepare("INSERT INTO contact_names VALUES(?,?,?) ON CONFLICT(user_id,peer) DO UPDATE SET display_name=excluded.display_name")
+        .run(me.id, peer, name);
+    return this.peerInfo(peer, me);
+  }
+  peerInfo(peer: string, viewer?: User) {
+    const info = this.peerIdentity(peer);
+    const contact_name = viewer && info.remote ? this.contactName(viewer, peer) : null;
+    return { ...info, display_name: contact_name ?? info.display_name, contact_name };
+  }
+  private peerIdentity(peer: string) {
+    if (peer.startsWith("xmpp:") && /^xmpp:[^@/:\s]+@[a-z0-9.-]+$/.test(peer)) {
+      const address = peer.slice(5);
+      return { peer, id: peer, username: address, display_name: address, avatar_url: null, remote: true };
+    }
+    const local = this.localPeer(peer);
+    const user = (
+      local !== null
+        ? this.db
+            .prepare("SELECT * FROM users WHERE id=? AND remote_actor IS NULL")
+            .get(local)
+        : this.db.prepare("SELECT * FROM users WHERE remote_actor=?").get(peer)
+    ) as unknown as User | undefined;
+    if (user)
+      return {
+        peer,
+        id: user.id,
+        username: user.username,
+        display_name: user.display_name,
+        avatar_url: this.avatarUrl(user.id),
+        remote: local === null,
+      };
+    if (local !== null) throw new Problem(404, "User not found.");
+    let host: string;
+    try {
+      const url = new URL(peer);
+      if (!["http:", "https:"].includes(url.protocol)) throw new Error();
+      host = url.host;
+    } catch {
+      throw new Problem(400, "Invalid direct message address.");
+    }
+    // Someone written to but never heard from is only known by their actor document.
+    const cached = this.db
+      .prepare("SELECT document FROM federation_actors WHERE id=?")
+      .get(peer) as { document: string } | undefined;
+    const actor = cached ? JSON.parse(cached.document) : {};
+    const name =
+      String(actor.preferredUsername || "")
+        .replace(/[^a-zA-Z0-9._-]/g, "")
+        .slice(0, 40) || "remote";
+    return {
+      peer,
+      id: peer,
+      username: `${name}@${host}`,
+      display_name: String(actor.name || name).slice(0, 80),
+      avatar_url: null,
+      remote: true,
+    };
+  }
+  // Who an address typed by a member means here; null when it names another instance.
+  localRecipient(value: unknown) {
+    const input = text(value, "Recipient", 2048);
+    const id = this.localPeer(input);
+    if (id !== null) return this.user(id).id;
+    if (input.includes("://")) return null;
+    const clean = input.replace(/^@/, ""),
+      at = clean.lastIndexOf("@");
+    if (at > 0 && clean.slice(at + 1) !== new URL(this.baseUrl).host)
+      return null;
+    const name = at > 0 ? clean.slice(0, at) : clean;
+    const found = this.db
+      .prepare("SELECT id FROM users WHERE username=? AND remote_actor IS NULL")
+      .get(name) as { id: string } | undefined;
+    if (!found)
+      throw new Problem(404, `Nobody here is called @${name.slice(0, 80)}.`);
+    return found.id;
+  }
+  sendDirect(user: User, targetId: string, bodyValue: unknown) {
+    const sender = this.active(user.id),
+      target = this.user(targetId);
+    const blocked = this.directAccess(sender, this.actorOf(target.id)).blocked;
+    if (blocked) throw new Problem(target.id === sender.id ? 400 : 403, blocked);
+    const body = text(bodyValue, "Message", 8000),
+      tags = JSON.stringify(this.messageEmojiTags(sender, body)),
+      at = now();
+    const insert = this.db.prepare(
+      "INSERT INTO direct_messages(id,user_id,peer,direction,body,emoji_tags,created_at) VALUES(?,?,?,?,?,?,?)",
+    );
+    const outgoingId = randomUUID();
+    const incomingId = randomUUID();
+    this.transaction(() => {
+      insert.run(
+        outgoingId,
+        sender.id,
+        this.actorOf(target.id),
+        "outgoing",
+        body,
+        tags,
+        at,
+      );
+      insert.run(
+        incomingId,
+        target.id,
+        this.actorOf(sender.id),
+        "incoming",
+        body,
+        tags,
+        at,
+      );
+      this.db.prepare("UPDATE direct_messages SET xmpp_source_id=? WHERE id=? OR id=?")
+        .run(outgoingId, outgoingId, incomingId);
+      this.xmppHooks?.direct(outgoingId, sender, target);
+    });
+    return { peer: this.actorOf(target.id), id: outgoingId };
+  }
+  private mark(userId: string, target: string) {
+    return (
+      this.db
+        .prepare("SELECT seq FROM read_marks WHERE user_id=? AND target=?")
+        .get(userId, target) as { seq: number } | undefined
+    )?.seq;
+  }
+  conversations(user: User) {
+    const me = this.active(user.id);
+    const peers = this.db
+      .prepare(
+        "SELECT peer FROM direct_messages WHERE user_id=? GROUP BY peer ORDER BY MAX(seq) DESC LIMIT 200",
+      )
+      .all(me.id) as unknown as { peer: string }[];
+    return peers.flatMap(({ peer }) => {
+      const access = this.directAccess(me, peer);
+      const last = this.db
+        .prepare(
+          "SELECT seq,created_at FROM direct_messages WHERE user_id=? AND peer=? AND ((direction='outgoing' AND ?=1) OR (direction='incoming' AND ?=1)) ORDER BY seq DESC LIMIT 1",
+        )
+        .get(me.id, peer, Number(access.outgoing), Number(access.incoming)) as
+        | { seq: number; created_at: string }
+        | undefined;
+      if (!last) return [];
+      return [
+        {
+          ...this.peerInfo(peer, me),
+          last_seq: last.seq,
+          last_at: last.created_at,
+          unread: this.isUserBlocked(me.id, peer) ? 0 : Number(
+            this.db
+              .prepare(
+                "SELECT COUNT(*) AS n FROM direct_messages WHERE user_id=? AND peer=? AND direction='incoming' AND ?=1 AND seq>?",
+              )
+              .get(
+                me.id,
+                peer,
+                Number(access.incoming),
+                this.mark(me.id, `dm:${peer}`) ?? 0,
+              )?.n,
+          ),
+        },
+      ];
+    });
+  }
+  // Shaped like channel messages, so the same conversation view shows both.
+  private directInfo(
+    me: User,
+    info: ReturnType<Store["peerInfo"]>,
+    row: DirectRow,
+  ) {
+    const author = row.direction === "outgoing" ? me : info;
+    return {
+      id: `dm-${row.seq}`,
+      seq: row.seq,
+      author_id: author.id,
+      username: author.username,
+      display_name: author.display_name,
+      author_actor_url:
+        row.direction === "outgoing" ? this.actorOf(me.id) : info.peer,
+      avatar_url: row.direction === "outgoing" ? this.avatarUrl(me.id) : info.avatar_url,
+      body: row.body,
+      title: null,
+      parent_id: null,
+      topic_id: null,
+      created_at: row.created_at,
+      deleted_at: null,
+      edited_at: null,
+      emojis: this.liveEmojis(row.emoji_tags),
+    };
+  }
+  directHistory(user: User, peerValue: unknown, before?: number) {
+    const me = this.active(user.id),
+      info = this.peerInfo(text(peerValue, "Recipient", 2048), me),
+      access = this.directAccess(me, info.peer);
+    const messages = (
+      this.db
+        .prepare(
+          "SELECT * FROM direct_messages WHERE user_id=? AND peer=? AND seq<? AND ((direction='outgoing' AND ?=1) OR (direction='incoming' AND ?=1)) ORDER BY seq DESC LIMIT 100",
+        )
+        .all(
+          me.id,
+          info.peer,
+          before ?? Number.MAX_SAFE_INTEGER,
+          Number(access.outgoing),
+          Number(access.incoming),
+        ) as unknown as DirectRow[]
+    )
+      .reverse()
+      .map((row) => this.directInfo(me, info, row));
+    return {
+      conversation: { ...info, blocked: access.blocked },
+      messages,
+      older_cursor: messages.length === 100 ? messages[0].seq : null,
+    };
+  }
+
+  // ---- what is new: a mark per reader and conversation, at the last message seen ----
+  // Joining starts from here: what was said before is not news.
+  startReading(userId: string, channelId: string) {
+    this.db
+      .prepare(
+        "INSERT OR IGNORE INTO read_marks VALUES(?,?,(SELECT COALESCE(MAX(seq),0) FROM messages))",
+      )
+      .run(userId, channelId);
+  }
+  private channelMark(userId: string, channelId: string) {
+    this.startReading(userId, channelId);
+    return this.mark(userId, channelId)!;
+  }
+  private joined(user: User) {
+    return (
+      this.db
+        .prepare(
+          "SELECT c.* FROM channels c JOIN memberships m ON m.channel_id=c.id WHERE m.user_id=? ORDER BY c.name",
+        )
+        .all(user.id) as unknown as Channel[]
+    ).filter((c) => this.readable(user, c));
+  }
+  private unreadWhere =
+    "m.channel_id=? AND m.seq>? AND m.author_id!=? AND m.deleted_at IS NULL AND m.history_placeholder=0 AND (m.remote_object IS NULL OR ?=1) AND NOT EXISTS (SELECT 1 FROM user_blocks b JOIN users author ON author.id=m.author_id WHERE b.user_id=? AND b.peer=COALESCE(author.remote_actor,?||author.id))";
+  overview(user: User) {
+    const me = this.active(user.id),
+      unread: Record<string, number> = {};
+    for (const c of this.joined(me)) {
+      const n = Number(
+        this.db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM messages m WHERE ${this.unreadWhere}`,
+          )
+          .get(
+            c.id,
+            this.channelMark(me.id, c.id),
+            me.id,
+            Number(!!me.federation_receive),
+            me.id,
+            this.actorOf(""),
+          )?.n,
+      );
+      if (n) unread[c.id] = n;
+    }
+    return {
+      dms: this.conversations(me),
+      unread,
+      layout: this.layout(me),
+      user_blocks: this.userBlocks(me),
+    };
+  }
+  inbox(user: User) {
+    const me = this.active(user.id);
+    const channels = this.joined(me).filter((c) => {
+      try { this.requireRead(me, c); return true; }
+      catch (error) {
+        if (error instanceof Problem && error.status === 403) return false;
+        throw error;
+      }
+    }).flatMap((c) =>
+      (
+        this.db
+          .prepare(
+            `SELECT m.*,u.username,u.display_name,t.title AS topic_title FROM messages m JOIN users u ON u.id=m.author_id LEFT JOIN topics t ON t.id=m.topic_id WHERE ${this.unreadWhere} ORDER BY m.seq DESC LIMIT 50`,
+          )
+          .all(
+            c.id,
+            this.channelMark(me.id, c.id),
+            me.id,
+            Number(!!me.federation_receive),
+            me.id,
+            this.actorOf(""),
+          ) as unknown as Message[]
+      ).map((m) => ({
+        ...this.messageInfo(m, me),
+        kind: "channel" as const,
+        target: c.id,
+        channel: {
+          id: c.id,
+          name: c.name,
+          mode: c.mode,
+          visibility: c.visibility,
+          remote_actor: c.remote_actor,
+        },
+      })),
+    );
+    const directs = this.conversations(me)
+      .filter((conversation) => conversation.unread)
+      .flatMap((conversation) =>
+        (
+          this.db
+            .prepare(
+              "SELECT * FROM direct_messages WHERE user_id=? AND peer=? AND direction='incoming' AND seq>? ORDER BY seq DESC LIMIT 50",
+            )
+            .all(
+              me.id,
+              conversation.peer,
+              this.mark(me.id, `dm:${conversation.peer}`) ?? 0,
+            ) as unknown as DirectRow[]
+        ).map((row) => ({
+          ...this.directInfo(me, conversation, row),
+          kind: "dm" as const,
+          target: `dm:${conversation.peer}`,
+          conversation,
+        })),
+      );
+    const at = (value: string) => Date.parse(value) || 0;
+    return [...channels, ...directs]
+      .sort((a, b) => at(b.created_at) - at(a.created_at))
+      .slice(0, 200);
+  }
+  // Marks a conversation read up to seq (or its end), or everything of a kind.
+  markRead(user: User, input: Record<string, unknown>) {
+    const me = this.active(user.id);
+    const set = (target: string, latest: number, upTo?: number) =>
+      this.db
+        .prepare(
+          "INSERT INTO read_marks VALUES(?,?,?) ON CONFLICT(user_id,target) DO UPDATE SET seq=MAX(seq,excluded.seq)",
+        )
+        .run(me.id, target, Math.min(upTo ?? latest, latest));
+    const latestIn = (channelId: string) =>
+      Number(
+        this.db
+          .prepare(
+            "SELECT COALESCE(MAX(seq),0) AS n FROM messages WHERE channel_id=?",
+          )
+          .get(channelId)?.n,
+      );
+    const latestWith = (peer: string) =>
+      Number(
+        this.db
+          .prepare(
+            "SELECT COALESCE(MAX(seq),0) AS n FROM direct_messages WHERE user_id=? AND peer=?",
+          )
+          .get(me.id, peer)?.n,
+      );
+    if (input.all !== undefined) {
+      const kind = choice(input.all, ["all", "channels", "dms"], "kind");
+      this.transaction(() => {
+        if (kind !== "dms")
+          for (const c of this.joined(me)) set(c.id, latestIn(c.id));
+        if (kind !== "channels")
+          for (const c of this.conversations(me))
+            set(`dm:${c.peer}`, latestWith(c.peer));
+      });
+      return;
+    }
+    const target = text(input.target, "Conversation", 2100);
+    if (
+      input.seq !== undefined &&
+      (!Number.isSafeInteger(input.seq) || (input.seq as number) < 0)
+    )
+      throw new Problem(400, "Invalid read position.");
+    const seq = input.seq as number | undefined;
+    if (target.startsWith("dm:")) {
+      set(target, latestWith(target.slice(3)), seq);
+      return;
+    }
+    if (!this.role(this.channel(target).id, me.id))
+      throw new Problem(403, "Join this channel first.");
+    set(target, latestIn(target), seq);
+  }
+
+  // ---- the sidebar as its reader arranged it ----
+  layout(user: User) {
+    const saved = this.db
+      .prepare("SELECT layout FROM sidebar_layouts WHERE user_id=?")
+      .get(user.id) as { layout: string } | undefined;
+    return saved ? JSON.parse(saved.layout) : null;
+  }
+  setLayout(user: User, input: Record<string, unknown>) {
+    const me = this.active(user.id);
+    const ids = (value: unknown) =>
+      Array.isArray(value)
+        ? [
+            ...new Set(
+              value.filter(
+                (id): id is string =>
+                  typeof id === "string" && !!id && id.length <= 2100,
+              ),
+            ),
+          ].slice(0, 500)
+        : [];
+    const section = (value: unknown) => {
+      const v = (value && typeof value === "object" ? value : {}) as Record<
+        string,
+        unknown
+      >;
+      const groups = Array.isArray(v.groups) ? v.groups : [];
+      if (groups.length > 50)
+        throw new Problem(400, "A section holds up to 50 groups.");
+      return {
+        collapsed: v.collapsed === true,
+        items: ids(v.items),
+        groups: groups.map((g) => ({
+          id: text(g?.id, "Group ID", 40),
+          name: text(g?.name, "Group name", 40),
+          collapsed: g?.collapsed === true,
+          items: ids(g?.items),
+        })),
+      };
+    };
+    const layout = {
+      dms: section(input.dms),
+      channels: section(input.channels),
+    };
+    this.db
+      .prepare(
+        "INSERT INTO sidebar_layouts VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET layout=excluded.layout",
+      )
+      .run(me.id, JSON.stringify(layout));
+    return layout;
   }
   updateProfile(user: User, input: Record<string, unknown>) {
     this.active(user.id);
@@ -1000,6 +1604,32 @@ export class Store {
     this.db
       .prepare("UPDATE users SET display_name=?,share_socials=? WHERE id=?")
       .run(name, Number(input.share_socials), user.id);
+    return this.profile(this.user(user.id), true);
+  }
+  avatarUrl(userId: string) {
+    const row = this.db
+      .prepare("SELECT revision FROM user_avatars WHERE user_id=?")
+      .get(userId) as { revision: string } | undefined;
+    return row ? `/api/avatars/${userId}?v=${row.revision}` : null;
+  }
+  avatarImage(userId: string) {
+    const row = this.db
+      .prepare("SELECT mime,image FROM user_avatars WHERE user_id=?")
+      .get(userId) as { mime: string; image: Uint8Array } | undefined;
+    if (!row) throw new Problem(404, "Profile picture not found.");
+    return row;
+  }
+  setAvatar(user: User, encoded: unknown) {
+    this.active(user.id);
+    const { image, mime } = decodeRasterImage(encoded, 2097152, "profile picture");
+    this.db
+      .prepare("INSERT INTO user_avatars VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET revision=excluded.revision,mime=excluded.mime,image=excluded.image")
+      .run(user.id, randomUUID(), mime, image);
+    return this.profile(this.user(user.id), true);
+  }
+  removeAvatar(user: User) {
+    this.active(user.id);
+    this.db.prepare("DELETE FROM user_avatars WHERE user_id=?").run(user.id);
     return this.profile(this.user(user.id), true);
   }
   directory(user: User) {

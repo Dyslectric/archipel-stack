@@ -1,21 +1,25 @@
 import { Problem } from "./store.js";
 export function decodeEmojiImage(encoded: unknown) {
+  return decodeRasterImage(encoded, 262144, "emoji");
+}
+export function decodeRasterImage(encoded: unknown, maxBytes: number, label: string) {
+  const limit = maxBytes >= 1048576 ? `${maxBytes / 1048576} MiB` : `${maxBytes / 1024} KiB`;
   if (
     typeof encoded !== "string" ||
-    encoded.length > 350000 ||
+    encoded.length > Math.ceil(maxBytes / 3) * 4 ||
     !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)
   )
     throw new Problem(
       400,
-      "Upload a PNG, JPEG, GIF or WebP image up to 256 KiB.",
+      `Upload a PNG, JPEG, GIF or WebP image up to ${limit}.`,
     );
   const image = Buffer.from(encoded, "base64");
   if (
     !image.length ||
-    image.length > 262144 ||
+    image.length > maxBytes ||
     image.toString("base64") !== encoded
   )
-    throw new Problem(400, "Invalid image or image exceeds 256 KiB.");
+    throw new Problem(400, `Invalid image or image exceeds ${limit}.`);
   let mime = "";
   if (
     image.length >= 24 &&
@@ -46,7 +50,7 @@ export function decodeEmojiImage(encoded: unknown) {
   if (!mime)
     throw new Problem(
       400,
-      "Only PNG, JPEG, GIF and WebP emoji images are supported.",
+      `Only PNG, JPEG, GIF and WebP ${label} images are supported.`,
     );
   return { image, mime };
 }

@@ -94,6 +94,26 @@ export class Federation {
         )
           this.relay(message, type, user);
       },
+      direct: (user, peer) => {
+        let reachable = true;
+        try {
+          this.allowed(peer);
+        } catch {
+          reachable = false;
+        }
+        const on = this.enabled();
+        return {
+          incoming: reachable && on && !!user.federation_receive,
+          outgoing: reachable,
+          blocked: !on
+            ? "Federation is disabled on this instance."
+            : !reachable
+              ? "This remote instance or member is blocked."
+              : !user.federation_send
+                ? "Your administrator has not allowed your account to send federated messages."
+                : null,
+        };
+      },
     };
   }
   enabled() {
@@ -839,6 +859,8 @@ export class Federation {
       throw new Problem(400, "Direct messages need a remote user actor.");
     this.require(user, "federation_send");
     this.allowed(peer.id);
+    if (this.store.isUserBlocked(user.id, peer.id))
+      throw new Problem(403, "You blocked this user.");
     const body = text(bodyValue, "Message", 8000),
       id = `${this.config.baseUrl}/federation/objects/${randomUUID()}`,
       emojis = this.store.messageEmojiTags(user, body);
@@ -885,6 +907,14 @@ export class Federation {
       );
       return { id, activity, body, peer: peer.id };
     });
+  }
+  // Finds the person behind an address, so a conversation with them can be opened.
+  async resolveDirect(user: User, value: unknown) {
+    this.require(user, "federation_send");
+    const peer = await this.resolve(value);
+    if (peer.type !== "Person")
+      throw new Problem(400, "Direct messages need a remote user actor.");
+    return this.store.peerInfo(peer.id);
   }
   directMessages(user: User): Doc[] {
     this.store.active(user.id);
@@ -1672,6 +1702,7 @@ export class Federation {
           this.store.db
             .prepare("INSERT OR IGNORE INTO memberships VALUES(?,?,'member')")
             .run(channel.id, sub.user_id);
+          this.store.startReading(sub.user_id, channel.id);
         } else
           this.store.db
             .prepare("DELETE FROM memberships WHERE channel_id=? AND user_id=?")
@@ -1758,6 +1789,8 @@ export class Federation {
           object.to[0].slice(`${this.config.baseUrl}/actors/users/`.length),
         );
         this.require(user, "federation_receive");
+        if (this.store.isUserBlocked(user.id, sender.id))
+          throw new Problem(403, "This member cannot receive this direct message.");
         this.store.active(this.remoteUser(sender).id);
         const existing = this.store.db
           .prepare(
@@ -1844,8 +1877,11 @@ export class Federation {
       this.require(user!, "federation_subscribe");
       if (!this.store.role(channel!.id, user!.id))
         throw new Problem(403, "No longer subscribed.");
-    } else if (outgoing.purpose === "direct")
+    } else if (outgoing.purpose === "direct") {
       this.require(user!, "federation_send");
+      if (this.store.isUserBlocked(user!.id, recipient))
+        throw new Problem(403, "You blocked this user.");
+    }
     else throw new Problem(400, "Unknown delivery purpose.");
   }
   async tick() {

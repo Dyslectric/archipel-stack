@@ -1,0 +1,409 @@
+import {
+  $$,
+  action,
+  api,
+  avatar,
+  channelIcon,
+  dmHref,
+  esc,
+  icon,
+  modeLabel,
+  popup,
+  promptDialog,
+  state,
+  type Channel,
+  type Conversation,
+  type Layout,
+  type SideGroup,
+  type SideKind,
+  type SideSection,
+} from "./shared.js";
+import { chatChannel, chatTopic, sortedTopics } from "./chat.js";
+
+// The sidebar: direct messages, then channels. Each half folds away, and its conversations can be
+// put in named groups and reordered, by dragging or from the menu on each row. The arrangement is
+// kept with the account (state.layout), so it follows the reader to other browsers.
+const titles: Record<SideKind, string> = {
+  dms: "Direct messages",
+  channels: "Channels",
+};
+let html = "",
+  saving = 0;
+let drag: { type: "item" | "group"; kind: SideKind; id: string } | null = null;
+
+const kindOf = (id: string): SideKind =>
+  id.startsWith("dm:") ? "dms" : "channels";
+// What is new, leaving out the conversation on screen: that one is being read.
+const unread = (id: string) =>
+  chatChannel()?.id === id ? 0 : state.unread[id] || 0;
+const count = (n: number, label = "new") =>
+  n
+    ? `<span class="count" aria-label="${n} ${label}">${n > 99 ? "99+" : n}</span>`
+    : "";
+export function unreadTotal() {
+  return Object.keys(state.unread).reduce((n, id) => n + unread(id), 0);
+}
+
+// ---- what there is to show ----
+function conversations(): Conversation[] {
+  const open = chatChannel()?.dm;
+  // A conversation just opened has no messages yet, but is listed while it's on screen.
+  return open && !state.dms.some((c) => c.peer === open.peer)
+    ? [open, ...state.dms]
+    : state.dms;
+}
+function available(kind: SideKind) {
+  return kind === "dms"
+    ? conversations().map((c) => `dm:${c.peer}`)
+    : state.channels.filter((c) => c.role).map((c) => c.id);
+}
+// The saved arrangement with every current conversation somewhere in it: new direct messages
+// go on top, newly joined channels at the end.
+function placed(kind: SideKind): SideSection {
+  const saved = state.layout?.[kind];
+  const section: SideSection = {
+    collapsed: !!saved?.collapsed,
+    items: [...(saved?.items || [])],
+    groups: (saved?.groups || []).map((g) => ({ ...g, items: [...g.items] })),
+  };
+  const have = new Set([
+    ...section.items,
+    ...section.groups.flatMap((g) => g.items),
+  ]);
+  const fresh = available(kind).filter((id) => !have.has(id));
+  section.items =
+    kind === "dms"
+      ? [...fresh, ...section.items]
+      : [...section.items, ...fresh];
+  return section;
+}
+function save(kind: SideKind, section: SideSection) {
+  const other: SideKind = kind === "dms" ? "channels" : "dms";
+  const layout = { [kind]: section, [other]: placed(other) } as Layout;
+  state.layout = layout;
+  renderSidebar();
+  saving++;
+  action(async () => {
+    try {
+      await api("/sidebar", "PUT", layout);
+    } finally {
+      saving--;
+    }
+  });
+}
+// The server's copy, unless a change made here is still on its way there.
+export function adoptLayout(layout: Layout | null) {
+  if (!saving) state.layout = layout;
+}
+
+// ---- changes ----
+const listOf = (section: SideSection, group: string) =>
+  group ? section.groups.find((g) => g.id === group)?.items : section.items;
+function moveItem(id: string, group: string, before: string | null) {
+  const kind = kindOf(id),
+    section = placed(kind);
+  if (before === id) return;
+  section.items = section.items.filter((x) => x !== id);
+  for (const g of section.groups) g.items = g.items.filter((x) => x !== id);
+  const list = listOf(section, group);
+  if (!list) return;
+  const at = before ? list.indexOf(before) : -1;
+  list.splice(at < 0 ? list.length : at, 0, id);
+  save(kind, section);
+}
+// One place up or down among the rows that are showing.
+function stepItem(id: string, by: 1 | -1) {
+  const kind = kindOf(id),
+    section = placed(kind),
+    shown = new Set(available(kind));
+  const group = section.groups.find((g) => g.items.includes(id));
+  const list = (group ? group.items : section.items).filter((x) =>
+    shown.has(x),
+  );
+  const at = list.indexOf(id) + by;
+  if (at < 0 || at >= list.length) return;
+  moveItem(id, group?.id || "", by < 0 ? list[at] : list[at + 1] || null);
+}
+function moveGroup(kind: SideKind, id: string, before: string | null) {
+  const section = placed(kind),
+    group = section.groups.find((g) => g.id === id);
+  if (!group || before === id) return;
+  section.groups = section.groups.filter((g) => g !== group);
+  const at = before ? section.groups.findIndex((g) => g.id === before) : -1;
+  section.groups.splice(at < 0 ? section.groups.length : at, 0, group);
+  save(kind, section);
+}
+function fold(kind: SideKind, group: string) {
+  const section = placed(kind),
+    target = group ? section.groups.find((g) => g.id === group) : section;
+  if (!target) return;
+  target.collapsed = !target.collapsed;
+  save(kind, section);
+}
+async function newGroup(kind: SideKind, firstItem?: string) {
+  const name = await promptDialog(
+    "New group",
+    `Group name, under ${titles[kind]}`,
+    "",
+    "Create group",
+  );
+  if (!name) return;
+  const section = placed(kind),
+    group: SideGroup = {
+      id: crypto.randomUUID(),
+      name,
+      collapsed: false,
+      items: [],
+    };
+  section.groups.push(group);
+  section.collapsed = false;
+  save(kind, section);
+  if (firstItem) moveItem(firstItem, group.id, null);
+}
+
+// ---- the markup ----
+function channelRow(c: Channel) {
+  const open = chatChannel(),
+    narrow = chatTopic(),
+    on = open?.id === c.id;
+  const topics =
+    on && c.mode === "topical" && open!.topics?.length
+      ? `<div class="topic-list">${sortedTopics()
+          .map(
+            (t) =>
+              `<a class="topic-link${narrow === t.id ? " on" : ""}" href="#/c/${c.id}/t/${t.id}"${narrow === t.id ? ' aria-current="page"' : ""}>${esc(t.title)}</a>`,
+          )
+          .join("")}</div>`
+      : "";
+  return {
+    name: `#${c.name}`,
+    extra: topics,
+    link: `<a class="channel-link${on && !narrow ? " on" : ""}" draggable="false" href="#/c/${c.id}"${on && !narrow ? ' aria-current="page"' : ""} data-channel="${c.id}">${channelIcon(c)}<span class="grow">${esc(c.name)}</span>${c.mode !== "timeline" ? `<span class="mode-tag">${modeLabel(c.mode)}</span>` : ""}${count(unread(c.id))}</a>`,
+  };
+}
+function dmRow(c: Conversation) {
+  const on = chatChannel()?.id === `dm:${c.peer}`;
+  return {
+    name: c.display_name,
+    extra: "",
+    link: `<a class="channel-link dm-link${on ? " on" : ""}" draggable="false" href="${esc(dmHref(c.peer))}"${on ? ' aria-current="page"' : ""} title="@${esc(c.username)}">${avatar(c, "small")}<span class="grow">${esc(c.display_name)}</span>${c.remote ? `<span class="mode-tag">${icon("globe")}</span>` : ""}${count(unread(`dm:${c.peer}`))}</a>`,
+  };
+}
+function sectionHtml(kind: SideKind) {
+  const section = placed(kind);
+  const rows = new Map(
+    kind === "dms"
+      ? conversations().map((c) => [`dm:${c.peer}`, dmRow(c)] as const)
+      : state.channels
+          .filter((c) => c.role)
+          .map((c) => [c.id, channelRow(c)] as const),
+  );
+  const items = (ids: string[]) =>
+    ids
+      .filter((id) => rows.has(id))
+      .map((id) => {
+        const row = rows.get(id)!;
+        return `<div class="side-item" draggable="true" data-item="${esc(id)}"><div class="side-row">${row.link}<button type="button" class="icon-button row-menu" data-item-menu aria-haspopup="menu" aria-label="Organise ${esc(row.name)}" title="Move or group">${icon("more")}</button></div>${row.extra}</div>`;
+      })
+      .join("");
+  const news = (ids: string[]) =>
+    count(ids.reduce((n, id) => n + (rows.has(id) ? unread(id) : 0), 0));
+  const everything = [
+    ...section.items,
+    ...section.groups.flatMap((g) => g.items),
+  ];
+  const loose =
+    items(section.items) ||
+    (rows.size
+      ? ""
+      : `<p class="muted small side-empty">${kind === "dms" ? "Nobody yet. Start a conversation with the + above." : "Channels you join appear here."}</p>`);
+  const groups = section.groups
+    .map(
+      (g) =>
+        `<div class="side-group" data-group="${esc(g.id)}"><div class="group-head" draggable="true"><button type="button" class="side-toggle" data-fold="${esc(g.id)}" aria-expanded="${!g.collapsed}">${icon("chevron-down", "chev")}<span class="grow">${esc(g.name)}</span>${g.collapsed ? news(g.items) : ""}</button><button type="button" class="icon-button row-menu" data-group-menu aria-haspopup="menu" aria-label="Organise group ${esc(g.name)}" title="Rename, move or delete">${icon("more")}</button></div>
+        ${g.collapsed ? "" : `<div class="side-items" data-list="${esc(g.id)}">${items(g.items) || '<p class="muted small side-empty">Nothing in this group yet.</p>'}</div>`}</div>`,
+    )
+    .join("");
+  const looking =
+    kind === "channels" && chatChannel() && !chatChannel()!.role
+      ? `<div class="side-label">Looking at</div><div class="side-row">${channelRow(chatChannel()!).link}</div><div class="side-label">Joined</div>`
+      : "";
+  return `<section class="side-section" data-section="${kind}"><div class="side-head"><button type="button" class="side-toggle" data-fold="" aria-expanded="${!section.collapsed}">${icon("chevron-down", "chev")}<h2 class="grow">${titles[kind]}</h2>${section.collapsed ? news(everything) : ""}</button>
+    <button type="button" class="icon-button" data-new-group aria-label="New group in ${titles[kind].toLowerCase()}" title="New group">${icon("folder-plus")}</button>
+    ${kind === "dms" ? `<button type="button" class="icon-button" data-new-dm aria-label="New direct message" title="New direct message">${icon("plus")}</button>` : `<a class="icon-button" href="#/channels/new" aria-label="Create channel" title="Create channel">${icon("plus")}</a>`}</div>
+    ${section.collapsed ? "" : `${looking}<div class="side-items" data-list="">${loose}</div>${groups}`}</section>`;
+}
+export function renderSidebar() {
+  const badge = document.querySelector<HTMLElement>("#inbox-count");
+  if (badge) {
+    const n = unreadTotal();
+    badge.hidden = !n;
+    badge.textContent = n > 99 ? "99+" : String(n);
+  }
+  const list = document.querySelector("#channel-list");
+  if (!list || drag) return;
+  const next = sectionHtml("dms") + sectionHtml("channels");
+  if (next === html && list.childElementCount) return;
+  list.innerHTML = html = next;
+}
+
+// ---- menus ----
+const item = (name: string, label: string, ico: string, on = false) =>
+  `<button type="button" class="menu-item${on ? " on" : ""}" role="menuitem" data-do="${esc(name)}">${icon(ico)}<span class="grow">${esc(label)}</span>${on ? icon("check") : ""}</button>`;
+function itemMenu(button: HTMLElement) {
+  const id = button.closest<HTMLElement>("[data-item]")!.dataset.item!,
+    kind = kindOf(id),
+    section = placed(kind),
+    inGroup = section.groups.find((g) => g.items.includes(id));
+  const panel = popup(
+    button,
+    `<div class="menu-section" role="menu">${item("up", "Move up", "arrow-up")}${item("down", "Move down", "arrow-down")}</div>
+    <div class="menu-section" role="menu"><div class="menu-label">Group</div>${section.groups.map((g) => item(`to:${g.id}`, g.name, "folder", g === inGroup)).join("")}${inGroup ? item("to:", "No group", "x") : ""}${item("new", "New group…", "folder-plus")}</div>`,
+  );
+  panel?.addEventListener("click", (e) => {
+    const name = (e.target as Element).closest<HTMLElement>("[data-do]")
+      ?.dataset.do;
+    if (name === "up") stepItem(id, -1);
+    else if (name === "down") stepItem(id, 1);
+    else if (name === "new") void newGroup(kind, id);
+    else if (name?.startsWith("to:")) moveItem(id, name.slice(3), null);
+  });
+}
+function groupMenu(button: HTMLElement) {
+  const kind = button.closest<HTMLElement>("[data-section]")!.dataset
+      .section as SideKind,
+    id = button.closest<HTMLElement>("[data-group]")!.dataset.group!;
+  const panel = popup(
+    button,
+    `<div class="menu-section" role="menu">${item("rename", "Rename group", "pencil")}${item("up", "Move up", "arrow-up")}${item("down", "Move down", "arrow-down")}</div><div class="menu-section" role="menu">${item("delete", "Delete group", "trash")}</div>`,
+  );
+  panel?.addEventListener("click", (e) => {
+    const name = (e.target as Element).closest<HTMLElement>("[data-do]")
+        ?.dataset.do,
+      section = placed(kind),
+      at = section.groups.findIndex((g) => g.id === id),
+      group = section.groups[at];
+    if (!name || !group) return;
+    if (name === "up" && at > 0) moveGroup(kind, id, section.groups[at - 1].id);
+    else if (name === "down" && at < section.groups.length - 1)
+      moveGroup(kind, id, section.groups[at + 2]?.id || null);
+    else if (name === "delete") {
+      // Its conversations stay, loose again.
+      section.items.push(...group.items);
+      section.groups.splice(at, 1);
+      save(kind, section);
+    } else if (name === "rename")
+      void promptDialog("Rename group", "Group name", group.name).then(
+        (value) => {
+          const fresh = placed(kind),
+            target = fresh.groups.find((g) => g.id === id);
+          if (!value || !target) return;
+          target.name = value;
+          save(kind, fresh);
+        },
+      );
+  });
+}
+
+// ---- wiring: once per sidebar element ----
+export function wireSidebar(list: HTMLElement) {
+  html = "";
+  const sectionOf = (el: Element) =>
+    el.closest<HTMLElement>("[data-section]")?.dataset.section as
+      | SideKind
+      | undefined;
+  list.addEventListener("click", (e) => {
+    const at = e.target as Element;
+    let hit: HTMLElement | null;
+    if ((hit = at.closest<HTMLElement>("[data-fold]")))
+      fold(sectionOf(hit)!, hit.dataset.fold!);
+    else if ((hit = at.closest<HTMLElement>("[data-new-group]")))
+      void newGroup(sectionOf(hit)!);
+    else if ((hit = at.closest<HTMLElement>("[data-item-menu]"))) itemMenu(hit);
+    else if ((hit = at.closest<HTMLElement>("[data-group-menu]")))
+      groupMenu(hit);
+  });
+
+  // Dragging a row to another place or group, or a group's heading among the groups.
+  const clear = () => {
+    for (const el of $$(".drop-before, .drop-end, .dragging", list))
+      el.classList.remove("drop-before", "drop-end", "dragging");
+  };
+  // Where a drop at this point would land: the list (or group) it joins, and the row it goes before.
+  function target(e: DragEvent) {
+    if (!drag) return null;
+    const at = e.target as Element;
+    if (sectionOf(at) !== drag.kind) return null;
+    const before = (rows: HTMLElement[]) =>
+      rows.find((row) => {
+        const box = row.getBoundingClientRect();
+        return e.clientY < box.top + box.height / 2;
+      }) || null;
+    if (drag.type === "group") {
+      const section = at.closest<HTMLElement>("[data-section]")!,
+        row = before($$("[data-group]", section));
+      return { mark: row, end: section, group: "", before: row?.dataset.group };
+    }
+    const group = at.closest<HTMLElement>("[data-group]"),
+      inside =
+        at.closest<HTMLElement>("[data-list]") ||
+        group?.querySelector<HTMLElement>("[data-list]");
+    // A folded group takes the row at its end.
+    if (!inside)
+      return group
+        ? { mark: null, end: group, group: group.dataset.group!, before: null }
+        : null;
+    const row = before($$(":scope > [data-item]", inside));
+    return {
+      mark: row,
+      end: inside,
+      group: inside.dataset.list!,
+      before: row?.dataset.item,
+    };
+  }
+  list.addEventListener("dragstart", (e) => {
+    const at = e.target as Element,
+      row = at.closest<HTMLElement>("[data-item]"),
+      head = at.closest<HTMLElement>(".group-head"),
+      kind = sectionOf(at);
+    if (!kind || (!row && !head)) return;
+    drag = row
+      ? { type: "item", kind, id: row.dataset.item! }
+      : {
+          type: "group",
+          kind,
+          id: head!.closest<HTMLElement>("[data-group]")!.dataset.group!,
+        };
+    e.dataTransfer!.effectAllowed = "move";
+    e.dataTransfer!.setData("text/plain", (row || head)!.textContent || "");
+    (row || head!.parentElement)!.classList.add("dragging");
+  });
+  list.addEventListener("dragover", (e) => {
+    const to = target(e);
+    if (!to) return;
+    e.preventDefault();
+    e.dataTransfer!.dropEffect = "move";
+    const mark = to.mark || to.end,
+      cls = to.mark ? "drop-before" : "drop-end";
+    if (mark.classList.contains(cls)) return;
+    for (const el of $$(".drop-before, .drop-end", list))
+      el.classList.remove("drop-before", "drop-end");
+    mark.classList.add(cls);
+  });
+  list.addEventListener("drop", (e) => {
+    const to = target(e),
+      moved = drag;
+    if (!to || !moved) return;
+    e.preventDefault();
+    drag = null;
+    clear();
+    if (moved.type === "group")
+      moveGroup(moved.kind, moved.id, to.before || null);
+    else moveItem(moved.id, to.group, to.before || null);
+  });
+  list.addEventListener("dragend", () => {
+    drag = null;
+    clear();
+    renderSidebar();
+  });
+}

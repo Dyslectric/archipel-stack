@@ -105,6 +105,27 @@ function channel(i: Awaited<ReturnType<typeof instance>>, extra = {}) {
   return i.store.channel(c.id);
 }
 
+test("personal remote blocks reject incoming messages and cancel queued sends until unblocked", async (t) => {
+  const a = await instance(t), b = await instance(t);
+  const aPeer = `${a.origin}/actors/users/${a.bob.id}`;
+  const bPeer = `${b.origin}/actors/users/${b.bob.id}`;
+  await a.fed.sendDirect(a.bob, bPeer, "Queued before block");
+  a.store.setUserBlock(a.bob, bPeer, true);
+  await a.fed.tick();
+  assert.deepEqual(b.fed.directMessages(b.bob), []);
+  await assert.rejects(() => a.fed.sendDirect(a.bob, bPeer, "Blocked outgoing"), (e: unknown) => e instanceof Problem && e.status === 403);
+  await b.fed.sendDirect(b.bob, aPeer, "Blocked incoming");
+  await b.fed.tick();
+  assert.equal(a.store.db.prepare("SELECT COUNT(*) AS n FROM direct_messages WHERE direction='incoming'").get()?.n, 0);
+  a.store.setUserBlock(a.bob, bPeer, false);
+  await b.fed.sendDirect(b.bob, aPeer, "After unblock");
+  await a.fed.sendDirect(a.bob, bPeer, "Reply after unblock");
+  await a.fed.tick();
+  await b.fed.tick();
+  assert.ok(a.fed.directMessages(a.bob).some((m) => m.body === "After unblock"));
+  assert.ok(b.fed.directMessages(b.bob).some((m) => m.body === "Reply after unblock"));
+});
+
 test("two real instances subscribe, exchange signed messages, edit, delete, and deduplicate", async (t) => {
   const a = await instance(t),
     b = await instance(t);
@@ -326,6 +347,24 @@ test("queued deliveries persist and recheck disabled users and blocked instances
       .get()?.status,
     "cancelled",
   );
+});
+
+test("channel inbox hides cached remote content when federation or instance access is revoked", async (t) => {
+  const a = await instance(t), b = await instance(t);
+  const home = channel(a);
+  const sub = await b.fed.subscribe(b.bob, `#general@${new URL(a.origin).host}`);
+  await drain(a, b);
+  a.store.post(a.alice, home.id, { body: "Remote unread content" });
+  await drain(a, b);
+  assert.ok(b.store.inbox(b.bob).some(m => m.body === "Remote unread content"));
+  b.fed.setEnabled(b.alice, false);
+  assert.equal(b.store.inbox(b.bob).filter(m => m.kind === "channel").length, 0);
+  assert.throws(() => b.store.messages(b.bob, sub.channel.id), (e: unknown) => e instanceof Problem && e.status === 403);
+  b.fed.setEnabled(b.alice, true);
+  b.fed.block(b.alice, { kind: "instance", target: a.origin, blocked: true });
+  assert.equal(b.store.inbox(b.bob).filter(m => m.kind === "channel").length, 0);
+  b.fed.block(b.alice, { kind: "instance", target: a.origin, blocked: false });
+  assert.ok(b.store.inbox(b.bob).some(m => m.body === "Remote unread content"));
 });
 
 test("personal uploads and adopted remote emoji are copied, scoped, renamed and frozen in older messages", async (t) => {

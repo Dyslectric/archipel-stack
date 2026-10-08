@@ -4,7 +4,7 @@ services:
     labels:
       traefik.enable: "true"
       traefik.docker.network: ${PROXY_NETWORK:?Set PROXY_NETWORK}
-      traefik.http.routers.archipel.rule: "Host(`${TRAEFIK_HOST:?Set TRAEFIK_HOST}`)"
+      traefik.http.routers.archipel.rule: "Host(`${TRAEFIK_HOST:?Set TRAEFIK_HOST}`) && !PathPrefix(`/internal/`)"
       traefik.http.routers.archipel.entrypoints: ${TRAEFIK_ENTRYPOINT:-websecure}
       traefik.http.routers.archipel.tls: "true"
       traefik.http.routers.archipel.service: archipel

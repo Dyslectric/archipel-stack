@@ -181,10 +181,22 @@ removing someone from an active call needs a separate enforcement mechanism.
 
 ## Implementation boundaries and open choices
 
-Proposed: one backend process plus a delivery worker, a relational database,
-and a browser client. Keep identity, channels, moderation, federation, push,
-and calls as modules with explicit service boundaries. Avoid splitting them
-into separately deployed services at the outset.
+The current implementation has one backend process with an in-process delivery
+worker, a relational database, and a browser client. Keep identity, channels,
+moderation, federation, push, and calls as modules with explicit service boundaries.
+
+Implemented: Prosody hosts XMPP streams, authentication, routing and MUC presence,
+while Archipel retains its browser frontend, policy, authoritative archive, and
+ActivityPub support. The supported profile is documented in [xmpp.md](xmpp.md).
+The eventual distribution
+must be a single executable with its required application runtimes included.
+Proposed: that executable supervises a bundled Prosody child process; users do
+not have to deploy Prosody separately. Single-file distribution does not require
+both runtimes to share a process. Extraction and target-platform support remain
+packaging decisions to validate, not implemented capabilities.
+
+See [XMPP and standalone packaging](xmpp-packaging.md) for the proposed authority
+boundaries, account binding, deployment model, and acceptance criteria.
 
 The initial implementation uses Node 24, TypeScript, Express, built-in SQLite,
 and a Vite browser client. OIDC uses the same openid-client library family as
@@ -200,3 +212,7 @@ Resolve these product choices before their implementation milestone:
    an owner-authorized migration, or transparent failover.
 4. Whether topical and timeline modes should have any Lemmy/PieFed mapping.
 5. Retention, edits, attachment storage, and the extent of administrator inspection.
+6. Initial standalone operating-system/architecture targets and whether runtime
+   extraction is acceptable, or an executable that runs without extraction is needed.
+7. The Prosody integration mechanism and authority boundary for messages,
+   archives, and room membership, proven against the existing permission model.

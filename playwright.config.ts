@@ -27,6 +27,8 @@ export default defineConfig({
         PORT: "8790",
         HOST: "127.0.0.1",
         BASE_URL: "http://127.0.0.1:8790",
+        XMPP_DOMAIN: "chat.example",
+        XMPP_BRIDGE_SECRET: "browser-test-bridge-secret-with-43-characters-minimum",
         DATABASE_PATH: process.env.ARCHIPEL_E2E_DATABASE,
         OIDC_ISSUER: "",
         OIDC_CLIENT_ID: "",

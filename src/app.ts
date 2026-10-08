@@ -8,10 +8,11 @@ import { rateLimit, ipKeyGenerator } from "express-rate-limit";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { Config } from "./config.js";
-import { Problem, Store, type User } from "./store.js";
+import { Problem, Store, text, type User } from "./store.js";
 import { Federation } from "./federation.js";
 import { createOidc, OidcFailure, type OidcStage } from "./oidc.js";
 import { logSignInFailure } from "./auth-log.js";
+import { Xmpp } from "./xmpp.js";
 
 function cookie(req: Request, name: string) {
   const value = (req.headers.cookie || "")
@@ -29,8 +30,10 @@ export function createApp(config: Config, store: Store) {
   );
   store.initializeRegistration(config.registrationMode);
   const federation = new Federation(store, config);
+  const xmpp = new Xmpp(store, config);
   const app = express();
   app.locals.federation = federation;
+  app.locals.xmpp = xmpp;
   app.set(
     "trust proxy",
     config.trustedProxies.length ? config.trustedProxies : false,
@@ -57,6 +60,7 @@ export function createApp(config: Config, store: Store) {
     ["/api/admin/emojis", "/api/personal-emojis"],
     express.json({ limit: "360kb" }),
   );
+  app.use("/api/profile/avatar", express.json({ limit: "3mb" }));
   // Federation authenticates with signed requests; browser APIs keep Origin/CSRF.
   app.use(
     "/federation",
@@ -173,6 +177,8 @@ export function createApp(config: Config, store: Store) {
     res.type(image.mime).send(Buffer.from(image.image));
   });
   app.use(express.json({ limit: "64kb" }));
+  // Private bearer-authenticated adapter, before browser Origin/session checks.
+  app.use("/internal/xmpp", xmpp.internalRouter());
   app.use(
     ["/api", "/actors", "/objects"],
     rateLimit({
@@ -340,6 +346,14 @@ export function createApp(config: Config, store: Store) {
   app.get("/api/emojis", (_req, res) =>
     res.json(store.emojiCatalog(user(res))),
   );
+  app.get("/api/xmpp", (_req, res) => res.json(xmpp.status(user(res))));
+  app.post("/api/xmpp/credentials", (req, res) =>
+    res.status(201).json(xmpp.issue(user(res), req.body?.label)),
+  );
+  app.delete("/api/xmpp/credentials/:id", (req, res) => {
+    xmpp.revoke(user(res), String(req.params.id));
+    res.json({ ok: true });
+  });
   app.get("/api/emojis/:id/image", (req, res) => {
     const emoji = store.emojiImage(String(req.params.id));
     res.type(emoji.mime).send(Buffer.from(emoji.image));
@@ -425,6 +439,66 @@ export function createApp(config: Config, store: Store) {
         ),
       ),
   );
+  // Direct messages: members here are written to directly, anyone else through federation.
+  app.get("/api/dms/messages", (req, res) => {
+    const before =
+      req.query.before === undefined ? undefined : Number(req.query.before);
+    if (before !== undefined && (!Number.isSafeInteger(before) || before < 1))
+      throw new Problem(400, "Invalid message cursor.");
+    res.json(store.directHistory(user(res), req.query.peer, before));
+  });
+  app.get("/api/contact-names", (req, res) =>
+    res.json(store.peerInfo(text(req.query.peer, "User", 2048), user(res))),
+  );
+  app.post("/api/contact-names", (req, res) =>
+    res.json(store.setContactName(user(res), req.body?.peer, req.body?.display_name)),
+  );
+  app.post("/api/dms/resolve", async (req, res) => {
+    if (typeof req.body?.to === "string" && req.body.to.startsWith("xmpp:")) {
+      xmpp.enabled();
+      const target = xmpp.remoteJid(req.body.to);
+      res.json(target.endsWith(`@${config.xmppDomain}`)
+        ? store.peerInfo(`${config.baseUrl}/actors/users/${xmpp.local(target).id}`, user(res))
+        : store.peerInfo(`xmpp:${target}`, user(res)));
+      return;
+    }
+    const local = store.localRecipient(req.body?.to);
+    res.json(
+      local
+        ? store.peerInfo(`${config.baseUrl}/actors/users/${local}`, user(res))
+        : store.peerInfo((await federation.resolveDirect(user(res), req.body?.to)).peer, user(res)),
+    );
+  });
+  app.post("/api/dms", async (req, res) => {
+    if (typeof req.body?.to === "string" && req.body.to.startsWith("xmpp:")) {
+      xmpp.enabled();
+      res.status(201).json(xmpp.sendDirect(user(res), req.body.to, req.body?.body));
+      return;
+    }
+    const local = store.localRecipient(req.body?.to);
+    if (local) {
+      res.status(201).json(store.sendDirect(user(res), local, req.body?.body));
+      return;
+    }
+    const sent = await federation.sendDirect(
+      user(res),
+      req.body?.to,
+      req.body?.body,
+    );
+    res.status(202).json({ peer: sent.peer, queued: true });
+  });
+  app.get("/api/overview", (_req, res) => res.json(store.overview(user(res))));
+  app.post("/api/user-blocks", (req, res) =>
+    res.json(store.setUserBlock(user(res), req.body?.peer, req.body?.blocked)),
+  );
+  app.get("/api/inbox", (_req, res) => res.json(store.inbox(user(res))));
+  app.post("/api/read", (req, res) => {
+    store.markRead(user(res), req.body || {});
+    res.json({ ok: true });
+  });
+  app.put("/api/sidebar", (req, res) =>
+    res.json(store.setLayout(user(res), req.body || {})),
+  );
   app.patch("/api/channels/:id/federation", (req, res) =>
     res.json(
       federation.setChannel(
@@ -502,7 +576,7 @@ export function createApp(config: Config, store: Store) {
         403,
         "Receiving federated messages is disabled for this account.",
       );
-    res.json(message);
+    res.json(store.messageFor(user(res), message));
   });
   app.post("/api/logout", (req, res) => {
     store.logout(cookie(req, authCookie));
@@ -584,6 +658,17 @@ export function createApp(config: Config, store: Store) {
   app.patch("/api/profile", (req, res) =>
     res.json(store.updateProfile(user(res), req.body || {})),
   );
+  app.post("/api/profile/avatar", (req, res) =>
+    res.json(store.setAvatar(user(res), req.body?.image)),
+  );
+  app.delete("/api/profile/avatar", (_req, res) =>
+    res.json(store.removeAvatar(user(res))),
+  );
+  app.get("/api/avatars/:id", (req, res) => {
+    const picture = store.avatarImage(String(req.params.id));
+    res.setHeader("Cache-Control", "private, no-store");
+    res.type(picture.mime).send(Buffer.from(picture.image));
+  });
   app.patch("/api/admin/users/:id", (req, res) => {
     store.ban(user(res), String(req.params.id), req.body?.banned);
     res.json({ ok: true });

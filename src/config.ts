@@ -13,6 +13,8 @@ export interface Config {
   adminSubjects: string[];
   trustedProxies: string[];
   registrationMode: "open" | "invite_only";
+  xmppDomain: string;
+  xmppBridgeSecret: string;
 }
 
 export function isLoopback(host: string) {
@@ -20,6 +22,13 @@ export function isLoopback(host: string) {
 }
 
 export function loadConfig(env = process.env): Config {
+  const xmppDomain = env.XMPP_DOMAIN || "";
+  if (xmppDomain && (!/^[a-z0-9]+(?:[a-z0-9.-]*[a-z0-9])?$/.test(xmppDomain) ||
+      xmppDomain.length > 253 || xmppDomain.split(".").some(s => !s || s.length > 63 || s.startsWith("-") || s.endsWith("-"))))
+    throw new Error("XMPP_DOMAIN must be a lowercase DNS hostname");
+  const xmppBridgeSecret = env.XMPP_BRIDGE_SECRET || "";
+  if (xmppDomain && !/^[A-Za-z0-9_-]{43,128}$/.test(xmppBridgeSecret))
+    throw new Error("XMPP_BRIDGE_SECRET must be a random base64url secret of at least 43 characters");
   const registrationMode = env.REGISTRATION_MODE || "open";
   if (!["open", "invite_only"].includes(registrationMode))
     throw new Error("REGISTRATION_MODE must be open or invite_only");
@@ -86,6 +95,8 @@ export function loadConfig(env = process.env): Config {
     oidcAuthMethod: oidcAuthMethod as Config["oidcAuthMethod"],
     trustedProxies: parseTrustedProxies(env.TRUSTED_PROXY),
     registrationMode: registrationMode as Config["registrationMode"],
+    xmppDomain,
+    xmppBridgeSecret,
     adminSubjects: (env.ADMIN_SUBJECTS || "")
       .split(",")
       .map((s) => s.trim())

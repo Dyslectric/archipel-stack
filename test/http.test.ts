@@ -90,6 +90,73 @@ function browser(origin: string) {
   };
 }
 
+test("remote contact names require a member session and CSRF and remain private to their owner", async t => {
+  const {origin} = await application(t);
+  const alice = browser(origin), bob = browser(origin), anonymous = browser(origin);
+  const a = await alice.login("alice"); await bob.login("bob");
+  const peer = "xmpp:other@remote.test", input = {peer,display_name:"My remote friend"};
+  assert.equal((await anonymous.request("/api/contact-names", "POST", input)).status, 401);
+  assert.equal((await bob.request("/api/contact-names", "POST", input, {"X-CSRF-Token":"bad"})).status, 403);
+  assert.equal((await bob.request("/api/contact-names", "POST", input)).status, 200);
+  const path = `/api/contact-names?peer=${encodeURIComponent(peer)}`;
+  assert.equal((await (await bob.request(path)).json()).display_name, "My remote friend");
+  assert.equal((await (await alice.request(path)).json()).display_name, "other@remote.test");
+  assert.equal((await bob.request("/api/contact-names", "POST", {peer:a.actor_url,display_name:"Changed"})).status, 400);
+  assert.equal((await bob.request("/api/contact-names", "POST", {...input,display_name:"x".repeat(81)})).status, 400);
+  assert.equal((await bob.request("/api/contact-names", "POST", {...input,display_name:null})).status, 200);
+  assert.equal((await (await bob.request(path)).json()).display_name, "other@remote.test");
+});
+
+test("members can block from their own account with CSRF and unblock to restore direct messages", async (t) => {
+  const { origin } = await application(t);
+  const alice = browser(origin), bob = browser(origin), anonymous = browser(origin);
+  const a = await alice.login("alice"), b = await bob.login("bob");
+  const input = { peer: a.actor_url, blocked: true };
+  assert.equal((await anonymous.request("/api/user-blocks", "POST", input)).status, 401);
+  assert.equal((await bob.request("/api/user-blocks", "POST", input, { "X-CSRF-Token": "invalid" })).status, 403);
+  assert.equal((await bob.request("/api/user-blocks", "POST", input)).status, 200);
+  assert.deepEqual((await (await bob.request("/api/overview")).json()).user_blocks, [a.actor_url]);
+  assert.deepEqual((await (await alice.request("/api/overview")).json()).user_blocks, []);
+  assert.equal((await alice.request("/api/dms", "POST", { to: b.actor_url, body: "Blocked" })).status, 403);
+  assert.equal((await bob.request("/api/dms", "POST", { to: a.actor_url, body: "Blocked" })).status, 403);
+  assert.equal((await bob.request("/api/user-blocks", "POST", { peer: b.actor_url, blocked: true })).status, 400);
+  assert.equal((await bob.request("/api/user-blocks", "POST", { ...input, blocked: false })).status, 200);
+  assert.equal((await alice.request("/api/dms", "POST", { to: b.actor_url, body: "Allowed" })).status, 201);
+});
+
+test("profile picture uploads require CSRF, remain scoped to the account and serve raster bytes to members", async (t) => {
+  const { origin } = await application(t);
+  const alice = browser(origin), bob = browser(origin), anonymous = browser(origin);
+  const a = await alice.login("alice"), b = await bob.login("bob");
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
+  // Larger than the ordinary JSON body and emoji limits.
+  const bytes = Buffer.concat([Buffer.from(png, "base64"), Buffer.alloc(300000)]);
+  const input = { image: bytes.toString("base64"), user_id: b.id };
+  assert.equal((await anonymous.request("/api/profile/avatar", "POST", input)).status, 401);
+  assert.equal((await alice.request("/api/profile/avatar", "POST", input, { "X-CSRF-Token": "invalid" })).status, 403);
+  const uploaded = await alice.request("/api/profile/avatar", "POST", input);
+  assert.equal(uploaded.status, 200);
+  const profile = await uploaded.json();
+  assert.ok(profile.avatar_url.includes(a.id));
+  assert.equal((await bob.session()).user.avatar_url, null);
+  const response = await bob.request(profile.avatar_url);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "image/png");
+  assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+  assert.ok(response.headers.get("cache-control")?.includes("no-store"));
+  assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
+  assert.equal((await anonymous.request(profile.avatar_url)).status, 401);
+  assert.equal((await alice.request("/api/profile/avatar", "POST", { image: Buffer.from('<svg/>').toString("base64") })).status, 400);
+  assert.equal((await alice.request("/api/profile/avatar", "POST", { image: Buffer.alloc(2097153).toString("base64") })).status, 400);
+  assert.equal((await alice.session()).user.avatar_url, profile.avatar_url);
+  await bob.request("/api/profile/avatar", "DELETE");
+  assert.equal((await alice.session()).user.avatar_url, profile.avatar_url);
+  assert.equal((await alice.request("/api/profile/avatar", "DELETE", undefined, { "X-CSRF-Token": "invalid" })).status, 403);
+  assert.equal((await alice.request("/api/profile/avatar", "DELETE")).status, 200);
+  assert.equal((await alice.session()).user.avatar_url, null);
+  assert.equal((await bob.request(profile.avatar_url)).status, 404);
+});
+
 test("personal emoji uploads require membership and CSRF and only their owner may rename or remove them", async (t) => {
   const { origin } = await application(t);
   const bob = browser(origin),

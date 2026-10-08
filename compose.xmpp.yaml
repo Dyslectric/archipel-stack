@@ -1,0 +1,44 @@
+services:
+  archipel:
+    networks:
+      - xmpp
+    environment:
+      XMPP_DOMAIN: ${XMPP_DOMAIN:?Set XMPP_DOMAIN before enabling Prosody}
+    # XMPP_BRIDGE_SECRET is read from .env.container, never a Compose label.
+  prosody:
+    image: prosodyim/prosody:13.0@sha256:0d4efc7c11018dfd863c9a25495efe706027de357a58a18ef02f8c484fb264ed
+    restart: unless-stopped
+    init: true
+    networks:
+      - xmpp
+    depends_on:
+      archipel:
+        condition: service_healthy
+    env_file:
+      - path: .env.container
+        format: raw
+    environment:
+      XMPP_DOMAIN: ${XMPP_DOMAIN:?Set XMPP_DOMAIN}
+      ARCHIPEL_API_URL: http://archipel:8788/internal/xmpp
+    ports:
+      - "${XMPP_BIND_ADDRESS:-0.0.0.0}:5222:5222"
+      - "${XMPP_BIND_ADDRESS:-0.0.0.0}:5269:5269"
+    volumes:
+      - ./prosody/prosody.cfg.lua:/etc/prosody/prosody.cfg.lua:ro
+      - ./prosody/modules:/etc/prosody/archipel-modules:ro
+      - ${XMPP_CERTS_PATH:-./data/xmpp-certs}:/etc/prosody/certs:ro
+      - prosody-data:/var/lib/prosody
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /var/run/prosody/prosody.pid && kill -0 $$(cat /var/run/prosody/prosody.pid)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  prosody-data:
+
+networks:
+  xmpp:

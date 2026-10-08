@@ -27,6 +27,22 @@ def defaults(_label, value, secret=False):
 
 
 class SetupTests(unittest.TestCase):
+    def test_xmpp_setup_selects_prosody_and_keeps_bridge_secret_private_and_stable(self):
+        settings = setup.collect_setup({"XMPP_DOMAIN": "chat.example.org"}, defaults)
+        self.assertIn("compose.xmpp.yaml", settings["COMPOSE_FILE"])
+        self.assertGreaterEqual(len(settings["XMPP_BRIDGE_SECRET"]), 43)
+        with tempfile.TemporaryDirectory() as directory:
+            setup.write_setup(directory, settings)
+            raw = setup.parse_raw_env((Path(directory) / ".env.container").read_text())
+            public = setup.parse_env((Path(directory) / ".env").read_text())
+            self.assertEqual(public["XMPP_BRIDGE_SECRET"], "")
+            self.assertEqual(raw["XMPP_BRIDGE_SECRET"], settings["XMPP_BRIDGE_SECRET"])
+            restored = setup.collect_setup({**public, "XMPP_BRIDGE_SECRET": raw["XMPP_BRIDGE_SECRET"]}, defaults)
+            self.assertEqual(restored["XMPP_BRIDGE_SECRET"], settings["XMPP_BRIDGE_SECRET"])
+        for domain in ("chat..example", "-chat.example", "chat.example:5222", "Chat.Example"):
+            with self.subTest(domain=domain), self.assertRaisesRegex(ValueError, "XMPP_DOMAIN"):
+                setup.collect_setup({"XMPP_DOMAIN": domain}, defaults)
+
     def test_default_is_loopback_container_without_development_auth(self):
         settings = setup.collect_setup({}, defaults)
         self.assertEqual(settings["SETUP_MODE"], "container")

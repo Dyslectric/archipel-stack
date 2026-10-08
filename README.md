@@ -53,12 +53,20 @@ usernames match. New instances start without fabricated channels or conversation
 - Administrator controls for each user's federated sending, receiving,
   subscriptions, and channel posting, plus remote instance/actor blocks.
 - Stable actor URLs with ActivityStreams discovery and signed, authorized channel history.
+- Prosody XMPP integration: native client login with revocable app passwords,
+  direct messages, local timeline MUC rooms, authorized MAM history, and TLS
+  server-to-server direct messaging. See [XMPP setup and supported profile](docs/xmpp.md).
 
 The server is Express/TypeScript; the browser uses TypeScript and Vite. Runtime
 files live in the persistent Docker volume at `/app/data`. Preserve the database and `BASE_URL` across restarts: they
 hold identity and object continuity. To back up a running instance, use SQLite's
 backup facilities; to copy files directly, stop the server first and copy the
 whole data directory. Do not copy only a live WAL database's main file.
+
+For XMPP, supply an account domain during setup and provide certificates for it
+and `channels.<domain>` before starting. Setup includes the Prosody service; users
+connect through **Settings → XMPP clients**. Archipel retains its OIDC, policy,
+archive and ActivityPub services while Prosody handles XMPP streams and routing.
 
 ## Connect FedIdP or another OIDC provider
 
@@ -94,6 +102,27 @@ to honor its forwarded headers and rate-limit clients individually. Setup can
 configure this together with the container's external proxy network.
 
 ## Emoji, editing, and instance membership
+
+Open **Settings → Profile** to upload or remove your profile picture. PNG, JPEG,
+GIF, and WebP files up to 2 MiB are supported, with a preview before upload.
+Pictures fill the avatar square and appear in messages, direct conversations,
+member lists, and your account menu. They are stored in SQLite and survive restarts;
+removing a picture restores your initial.
+
+Click a person's name in a message, member list, or direct conversation header
+and choose **Set display name** to give a user on another host a personal contact
+name. This works with XMPP and ActivityPub contacts. The name is shown in your
+conversations, inbox, and remote message authors while their address remains
+visible. It persists across sign-ins and restarts; leave the name blank to restore
+their original name. Each member's contact names are private to that member.
+
+Click a person's name in a message, member list, or direct conversation header
+and choose **Block user** to stop direct messages between you and hide their
+channel message content from your account. Replies by other people remain visible,
+and blocked messages do not appear as new in your inbox. Past direct message
+history is preserved. Choose **Unblock user** from the same menu to restore
+contact and channel content. Personal blocks persist across sign-ins and restarts
+and apply to local and remote users without changing anyone else's channel access.
 
 Type `:smile:`, `:heart:`, `:+1:`, or another standard shortcode in a message.
 The Emoji button searches standard and custom emoji and inserts a shortcode.
