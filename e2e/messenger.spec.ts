@@ -527,22 +527,27 @@ async function grantFederation(page: Page, user: string) {
   await expect(page.locator("#toast")).toContainText(
     "Federation setting saved",
   );
+  // Federation is granted by role: one role with all four grants, given to the account.
+  await section(page, "Roles");
+  await expect(page.locator("#role-create")).toBeVisible();
+  if (!(await page.getByRole("form", { name: "Role Federated", exact: true }).count())) {
+    const create = page.locator("#role-create");
+    await create.getByLabel("New role name").fill("Federated");
+    for (const name of [
+      "Send federated messages",
+      "Receive federated messages",
+      "Subscribe to remote channels",
+      "Post in federated channels",
+    ])
+      await create.getByRole("checkbox", { name, exact: true }).check();
+    await create.getByRole("button", { name: "Create role", exact: true }).click();
+    await expect(page.locator("#toast")).toContainText("Role created");
+  }
+  await section(page, "People");
   await page
-    .getByRole("combobox", { name: "Local user", exact: true })
-    .selectOption({ label: `@${user}` });
-  for (const name of [
-    "Send federated messages",
-    "Receive federated messages",
-    "Subscribe to remote channels",
-    "Post in federated channels",
-  ])
-    await page.getByRole("checkbox", { name, exact: true }).check();
-  await page
-    .getByRole("button", { name: "Save user permissions", exact: true })
-    .click();
-  await expect(page.locator("#toast")).toContainText(
-    "Federation permissions saved",
-  );
+    .getByRole("combobox", { name: `Role for @${user}`, exact: true })
+    .selectOption({ label: "Federated" });
+  await expect(page.locator("#toast")).toContainText("Role changed");
   await openChat(page);
 }
 async function openFederated(page: Page, name = "Remote channels") {
@@ -642,19 +647,13 @@ test("two browser instances federate a channel and a direct message with admin-c
     "A federated private hello.",
   );
   await openAdmin(peerAdmin);
-  await section(peerAdmin, "Instance federation");
-  await peerAdmin
-    .getByRole("combobox", { name: "Local user", exact: true })
-    .selectOption({ label: "@bob" });
-  await peerAdmin
+  await section(peerAdmin, "Roles");
+  const federated = peerAdmin.getByRole("form", { name: "Role Federated", exact: true });
+  await federated
     .getByRole("checkbox", { name: "Post in federated channels", exact: true })
     .uncheck();
-  await peerAdmin
-    .getByRole("button", { name: "Save user permissions", exact: true })
-    .click();
-  await expect(peerAdmin.locator("#toast")).toContainText(
-    "Federation permissions saved",
-  );
+  await federated.getByRole("button", { name: "Save role", exact: true }).click();
+  await expect(peerAdmin.locator("#toast")).toContainText("Role saved");
   await openChat(bob);
   await expect(bob.locator("#composer-area")).toContainText(
     "administrator must enable",
@@ -867,6 +866,7 @@ test("the inbox gathers new channel and direct messages, and the sidebar folds a
   await expect(page.locator(".side-section h2")).toHaveText([
     "Direct messages",
     "Channels",
+    "XMPP rooms",
   ]);
   await page.locator(".dm-link").filter({ hasText: "bob" }).click();
   await expect(
@@ -936,9 +936,10 @@ test("external XMPP room browser flow joins, renders safe content, posts and fol
   const session = await (await page.request.get("/api/session")).json();
   const headers = { "X-CSRF-Token": session.csrf, Origin: "http://127.0.0.1:8790" };
   expect((await page.request.patch("/api/admin/federation", { headers, data: { enabled: true } })).ok()).toBeTruthy();
-  expect((await page.request.patch(`/api/admin/users/${session.user.id}/federation`, { headers, data: {
-    federation_receive: true, federation_subscribe: true, federation_send: true, federation_post: true,
-  } })).ok()).toBeTruthy();
+  const role = await (await page.request.post("/api/admin/roles", { headers, data: {
+    name: "Rooms", federation_receive: true, federation_subscribe: true, federation_send: true, federation_post: true,
+  } })).json();
+  expect((await page.request.patch(`/api/admin/users/${session.user.id}/role`, { headers, data: { role_id: role.id } })).ok()).toBeTruthy();
   await page.locator("#browse").click();
   await page.getByRole("link", { name: "Join an XMPP room", exact: true }).click();
   await page.getByLabel("Room address").fill("browser-test@muc.remote.example");
@@ -950,9 +951,9 @@ test("external XMPP room browser flow joins, renders safe content, posts and fol
   // The room is a row of its own sidebar section, organised like channels and direct messages.
   const rooms = page.locator('[data-section="xmpp"]');
   await expect(rooms.locator(".channel-link.on")).toContainText("browser-test@muc.remote.example");
-  await rooms.getByRole("button", { name: "XMPP rooms" }).click();
+  await rooms.getByRole("button", { name: "XMPP rooms", exact: true }).click();
   await expect(rooms.locator(".channel-link")).toHaveCount(0);
-  await rooms.getByRole("button", { name: "XMPP rooms" }).click();
+  await rooms.getByRole("button", { name: "XMPP rooms", exact: true }).click();
   await expect(rooms.locator(".channel-link")).toHaveCount(1);
   const adapterHeaders = { Authorization: "Bearer browser-test-bridge-secret-with-43-characters-minimum" };
   const sync = await (await page.request.post("/internal/xmpp/remote-rooms/sync", { headers: adapterHeaders, data: {} })).json();
@@ -985,4 +986,72 @@ test("external XMPP room browser flow joins, renders safe content, posts and fol
   await expect(page.getByRole("button", { name: "Send message" })).toHaveCount(0);
   await page.getByRole("button", { name: "Leave room", exact: true }).click();
   await expect(page.locator("#channel-heading")).toContainText("left");
+});
+
+test("messages show Markdown and attachments, threads fold whole, and the side panels resize and hide", async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: 850 });
+  await login(page);
+  await createChannel(page, "showcase");
+  await page.getByRole("textbox", { name: "Message", exact: true }).fill("**Bold** and `code` with <img src=x onerror=alert(1)>");
+  await page.getByRole("button", { name: "Send message" }).click();
+  const body = page.locator(".message-body").filter({ hasText: "Bold" });
+  await expect(body).toContainText("Bold and code with <img src=x onerror=alert(1)>");
+  await expect(body.locator("strong")).toHaveText("Bold");
+  await expect(body.locator("code")).toHaveText("code");
+  await expect(body.locator("img")).toHaveCount(0);
+  // A dropped picture is uploaded and written into the message where the cursor is.
+  const box = page.getByRole("textbox", { name: "Message", exact: true });
+  await expect(page.getByRole("button", { name: "Attach an image or video" })).toBeVisible();
+  await box.evaluate(async (area) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 32;
+    canvas.getContext("2d")!.fillRect(0, 0, 32, 32);
+    const blob = await new Promise<Blob>((done) => canvas.toBlob((b) => done(b!), "image/png"));
+    const data = new DataTransfer();
+    data.items.add(new File([blob], "square.png", { type: "image/png" }));
+    area.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: data }));
+  });
+  await expect(box).toHaveValue(/^!\[square\.png\]\(http:\/\/127\.0\.0\.1:8790\/media\/[\w-]{43}\.png\)$/);
+  await page.getByRole("button", { name: "Send message" }).click();
+  const picture = page.locator(".message-body a.attachment img");
+  await expect(picture).toBeVisible();
+  expect(await picture.evaluate((img: HTMLImageElement) => img.decode().then(() => img.naturalWidth))).toBe(32);
+  // The channel's members are listed beside it, and the list can be put away.
+  const members = page.locator("#member-panel");
+  await expect(members).toContainText("Owner");
+  await expect(members.getByRole("button", { name: "alice", exact: true })).toBeVisible();
+  await page.locator("#members").click();
+  await expect(members).toBeHidden();
+  await page.locator("#members").click();
+  await expect(members).toBeVisible();
+  // The sidebar is as wide as it is dragged, and folds away from the top bar.
+  const sidebar = page.locator("#sidebar"), edge = await page.locator("#side-resize").boundingBox();
+  await page.mouse.move(edge!.x + 4, edge!.y + 200);
+  await page.mouse.down();
+  await page.mouse.move(400, edge!.y + 200, { steps: 4 });
+  await page.mouse.up();
+  expect(Math.round((await sidebar.boundingBox())!.width)).toBe(400);
+  await page.reload();
+  await expect(sidebar).toBeVisible();
+  expect(Math.round((await sidebar.boundingBox())!.width)).toBe(400);
+  await page.getByRole("button", { name: "Show channels" }).click();
+  await expect(sidebar).toBeHidden();
+  await expect(page.locator("#message-list")).toBeVisible();
+  await page.getByRole("button", { name: "Show channels" }).click();
+  await expect(sidebar).toBeVisible();
+  // A thread and its replies share one card; the replies fold away together and stay folded.
+  await createChannel(page, "showcase-threads", "threaded");
+  await page.getByRole("textbox", { name: "Thread title" }).fill("One card");
+  await send(page, "The post.");
+  await replyUnder(page, page.locator(".thread > .post"), "A reply in the same card.");
+  const reply = page.locator(".thread.card details.comment").filter({ hasText: "A reply in the same card." });
+  await expect(reply).toBeVisible();
+  await page.locator(".thread-replies > summary").click();
+  await expect(reply).toBeHidden();
+  await page.waitForTimeout(3000);
+  await expect(reply).toBeHidden();
+  await page.getByRole("button", { name: "Expand all" }).click();
+  await expect(reply).toBeVisible();
+  await page.getByRole("button", { name: "Collapse all" }).click();
+  await expect(reply).toBeHidden();
 });

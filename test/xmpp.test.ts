@@ -1,3 +1,4 @@
+import { grant } from "./roles.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Store, Problem } from "../src/store.js";
@@ -170,7 +171,7 @@ test("the internal adapter requires its own bearer secret and browser credential
 test("administrator instance URL blocks apply to XMPP send, receive, archive and queued delivery", () => {
   const f = fixture(), fed = new Federation(f.store, f.config);
   fed.setEnabled(f.alice, true);
-  fed.setPermissions(f.alice, f.alice.id, { federation_send: true, federation_receive: true, federation_subscribe: false, federation_post: false });
+  grant(fed.store, f.alice, f.alice.id, { federation_send: true, federation_receive: true, federation_subscribe: false, federation_post: false });
   f.xmpp.sendDirect(f.alice, "other@remote.example", "Queued outgoing");
   const incoming = { operation: "direct", from: "other@remote.example/phone", to: f.a.jid, body: "Incoming", id: "before-block" };
   f.xmpp.operation(incoming);
@@ -243,10 +244,10 @@ test("version 8 migration preserves native IDs and archive correction references
   const room = store.createChannel(alice, { name: "legacy", mode: "timeline", visibility: "members", admission: "open" });
   const input = { from: `${credential.jid}/desktop`, credential: credential.id, operation: "post", to: `legacy@${xmpp.rooms}`, id: "old-id", body: "Old content" };
   const result = xmpp.operation(input) as { id: string };
-  store.db.exec("DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP INDEX xmpp_message_ids_sender; ALTER TABLE xmpp_message_ids DROP COLUMN scope; CREATE UNIQUE INDEX legacy_stanza_ids ON xmpp_message_ids(sender,stanza_id); PRAGMA user_version=8");
+  store.db.exec("DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP INDEX xmpp_message_ids_sender; ALTER TABLE xmpp_message_ids DROP COLUMN scope; CREATE UNIQUE INDEX legacy_stanza_ids ON xmpp_message_ids(sender,stanza_id); PRAGMA user_version=8");
   store.close(); store = new Store(path); xmpp = new Xmpp(store, config);
   t.after(() => { store.close(); rmSync(directory, { recursive: true, force: true }); });
-  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 12);
+  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 13);
   assert.equal(xmpp.archive(alice, { room: input.to }).messages[0].stanza_id, "old-id");
   xmpp.operation({ ...input, stream: "new-stream", id: "new-id", replace: "old-id", body: "Migrated correction" });
   assert.equal(store.message(result.id).body, "Migrated correction");

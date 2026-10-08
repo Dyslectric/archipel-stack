@@ -38,6 +38,15 @@ end
 local function unavailable(entry)
   module:send(st.presence({ from = entry.from; to = entry.room .. "/" .. entry.nick; type = "unavailable" }));
 end
+-- The room no longer holds this occupant although nobody left: Archipel schedules another join.
+local function dropped(entry, stanza)
+  receive(entry, stanza, { kind = "state"; state = "error"; condition = "dropped";
+    error = "The room lost this session. Joining again." });
+  occupants[entry.session] = nil;
+end
+-- Errors that mean the occupant is gone (XEP-0410), rather than that the room refused one stanza.
+local gone = { ["not-acceptable"] = true; ["item-not-found"] = true; ["remote-server-not-found"] = true;
+  ["remote-server-timeout"] = true };
 
 -- Native clients use their own resource, nickname and MUC protocol/history.
 module:hook("pre-presence/full", function(event)
@@ -93,18 +102,23 @@ local function incoming(event)
         entry.jids[nick] = stanza.attr.type ~= "unavailable" and item and item.attr.jid and jid.bare(item.attr.jid) or nil;
       end
       if stanza.attr.type == "error" then
-        receive(entry, stanza, { kind = "state"; state = "error"; error = error_text(stanza) });
+        local _, condition = stanza:get_error();
+        receive(entry, stanza, { kind = "state"; state = "error"; error = error_text(stanza); condition = condition });
         occupants[entry.session] = nil;
       elseif self_presence(stanza) then
         local x = stanza:get_child("x", user_ns);
         local item = x:get_child("item");
         if stanza.attr.type == "unavailable" then
           -- A 303 self-presence announces a nick change, followed by available presence.
-          local changing = false;
-          for status in x:childtags("status") do if status.attr.code == "303" then changing = true; end end
+          local changing, codes = false, array();
+          for status in x:childtags("status") do
+            if status.attr.code == "303" then changing = true; end
+            codes:push(status.attr.code);
+          end
           if changing and item and item.attr.nick then entry.nick = item.attr.nick;
           else
-            receive(entry, stanza, { kind = "state"; state = "left"; error = error_text(stanza) });
+            -- The codes tell a kick or ban from a room that shut down or lost the connection.
+            receive(entry, stanza, { kind = "state"; state = "left"; error = error_text(stanza); codes = codes });
             occupants[entry.session] = nil;
           end
         else
@@ -114,7 +128,9 @@ local function incoming(event)
       end
     elseif stanza.name == "message" then
       if stanza.attr.type == "error" then
+        local _, condition = stanza:get_error();
         receive(entry, stanza, { kind = "message-error"; id = stanza.attr.id; error = error_text(stanza) });
+        if gone[condition] then dropped(entry, stanza); end
       elseif stanza.attr.type == "groupchat" then
         local subject = stanza:get_child_text("subject");
         if subject ~= nil then receive(entry, stanza, { kind = "subject"; subject = subject }); end
@@ -131,6 +147,14 @@ local function incoming(event)
           receive(entry, stanza, { kind = "message"; body = body; id = stanza.attr.id; stable_id = stable;
             origin_id = origin and origin.attr.id; stamp = delay and delay.attr.stamp; real_jid = real });
         end
+      end
+    elseif stanza.name == "iq" then
+      if stanza.attr.type == "get" and stanza:get_child("ping", "urn:xmpp:ping") then
+        module:send(st.reply(stanza));
+      elseif stanza.attr.type == "error" and stanza.attr.id == entry.ping then
+        -- Any other answer to a self-ping, an unsupported ping included, comes from a room that still has us.
+        local _, condition = stanza:get_error();
+        if gone[condition] then dropped(entry, stanza); end
       end
     end
     return true; -- consume browser resource traffic instead of bouncing it
@@ -167,7 +191,7 @@ local runner = async.runner(function()
   for token, entry in pairs(occupants) do
     if not desired[token] then unavailable(entry); occupants[token] = nil;
     elseif not entry.joined and os.time() - entry.started > 30 then
-      receive(entry, st.presence({ from = entry.room .. "/" .. entry.nick }), { kind = "state"; state = "error"; error = "The room did not answer the join request. Check the address (Archipel channels are name@channels.<domain>), then try joining again." });
+      receive(entry, st.presence({ from = entry.room .. "/" .. entry.nick }), { kind = "state"; state = "error"; condition = "remote-server-timeout"; error = "The room did not answer the join request. Check the address (Archipel channels are name@channels.<domain>), then try joining again." });
       unavailable(entry); occupants[token] = nil;
       desired[token] = nil;
     end
@@ -179,6 +203,14 @@ local runner = async.runner(function()
         module:send(st.presence({ from = entry.from; to = entry.room .. "/" .. entry.nick; id = uuid.generate() })
           :tag("x", { xmlns = muc_ns }):tag("history", { maxstanzas = "100"; maxchars = "100000" }));
       else occupants[token] = nil; end
+    end
+  end
+  -- A room that restarted without a word forgets its occupants; a ping to our own nickname finds out.
+  for _, entry in pairs(occupants) do
+    if entry.joined and os.time() - (entry.pinged or entry.started) > 120 then
+      entry.pinged, entry.ping = os.time(), uuid.generate();
+      module:send(st.iq({ from = entry.from; to = entry.room .. "/" .. entry.nick; type = "get"; id = entry.ping })
+        :tag("ping", { xmlns = "urn:xmpp:ping" }));
     end
   end
   for _, message in ipairs(result.messages) do

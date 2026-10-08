@@ -1,4 +1,5 @@
 import { emojiParts, type CustomEmoji } from "../src/emojis.js";
+import { markdownHtml } from "./markdown.js";
 
 export type { CustomEmoji };
 export interface User {
@@ -17,6 +18,13 @@ export interface User {
   federation_receive?: boolean;
   federation_subscribe?: boolean;
   federation_post?: boolean;
+  // What the account's instance role grants, on the account's own profile.
+  instance_role?: { id: string; name: string };
+  create_channels?: boolean;
+  federate_channels?: boolean;
+  direct_messages?: boolean;
+  attachments?: boolean;
+  xmpp_rooms?: boolean;
 }
 export interface Topic {
   id: string;
@@ -80,6 +88,7 @@ export interface XmppRoom {
   id: string; room: string; nick: string; desired: boolean; state: string;
   role: string; subject: string; error: string | null; blocked: string | null;
   can_post: boolean; post_blocked: string | null;
+  reconnecting?: boolean; // the room dropped the session and it is being joined again
 }
 export interface Message {
   id: string;
@@ -198,6 +207,9 @@ const paths: Record<string, string> = {
   "folder-plus":
     '<path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M12 11v5M9.5 13.5h5"/>',
   "arrow-up": '<path d="M12 19V5M5 12l7-7 7 7"/>',
+  paperclip:
+    '<path d="m21 12-8.6 8.6a5 5 0 0 1-7-7L14 5a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.5a1.7 1.7 0 0 1-2.4-2.4l8-7.9"/>',
+  sidebar: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>',
 };
 // Decorative: say what it means in text or a label next to it.
 export const icon = (name: string, cls = "") =>
@@ -342,6 +354,9 @@ export function emojiHtml(body: string, emojis = state.emojis) {
     )
     .join("");
 }
+// A message as it is shown: Markdown, with emoji.
+export const richHtml = (body: string, emojis = state.emojis) =>
+  markdownHtml(body, emojis);
 export function action(fn: () => Promise<void>) {
   void fn().catch((error) =>
     toast(error.message || "Could not connect. Please try again.", true),

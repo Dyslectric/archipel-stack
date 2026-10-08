@@ -115,7 +115,7 @@ test("external subscriptions and archives survive a version ten upgrade and rest
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   let store = new Store(path);
   const alice = store.loginIdentity("urn:archipel:development", "alice", "alice", [], true);
-  store.db.exec("DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; PRAGMA user_version=10");
+  store.db.exec("DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; PRAGMA user_version=10");
   store.close(); store = new Store(path);
   let xmpp = new Xmpp(store, config);
   store.db.prepare("INSERT OR REPLACE INTO instance_settings VALUES('federation_enabled','true')").run();
@@ -256,4 +256,53 @@ test("a mirror copies a room the owner joined, attributing authors as the room d
   f.rooms.leave(f.alice, f.subscription.id);
   assert.equal(mirrors.sources(f.alice, mirror.id).sources[0].state, "left");
   assert.equal(seen().length, 5);
+});
+
+test("a room that drops its occupants is joined again with backoff, and a kick or refusal is final", t => {
+  const f = fixture(); t.after(() => f.store.close());
+  const row = () => f.store.db.prepare("SELECT state,attempts,retry_at FROM xmpp_remote_rooms WHERE id=?").get(f.subscription.id) as { state: string; attempts: number; retry_at: number | null };
+  const due = () => f.store.db.prepare("UPDATE xmpp_remote_rooms SET retry_at=1 WHERE id=?").run(f.subscription.id);
+  const wanted = () => f.rooms.sync({}).desired.map(r => r.session);
+  f.joined();
+  // The other server restarted: the room says goodbye with a shutdown code, or the path to it fails.
+  f.receive({ kind: "state", state: "left", codes: ["110", "332"] });
+  assert.deepEqual([row().state, row().attempts], ["left", 1]);
+  assert.ok(row().retry_at! > Date.now() && row().retry_at! <= Date.now() + 5000);
+  assert.equal(f.rooms.list(f.alice)[0].reconnecting, true);
+  assert.deepEqual(wanted(), []);
+  due();
+  assert.deepEqual(wanted(), [f.session]);
+  assert.deepEqual([row().state, row().retry_at], ["joining", null]);
+  // It is still down: each failure waits longer, up to ten minutes.
+  f.receive({ kind: "state", state: "error", condition: "remote-server-not-found", error: "remote-server-not-found" });
+  assert.equal(row().attempts, 2);
+  assert.ok(row().retry_at! > Date.now() + 5000 && row().retry_at! <= Date.now() + 10000);
+  f.store.db.prepare("UPDATE xmpp_remote_rooms SET attempts=40 WHERE id=?").run(f.subscription.id);
+  f.receive({ kind: "state", state: "error", condition: "remote-server-timeout" });
+  assert.ok(row().retry_at! > Date.now() + 590000 && row().retry_at! <= Date.now() + 600000);
+  due(); wanted();
+  f.joined();
+  assert.deepEqual([row().state, row().attempts, row().retry_at], ["joined", 0, null]);
+  assert.equal(f.rooms.list(f.alice)[0].reconnecting, false);
+  // A session the room silently forgot is found by the adapter's ping and joined again too.
+  f.receive({ kind: "state", state: "error", condition: "dropped" });
+  assert.equal(row().attempts, 1);
+  due(); wanted(); f.joined();
+  // Kicked, banned or refused: joining again is the member's decision.
+  f.receive({ kind: "state", state: "left", codes: ["110", "307"] });
+  assert.deepEqual([row().state, row().retry_at], ["left", null]);
+  assert.deepEqual(wanted(), []);
+  f.rooms.join(f.alice, { room: address, nick: "Alice", reconnect: true });
+  const again = f.rooms.sync({}).desired[0].session;
+  f.rooms.receive({ session: again, from: `${address}/Alice`, kind: "state", state: "error", condition: "forbidden", error: "forbidden" });
+  assert.deepEqual([row().state, row().retry_at], ["error", null]);
+  // Leaving ends any pending attempt.
+  f.rooms.join(f.alice, { room: address, nick: "Alice", reconnect: true });
+  const last = f.rooms.sync({}).desired[0].session;
+  f.rooms.receive({ session: last, from: `${address}/Alice`, kind: "state", state: "error", condition: "service-unavailable" });
+  assert.ok(row().retry_at);
+  f.rooms.leave(f.alice, f.subscription.id);
+  assert.equal(row().retry_at, null);
+  f.store.db.prepare("UPDATE xmpp_remote_rooms SET retry_at=1 WHERE id=?").run(f.subscription.id);
+  assert.deepEqual(wanted(), []);
 });

@@ -1,4 +1,4 @@
-import { decodeEmojiImage, decodeRasterImage } from "./emoji-image.js";
+import { decodeEmojiImage, decodeRasterImage, imageMime } from "./emoji-image.js";
 import { standardEmojis, type CustomEmoji } from "./emojis.js";
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, readFileSync } from "node:fs";
@@ -74,6 +74,44 @@ export interface DirectAccess {
   outgoing: boolean;
   blocked: string | null;
 }
+// What a role grants. The four federation grants are also kept on each account (users.federation_*).
+export const permissions = [
+  "create_channels",
+  "federate_channels",
+  "direct_messages",
+  "attachments",
+  "xmpp_rooms",
+  "federation_send",
+  "federation_receive",
+  "federation_subscribe",
+  "federation_post",
+] as const;
+export type Permission = (typeof permissions)[number];
+export type Role = {
+  id: string;
+  name: string;
+  is_default: number;
+  created_at: string;
+} & Record<Permission, number>;
+const denied: Record<Permission, string> = {
+  create_channels: "Your role does not allow creating channels.",
+  federate_channels: "Your role does not allow opening channels to federation.",
+  direct_messages: "Your role does not allow sending direct messages.",
+  attachments: "Your role does not allow attaching files.",
+  xmpp_rooms: "Your role does not allow joining XMPP rooms on other servers.",
+  federation_send: "Your role does not allow sending federated messages.",
+  federation_receive: "Your role does not allow receiving federated messages.",
+  federation_subscribe: "Your role does not allow joining federated channels.",
+  federation_post: "Your role does not allow posting in federated channels.",
+};
+const mediaTypes: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+  "video/mp4": "mp4",
+  "video/webm": "webm",
+};
 export const hash = (value: string) =>
   createHash("sha256").update(value).digest("hex");
 export const randomToken = () => randomBytes(32).toString("base64url");
@@ -99,6 +137,8 @@ export class Store {
   private transactionDepth = 0;
   federationHooks?: {
     profile: (user: User) => void;
+    // An account's role, or what its role grants, changed.
+    permissions: (user: User) => void;
     write: (user: User, channel: Channel) => void;
     message: (
       message: Message,
@@ -133,7 +173,7 @@ export class Store {
     const version = (
       this.db.prepare("PRAGMA user_version").get() as { user_version: number }
     ).user_version;
-    if (version > 12) throw new Error("Database is newer than this application");
+    if (version > 13) throw new Error("Database is newer than this application");
     if (version === 0)
       this.transaction(() =>
         this.db.exec(
@@ -212,6 +252,10 @@ export class Store {
       this.transaction(() => this.db.exec(readFileSync(
         new URL("../migrations/012_bridges_mirrors.sql", import.meta.url), "utf8",
       )));
+    if (version < 13)
+      this.transaction(() => this.db.exec(readFileSync(
+        new URL("../migrations/013_roles_attachments.sql", import.meta.url), "utf8",
+      )));
   }
   close() {
     this.db.close();
@@ -266,6 +310,7 @@ export class Store {
             federation_receive: !!user.federation_receive,
             federation_subscribe: !!user.federation_subscribe,
             federation_post: !!user.federation_post,
+            ...this.grants(user),
           }
         : {}),
       verified_socials:
@@ -327,6 +372,7 @@ export class Store {
       this.db
         .prepare("INSERT INTO oidc_bindings VALUES(?,?,?)")
         .run(issuer, subject, id);
+      this.applyRoles("id=?", id);
       return this.user(id);
     });
   }
@@ -448,6 +494,313 @@ export class Store {
       );
     });
     return this.profile(this.user(id), true);
+  }
+  // ---- roles: what local accounts may do here ----
+  private defaultRole() {
+    return this.db
+      .prepare("SELECT * FROM roles WHERE is_default=1")
+      .get() as unknown as Role;
+  }
+  roleOf(user: User): Role {
+    const own = this.db
+      .prepare(
+        "SELECT r.* FROM user_roles u JOIN roles r ON r.id=u.role_id WHERE u.user_id=?",
+      )
+      .get(user.id) as Role | undefined;
+    return own || this.defaultRole();
+  }
+  can(user: User, permission: Permission) {
+    return !user.remote_actor && !!this.roleOf(user)[permission];
+  }
+  requirePermission(user: User, permission: Permission) {
+    const current = this.active(user.id);
+    if (!this.can(current, permission))
+      throw new Problem(403, denied[permission]);
+    return current;
+  }
+  // The role and the grants the browser shows or hides things by; federation grants are in the profile already.
+  private grants(user: User) {
+    const role = this.roleOf(user);
+    return {
+      instance_role: { id: role.id, name: role.name },
+      create_channels: !!role.create_channels,
+      federate_channels: !!role.federate_channels,
+      direct_messages: !!role.direct_messages,
+      attachments: !!role.attachments,
+      xmpp_rooms: !!role.xmpp_rooms,
+    };
+  }
+  // Copies each matching local account's role onto its federation grants, and tells federation who changed.
+  private applyRoles(where: string, ...values: string[]) {
+    const users = this.db
+      .prepare(`SELECT * FROM users WHERE remote_actor IS NULL AND (${where})`)
+      .all(...values) as unknown as User[];
+    for (const user of users) {
+      const role = this.roleOf(user);
+      if (
+        user.federation_send === role.federation_send &&
+        user.federation_receive === role.federation_receive &&
+        user.federation_subscribe === role.federation_subscribe &&
+        user.federation_post === role.federation_post
+      )
+        continue;
+      this.db
+        .prepare(
+          "UPDATE users SET federation_send=?,federation_receive=?,federation_subscribe=?,federation_post=? WHERE id=?",
+        )
+        .run(
+          role.federation_send,
+          role.federation_receive,
+          role.federation_subscribe,
+          role.federation_post,
+          user.id,
+        );
+      this.federationHooks?.permissions(this.user(user.id));
+    }
+  }
+  private roleRow(id: string) {
+    const role = this.db.prepare("SELECT * FROM roles WHERE id=?").get(id) as
+      | Role
+      | undefined;
+    if (!role) throw new Problem(404, "Role not found.");
+    return role;
+  }
+  private roleView(role: Role) {
+    return {
+      id: role.id,
+      name: role.name,
+      is_default: !!role.is_default,
+      ...(Object.fromEntries(permissions.map((p) => [p, !!role[p]])) as Record<
+        Permission,
+        boolean
+      >),
+      members: Number(
+        this.db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM users WHERE remote_actor IS NULL AND (id IN (SELECT user_id FROM user_roles WHERE role_id=?) OR (?=1 AND id NOT IN (SELECT user_id FROM user_roles)))",
+          )
+          .get(role.id, role.is_default)?.n,
+      ),
+    };
+  }
+  roles(user: User) {
+    this.requireAdmin(user);
+    return (
+      this.db
+        .prepare("SELECT * FROM roles ORDER BY is_default DESC,name")
+        .all() as unknown as Role[]
+    ).map((role) => this.roleView(role));
+  }
+  private roleInput(input: Record<string, unknown>, current?: Role) {
+    if (
+      Object.keys(input).some(
+        (key) =>
+          key !== "name" &&
+          key !== "is_default" &&
+          !permissions.includes(key as Permission),
+      )
+    )
+      throw new Problem(400, "Unknown role setting.");
+    const name =
+      input.name === undefined && current
+        ? current.name
+        : text(input.name, "Role name", 40);
+    // A new role starts like the default one does: everything local, nothing federated.
+    const flags = permissions.map((p) => {
+      if (input[p] === undefined)
+        return current ? current[p] : p.startsWith("federation_") ? 0 : 1;
+      if (typeof input[p] !== "boolean")
+        throw new Problem(400, "Role permissions are on or off.");
+      return Number(input[p]);
+    });
+    if (
+      this.db
+        .prepare("SELECT 1 FROM roles WHERE name=? AND id!=?")
+        .get(name, current?.id || "")
+    )
+      throw new Problem(409, "That role name is already used.");
+    return { name, flags };
+  }
+  createRole(user: User, input: Record<string, unknown>) {
+    this.requireAdmin(user);
+    if (input.is_default !== undefined)
+      throw new Problem(400, "Create the role, then make it the default.");
+    return this.transaction(() => {
+      const { name, flags } = this.roleInput(input);
+      if (Number(this.db.prepare("SELECT COUNT(*) AS n FROM roles").get()?.n) >= 50)
+        throw new Problem(409, "An instance has up to 50 roles.");
+      const id = randomUUID();
+      this.db
+        .prepare(
+          `INSERT INTO roles(id,name,${permissions.join(",")},created_at) VALUES(?,?,${permissions.map(() => "?").join(",")},?)`,
+        )
+        .run(id, name, ...flags, now());
+      this.audit(user.id, "role.create", JSON.stringify({ role: id, name }));
+      return this.roleView(this.roleRow(id));
+    });
+  }
+  updateRole(user: User, id: string, input: Record<string, unknown>) {
+    this.requireAdmin(user);
+    return this.transaction(() => {
+      const current = this.roleRow(id),
+        { name, flags } = this.roleInput(input, current);
+      if (input.is_default !== undefined && input.is_default !== true)
+        throw new Problem(400, "Make another role the default instead.");
+      // Accounts on the old default by omission keep it by name, so only new arrivals move.
+      if (input.is_default === true && !current.is_default) {
+        this.db
+          .prepare(
+            "INSERT INTO user_roles SELECT id,(SELECT id FROM roles WHERE is_default=1) FROM users WHERE remote_actor IS NULL AND id NOT IN (SELECT user_id FROM user_roles)",
+          )
+          .run();
+        this.db.prepare("UPDATE roles SET is_default=0").run();
+        this.db.prepare("UPDATE roles SET is_default=1 WHERE id=?").run(id);
+        this.db.prepare("DELETE FROM user_roles WHERE role_id=?").run(id);
+      }
+      this.db
+        .prepare(
+          `UPDATE roles SET name=?,${permissions.map((p) => `${p}=?`).join(",")} WHERE id=?`,
+        )
+        .run(name, ...flags, id);
+      this.applyRoles(
+        "id IN (SELECT user_id FROM user_roles WHERE role_id=?) OR id NOT IN (SELECT user_id FROM user_roles)",
+        id,
+      );
+      this.audit(
+        user.id,
+        "role.update",
+        JSON.stringify({ role: id, ...input }),
+      );
+      return this.roleView(this.roleRow(id));
+    });
+  }
+  // Its accounts fall back to the default role.
+  deleteRole(user: User, id: string) {
+    this.requireAdmin(user);
+    this.transaction(() => {
+      const role = this.roleRow(id);
+      if (role.is_default)
+        throw new Problem(409, "Make another role the default before deleting this one.");
+      const members = (
+        this.db
+          .prepare("SELECT user_id AS id FROM user_roles WHERE role_id=?")
+          .all(id) as { id: string }[]
+      ).map((row) => row.id);
+      this.db.prepare("DELETE FROM user_roles WHERE role_id=?").run(id);
+      this.db.prepare("DELETE FROM roles WHERE id=?").run(id);
+      for (const member of members) this.applyRoles("id=?", member);
+      this.audit(
+        user.id,
+        "role.delete",
+        JSON.stringify({ role: id, name: role.name }),
+      );
+    });
+  }
+  setUserRole(user: User, targetId: string, roleId: unknown) {
+    this.requireAdmin(user);
+    const target = this.user(targetId);
+    if (target.remote_actor)
+      throw new Problem(400, "Only local accounts have roles.");
+    if (roleId !== null && typeof roleId !== "string")
+      throw new Problem(400, "Choose a role.");
+    return this.transaction(() => {
+      const role = roleId === null ? this.defaultRole() : this.roleRow(roleId);
+      this.db.prepare("DELETE FROM user_roles WHERE user_id=?").run(targetId);
+      if (!role.is_default)
+        this.db
+          .prepare("INSERT INTO user_roles VALUES(?,?)")
+          .run(targetId, role.id);
+      this.applyRoles("id=?", targetId);
+      this.audit(
+        user.id,
+        "user.role",
+        JSON.stringify({ user: targetId, role: role.id }),
+      );
+      return this.profile(this.user(targetId), true);
+    });
+  }
+  // ---- attachments: pictures and videos put in messages ----
+  addAttachment(user: User, data: unknown, nameValue: unknown) {
+    const me = this.requirePermission(user, "attachments");
+    if (!Buffer.isBuffer(data) || !data.length)
+      throw new Problem(
+        400,
+        "Attach a PNG, JPEG, GIF or WebP image, or an MP4 or WebM video.",
+      );
+    const mime = imageMime(data) || videoMime(data);
+    if (!mime)
+      throw new Problem(
+        415,
+        "Only PNG, JPEG, GIF and WebP images and MP4 and WebM videos can be attached.",
+      );
+    const video = mime.startsWith("video/"),
+      limit = video ? 52428800 : 10485760;
+    if (data.length > limit)
+      throw new Problem(
+        413,
+        `${video ? "Videos" : "Images"} can be up to ${limit / 1048576} MiB.`,
+      );
+    const recent = this.db
+      .prepare(
+        "SELECT COUNT(*) AS n,COALESCE(SUM(size),0) AS bytes FROM attachments WHERE owner_id=? AND created_at>?",
+      )
+      .get(me.id, new Date(Date.now() - 86400000).toISOString()) as {
+      n: number;
+      bytes: number;
+    };
+    if (recent.n >= 200 || recent.bytes + data.length > 524288000)
+      throw new Problem(429, "You have attached a lot today. Try again tomorrow.");
+    // The name ends up inside ![name](address), so nothing that would end either part.
+    const name =
+      (typeof nameValue === "string" ? nameValue : "")
+        .replace(/[\x00-\x1f\x7f\\/[\]()<>"`*_~|!]/g, "")
+        .trim()
+        .slice(0, 100) || `attachment.${mediaTypes[mime]}`;
+    const id = randomToken();
+    this.db
+      .prepare("INSERT INTO attachments VALUES(?,?,?,?,?,?,?)")
+      .run(id, me.id, name, mime, data.length, data, now());
+    return {
+      id,
+      url: `${this.baseUrl}/media/${id}.${mediaTypes[mime]}`,
+      name,
+      mime,
+      size: data.length,
+    };
+  }
+  attachment(file: string) {
+    const [, id, extension] =
+      /^([A-Za-z0-9_-]{43})\.([a-z0-9]{3,4})$/.exec(file) || [];
+    const row = id
+      ? (this.db
+          .prepare("SELECT id,name,mime,size FROM attachments WHERE id=?")
+          .get(id) as
+          | { id: string; name: string; mime: string; size: number }
+          | undefined)
+      : undefined;
+    if (!row || mediaTypes[row.mime] !== extension)
+      throw new Problem(404, "Attachment not found.");
+    return row;
+  }
+  // A slice of the file, so a video plays from wherever the viewer seeks to.
+  attachmentBytes(id: string, start: number, length: number) {
+    const row = this.db
+      .prepare("SELECT substr(data,?,?) AS bytes FROM attachments WHERE id=?")
+      .get(start + 1, length, id) as { bytes: Uint8Array } | undefined;
+    if (!row) throw new Problem(404, "Attachment not found.");
+    return Buffer.from(row.bytes);
+  }
+  // A removed message takes the files its author attached to it along.
+  private dropMedia(body: string, authorId: string) {
+    const prefix = `${this.baseUrl}/media/`;
+    for (
+      let at = body.indexOf(prefix);
+      at >= 0;
+      at = body.indexOf(prefix, at + 1)
+    )
+      this.db
+        .prepare("DELETE FROM attachments WHERE id=? AND owner_id=?")
+        .run(body.slice(at + prefix.length, at + prefix.length + 43), authorId);
   }
   emojis(): CustomEmoji[] {
     return (
@@ -747,7 +1100,7 @@ export class Store {
     return name;
   }
   createChannel(user: User, input: Record<string, unknown>) {
-    this.active(user.id);
+    this.requirePermission(user, "create_channels");
     const name = this.channelName(input.name);
     const description =
       typeof input.description === "string" ? input.description.trim() : "";
@@ -832,6 +1185,12 @@ export class Store {
       this.db
         .prepare(`DELETE FROM xmpp_message_ids WHERE message_id IN ${said}`)
         .run(id);
+      for (const message of this.db
+        .prepare(
+          "SELECT body,author_id FROM messages WHERE channel_id=? AND instr(body,'/media/')>0",
+        )
+        .all(id) as { body: string; author_id: string }[])
+        this.dropMedia(message.body, message.author_id);
       this.db.prepare("DELETE FROM messages WHERE channel_id=?").run(id);
       // Members' occupants in a bridged room existed only for this channel.
       this.db
@@ -1199,6 +1558,7 @@ export class Store {
     if (message.author_id === user.id) this.requirePost(user, channel);
     else this.requireManage(user, channel);
     this.transaction(() => {
+      this.dropMedia(message.body, message.author_id);
       this.db
         .prepare(
           "UPDATE messages SET body='', title=NULL, deleted_at=? WHERE id=?",
@@ -1252,6 +1612,12 @@ export class Store {
     return peer.startsWith(prefix) ? peer.slice(prefix.length) : null;
   }
   private directAccess(user: User, peer: string): DirectAccess {
+    const access = this.peerAccess(user, peer);
+    return access.blocked || this.can(user, "direct_messages")
+      ? access
+      : { ...access, blocked: denied.direct_messages };
+  }
+  private peerAccess(user: User, peer: string): DirectAccess {
     if (this.isUserBlocked(user.id, peer))
       return {
         incoming: true,
@@ -1809,6 +2175,7 @@ export class Store {
             federation_receive: !!u.federation_receive,
             federation_subscribe: !!u.federation_subscribe,
             federation_post: !!u.federation_post,
+            instance_role: this.grants(u).instance_role,
           }
         : {}),
     }));
@@ -1840,4 +2207,17 @@ export class Store {
       )
       .run(actor, action, target, now());
   }
+}
+
+// ISO media: an "ftyp" box naming a brand browsers play as MP4. WebM starts with an EBML header.
+function videoMime(data: Buffer) {
+  if (data.length >= 12 && data.toString("latin1", 4, 8) === "ftyp")
+    return /^(isom|iso[2-9]|mp4[12]|avc1|M4V |dash|mmp4|3gp[4-7])$/.test(
+      data.toString("latin1", 8, 12),
+    )
+      ? "video/mp4"
+      : "";
+  if (data.length >= 4 && data.readUInt32BE(0) === 0x1a45dfa3)
+    return "video/webm";
+  return "";
 }

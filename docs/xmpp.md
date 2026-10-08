@@ -36,6 +36,17 @@ for local accounts and the full bare address (`user@domain`) for occupants of
 other servers. Foreign rooms use a chosen nickname, subject to the hosting
 room's rules.
 
+A native client finds the local timeline channels its account belongs to in its
+bookmarks (private XML storage, `storage:bookmarks`), marked to join
+automatically, beside any bookmarks the client saved itself. Clients read
+bookmarks when they sign in, so a channel joined in the browser shows up after
+the client reconnects; leaving is done in Archipel, since a bookmark removed in
+the client comes back while the membership lasts. When Archipel refuses a join or
+a message, the error the client shows carries Archipel's own reason — for
+example that the account's role does not allow posting in a federated channel.
+Attachments reach XMPP clients as written, `![name](https://…/media/…)`: the
+address opens the file.
+
 ## Join a room hosted elsewhere
 
 Use the **+** beside **XMPP rooms** in the conversation sidebar (or **Channels →
@@ -45,17 +56,27 @@ reorders like the channel and direct-message sections; a room that is not
 currently joined shows its state beside its name. Archipel shows the room subject,
 nickname and role, and displays errors such as nickname conflicts or a required
 invitation. Use **Leave room** to stop participating; saved history stays private
-to your account. Use **Join again** after an error or removal.
+to your account. A room that drops you because either server restarted, or the
+connection between them failed, is joined again automatically; use **Join again**
+after being kicked, banned or refused.
 
-The instance must have XMPP and federation enabled. The account needs receiving
-and subscription grants to join/read, and sending and posting grants to write.
+The instance must have XMPP and federation enabled. The account's role must allow
+joining XMPP rooms, with receiving and subscription grants to join/read, and
+sending and posting grants to write.
 The hosting room must also grant a participant or moderator role. Instance,
 identity and personal room blocks apply on every receive/send and archive read.
 Revoking access removes active browser and native occupants and cancels pending
 browser posts.
 
 Prosody maintains a separate browser resource for each subscription and rejoins
-after a restart. Browser subscriptions continue receiving while the browser is
+after a restart. When the room ends a session without removing the member on
+purpose — a shutdown notice, an unreachable or restarting server, a join that goes
+unanswered — Archipel tries again after 5 seconds, doubling the wait up to ten
+minutes, and gives up after 200 failures in a row. A kick, a ban, loss of
+membership or a refused join (wrong nickname, invitation required) is final until
+the member joins again. Every two minutes each occupant pings its own nickname
+(XEP-0410) and rejoins if the room no longer knows it, which covers a room that
+restarted without a word. Browser subscriptions continue receiving while the browser is
 closed. Join history is requested with limits of 100 messages and 100,000 XML
 characters; the remote room chooses what it supplies. Older *locally received*
 messages can be paged in the browser. This does not backfill the remote MAM
@@ -155,8 +176,9 @@ administration from other servers are rejected. These posts are not relayed to
 ActivityPub subscribers of the same channel.
 
 Occupancy is live presence only: after the hosting Prosody restarts, or during
-an Archipel policy-service outage, foreign occupants are removed and must join
-again (**Join again** in the other instance's browser).
+an Archipel policy-service outage, foreign occupants are removed. Occupants that
+joined from another Archipel instance's browser come back by themselves once this
+instance answers again; native clients rejoin as their own software decides.
 
 ## Configure a deployment
 

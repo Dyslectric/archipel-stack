@@ -62,12 +62,38 @@ const shortcode =
   'required maxlength="64" pattern="[a-z0-9][a-z0-9_-]*" autocomplete="off"';
 const images =
   'type="file" accept="image/png,image/jpeg,image/gif,image/webp" required';
-const federationFlags = [
+// What a role grants, in the order the form lists it.
+const rolePermissions = [
+  ["create_channels", "Create channels"],
+  ["federate_channels", "Open their channels to federation"],
+  ["direct_messages", "Send direct messages"],
+  ["attachments", "Attach images and videos"],
+  ["xmpp_rooms", "Join XMPP rooms on other servers"],
   ["federation_send", "Send federated messages"],
   ["federation_receive", "Receive federated messages"],
   ["federation_subscribe", "Subscribe to remote channels"],
   ["federation_post", "Post in federated channels"],
 ] as const;
+type RolePermission = (typeof rolePermissions)[number][0];
+type Role = {
+  id: string;
+  name: string;
+  is_default: boolean;
+  members: number;
+} & Record<RolePermission, boolean>;
+const roleBoxes = (role?: Role) =>
+  rolePermissions
+    .map(
+      ([flag, label], i) =>
+        `${i === 5 ? '<p class="muted small role-split">With other instances and servers, while federation is enabled:</p>' : ""}<label class="check"><input type="checkbox" name="${flag}" ${(role ? role[flag] : !flag.startsWith("federation_")) ? "checked" : ""}> ${label}</label>`,
+    )
+    .join("");
+const roleValues = (data: FormData) => ({
+  name: data.get("name"),
+  ...Object.fromEntries(
+    rolePermissions.map(([flag]) => [flag, data.get(flag) === "on"]),
+  ),
+});
 const person = (u: User, note: string, controls = "") =>
   `<li class="member-row">${avatar(u)}<div class="grow">${nameButton(u, u.actor_url)} <span class="muted">@${esc(u.username)}</span><div class="muted small">${note}</div></div>${controls}</li>`;
 // Buttons that carry out one change and redraw the section.
@@ -335,7 +361,7 @@ const sections: Section[] = [
         s.user?.federation_subscribe &&
         s.user?.federation_receive;
       el.innerHTML =
-        `<p class="flash ${allowed ? "" : "warn-flash"}">${s.federation_enabled ? (allowed ? "Your administrator controls which federation actions your account may use." : "Your administrator has not allowed your account to subscribe to and receive remote channels.") : "Federation is disabled on this instance."}</p>` +
+        `<p class="flash ${allowed ? "" : "warn-flash"}">${s.federation_enabled ? (allowed ? "Your role decides which federation actions your account may use." : "Your role does not allow subscribing to and receiving remote channels.") : "Federation is disabled on this instance."}</p>` +
         card(
           "Subscribe to a channel",
           `<form class="stack narrow-form" id="remote-subscribe"><label>Channel address<input name="address" placeholder="#general@chat.example.org or an actor URL" required></label>${error}<button ${allowed ? "" : "disabled"}>Subscribe to channel</button></form>`,
@@ -380,7 +406,7 @@ const sections: Section[] = [
           allowed
             ? ""
             : s.federation_enabled
-              ? "Your administrator has not allowed your account to send federated messages."
+              ? "Your role does not allow sending federated messages."
               : "Federation is disabled on this instance.",
         ) +
         card(
@@ -402,53 +428,26 @@ const sections: Section[] = [
     key: "instance",
     label: "Instance federation",
     about:
-      "Federation and every user permission start disabled. Local conversations remain available either way.",
+      "Federation starts disabled, and no role grants it until you say so. Local conversations remain available either way.",
     icon: "shield",
     admin: true,
     async draw(el) {
-      const [status, users] = await Promise.all([
-        api<{ enabled: boolean }>("/admin/federation"),
-        api<User[]>("/users"),
-      ]);
+      const status = await api<{ enabled: boolean }>("/admin/federation");
       el.innerHTML =
         card(
           "Federation",
           `<form class="stack" id="federation-enable"><label class="check"><input type="checkbox" name="enabled" ${status.enabled ? "checked" : ""}> Enable federation for this instance</label>${error}<button>Save federation setting</button></form>`,
         ) +
         card(
-          "User permissions",
-          `<form class="stack narrow-form" id="federation-permissions"><label>Local user<select name="user">${users.map((u) => `<option value="${u.id}">@${esc(u.username)}</option>`).join("")}</select></label>${federationFlags.map(([flag, label]) => `<label class="check"><input type="checkbox" name="${flag}"> ${label}</label>`).join("")}${error}<button>Save user permissions</button></form>`,
-          "Changes apply to queued deliveries and open browser sessions.",
+          "Who may federate",
+          '<p>Sending, receiving, following remote channels and posting in federated ones are granted by role.</p><a class="button secondary" href="#/settings/instance/roles">Manage roles</a>',
         );
-      const permissions = $<HTMLFormElement>("#federation-permissions", el);
-      const fill = () => {
-        const selected = users.find(
-          (u) => u.id === new FormData(permissions).get("user"),
-        );
-        for (const [flag] of federationFlags)
-          $<HTMLInputElement>(`input[name="${flag}"]`, permissions).checked =
-            !!selected?.[flag];
-      };
-      fill();
-      $("select", permissions).addEventListener("change", fill);
       onSubmit($("#federation-enable", el), async (data) => {
         await api("/admin/federation", "PATCH", {
           enabled: data.get("enabled") === "on",
         });
         state.session = await api<Session>("/session");
         toast("Federation setting saved.");
-      });
-      onSubmit(permissions, async (data) => {
-        const updated = await api<User>(
-          `/admin/users/${data.get("user")}/federation`,
-          "PATCH",
-          Object.fromEntries(
-            federationFlags.map(([flag]) => [flag, data.get(flag) === "on"]),
-          ),
-        );
-        Object.assign(users.find((u) => u.id === updated.id)!, updated);
-        state.session = await api<Session>("/session");
-        toast("Federation permissions saved.");
       });
     },
   },
@@ -902,13 +901,74 @@ const sections: Section[] = [
   },
   {
     group: "instance",
+    key: "roles",
+    label: "Roles",
+    about:
+      "What accounts on this instance may do. Everyone has the default role unless given another under People.",
+    icon: "lock",
+    admin: true,
+    async draw(el, ctx) {
+      const roles = await api<Role[]>("/admin/roles");
+      el.innerHTML =
+        roles
+          .map((role) =>
+            card(
+              `${esc(role.name)}${role.is_default ? ' <span class="pill kept">Default</span>' : ""} <span class="pill">${role.members} account${role.members === 1 ? "" : "s"}</span>`,
+              `<form class="stack narrow-form role-form" data-role="${role.id}" aria-label="Role ${esc(role.name)}"><label>Role name<input name="name" required maxlength="40" value="${esc(role.name)}" autocomplete="off"></label>${roleBoxes(role)}${error}<div class="row"><button>Save role</button>${role.is_default ? "" : `<button type="button" class="secondary" data-default-role="${role.id}">Make default</button><button type="button" class="secondary bad-text" data-delete-role="${role.id}">Delete role</button>`}</div></form>`,
+            ),
+          )
+          .join("") +
+        card(
+          "Create a role",
+          `<form class="stack narrow-form" id="role-create"><label>New role name<input name="name" required maxlength="40" placeholder="Federated" autocomplete="off"></label>${roleBoxes()}${error}<button>Create role</button></form>`,
+          "Changes reach open browser sessions and queued deliveries within seconds.",
+        );
+      const changed = async (message: string) => {
+        state.session = await api<Session>("/session");
+        toast(message);
+        await ctx.refresh();
+      };
+      for (const form of $$<HTMLFormElement>(".role-form", el))
+        onSubmit(form, async (data) => {
+          await api(`/admin/roles/${form.dataset.role}`, "PATCH", roleValues(data));
+          await changed("Role saved.");
+        });
+      onSubmit($("#role-create", el), async (data) => {
+        await api("/admin/roles", "POST", roleValues(data));
+        await changed("Role created.");
+      });
+      onClick(el, "[data-default-role]", async (button) => {
+        await api(`/admin/roles/${button.dataset.defaultRole}`, "PATCH", {
+          is_default: true,
+        });
+        await changed("Default role changed.");
+      });
+      onClick(el, "[data-delete-role]", async (button) => {
+        if (
+          !(await confirmDialog(
+            "Delete this role?",
+            "Accounts that have it go back to the default role.",
+            "Delete role",
+          ))
+        )
+          return;
+        await api(`/admin/roles/${button.dataset.deleteRole}`, "DELETE");
+        await changed("Role deleted.");
+      });
+    },
+  },
+  {
+    group: "instance",
     key: "people",
     label: "People",
     about: "Everyone with an account on this instance.",
     icon: "people",
     admin: true,
     async draw(el, ctx) {
-      const users = await api<User[]>("/users");
+      const [users, roles] = await Promise.all([
+        api<User[]>("/users"),
+        api<Role[]>("/admin/roles"),
+      ]);
       el.innerHTML = card(
         `${users.length} account${users.length === 1 ? "" : "s"}`,
         `<ul class="plain admin-users">${users
@@ -916,13 +976,25 @@ const sections: Section[] = [
             person(
               u,
               `<span class="pill ${u.admin ? "kept" : u.banned ? "bad" : "good"}">${u.admin ? "Administrator" : u.banned ? "Suspended" : "Active"}</span>`,
-              u.admin
+              `<select class="role-select" data-role-for="${u.id}" aria-label="Role for @${esc(u.username)}" title="Role">${roles.map((r) => `<option value="${r.id}" ${r.id === u.instance_role?.id ? "selected" : ""}>${esc(r.name)}${r.is_default ? " (default)" : ""}</option>`).join("")}</select>` +
+              (u.admin
                 ? ""
-                : `<button type="button" class="small secondary ${u.banned ? "" : "bad-text"}" data-ban="${u.id}" data-status="${u.banned ? "false" : "true"}">${u.banned ? "Restore" : "Suspend"}</button>`,
+                : `<button type="button" class="small secondary ${u.banned ? "" : "bad-text"}" data-ban="${u.id}" data-status="${u.banned ? "false" : "true"}">${u.banned ? "Restore" : "Suspend"}</button>`),
             ),
           )
           .join("")}</ul>`,
+        'What each role allows is set under <a href="#/settings/instance/roles">Roles</a>.',
       );
+      for (const select of $$<HTMLSelectElement>("[data-role-for]", el))
+        select.addEventListener("change", () =>
+          action(async () => {
+            await api(`/admin/users/${select.dataset.roleFor}/role`, "PATCH", {
+              role_id: select.value,
+            });
+            state.session = await api<Session>("/session");
+            toast("Role changed.");
+          }),
+        );
       onClick(el, "[data-ban]", async (button) => {
         await api(`/admin/users/${button.dataset.ban}`, "PATCH", {
           banned: button.dataset.status === "true",

@@ -7,7 +7,13 @@ type Room = {
   id: string; user_id: string; room: string; nick: string; session: string;
   desired: number; state: string; role: string; subject: string;
   error: string | null; updated_at: number; bridged: number;
+  attempts: number; retry_at: number | null;
 };
+// Why a room session ended, when that is likely to pass: the other server or the path to it is down or restarting.
+const passing = ["remote-server-not-found", "remote-server-timeout", "service-unavailable", "internal-server-error",
+  "recipient-unavailable", "resource-constraint", "undefined-condition", "dropped"];
+// Removed on purpose by the room: kicked, banned, or no longer a member of a members-only room.
+const removed = ["301", "307", "321", "322"];
 type Bridge = { channel_id: string; room: string; created_by: string; created_at: string };
 type Message = {
   seq: number; id: string; subscription_id: string; sender: string; body: string;
@@ -27,7 +33,7 @@ export class RemoteRooms {
   }
   check(user: User, room: string, posting = false) {
     this.xmpp.enabled();
-    const me = this.store.active(user.id), access = this.xmpp.remoteAccess(me, `xmpp:${room}`);
+    const me = this.store.requirePermission(user, "xmpp_rooms"), access = this.xmpp.remoteAccess(me, `xmpp:${room}`);
     if (access.blocked || !access.incoming || !me.federation_subscribe)
       throw new Problem(403, access.blocked || "Receiving and subscribing to federated rooms must be enabled for this account.");
     if (posting && (!access.outgoing || !me.federation_post))
@@ -46,6 +52,7 @@ export class RemoteRooms {
     return { id: row.id, room: row.room, nick: row.nick, desired: !!row.desired,
       state: row.state === "joined" && Date.now() - row.updated_at > 15000 ? "disconnected" : row.state,
       role: row.role, subject: row.subject, error: row.error, blocked,
+      reconnecting: !blocked && row.desired === 1 && row.retry_at !== null && ["error", "left"].includes(row.state),
       can_post: !blocked && !postBlocked && row.desired === 1 && row.state === "joined" &&
         Date.now() - row.updated_at <= 15000 && ["participant", "moderator"].includes(row.role), post_blocked: postBlocked };
   }
@@ -66,7 +73,7 @@ export class RemoteRooms {
     const id = old?.id || randomUUID(), session = randomUUID();
     this.store.transaction(() => {
       this.store.db.prepare(`INSERT INTO xmpp_remote_rooms(id,user_id,room,nick,session,updated_at,bridged) VALUES(?,?,?,?,?,?,?)
-        ON CONFLICT(user_id,room) DO UPDATE SET nick=excluded.nick,session=excluded.session,desired=1,state='joining',role='none',error=NULL,updated_at=excluded.updated_at,bridged=excluded.bridged`)
+        ON CONFLICT(user_id,room) DO UPDATE SET nick=excluded.nick,session=excluded.session,desired=1,state='joining',role='none',error=NULL,updated_at=excluded.updated_at,bridged=excluded.bridged,attempts=0,retry_at=NULL`)
         .run(id, user.id, room, nick, session, Date.now(), Number(bridged));
       this.failPending(id, "The room session changed. Send the message again.");
     });
@@ -78,7 +85,7 @@ export class RemoteRooms {
   leave(user: User, id: string) {
     this.owned(user, id);
     this.store.transaction(() => {
-      this.store.db.prepare("UPDATE xmpp_remote_rooms SET desired=0,state='left',role='none',error=NULL,updated_at=? WHERE id=?").run(Date.now(), id);
+      this.store.db.prepare("UPDATE xmpp_remote_rooms SET desired=0,state='left',role='none',error=NULL,retry_at=NULL,updated_at=? WHERE id=?").run(Date.now(), id);
       this.failPending(id, "You left this room.");
     });
     return { ok: true };
@@ -117,9 +124,15 @@ export class RemoteRooms {
       if (!["joining", "joined", "error", "left"].includes(state)) throw new Problem(400, "Unknown room state.");
       const role = ["participant", "moderator", "visitor"].includes(String(input.role)) ? String(input.role) : "none";
       const nick = sender.includes("/") ? sender.slice(sender.indexOf("/") + 1) : room.nick;
+      // A session that ended for a passing reason is joined again, a little later each time it fails.
+      const codes = Array.isArray(input.codes) ? input.codes.map(String) : [];
+      const again = state === "error" ? passing.includes(String(input.condition))
+        : state === "left" && !codes.some(code => removed.includes(code));
+      const attempts = state === "joined" ? 0 : again ? room.attempts + 1 : room.attempts;
+      const retryAt = again && attempts <= 200 ? Date.now() + Math.min(600, 5 * 2 ** Math.min(attempts - 1, 10)) * 1000 : null;
       this.store.transaction(() => {
-        this.store.db.prepare("UPDATE xmpp_remote_rooms SET state=?,role=?,nick=?,error=?,updated_at=? WHERE id=?")
-          .run(state, role, nick, input.error ? text(input.error, "Room error", 500) : null, Date.now(), room.id);
+        this.store.db.prepare("UPDATE xmpp_remote_rooms SET state=?,role=?,nick=?,error=?,updated_at=?,attempts=?,retry_at=? WHERE id=?")
+          .run(state, role, nick, input.error ? text(input.error, "Room error", 500) : null, Date.now(), attempts, retryAt, room.id);
         if (state === "error" || state === "left") this.failPending(room.id, "The room session ended.");
         else if (state === "joined" && !["participant", "moderator"].includes(role)) this.failPending(room.id, "The room changed your speaking role.");
       });
@@ -256,10 +269,14 @@ export class RemoteRooms {
       try { this.check(this.store.user(row.user_id), row.room); }
       catch {
         this.failPending(row.id, "Room federation access was revoked.");
-        this.store.db.prepare("UPDATE xmpp_remote_rooms SET state='error',role='none',error='Room federation access was revoked.' WHERE id=?").run(row.id);
+        this.store.db.prepare("UPDATE xmpp_remote_rooms SET state='error',role='none',error='Room federation access was revoked.',retry_at=NULL WHERE id=?").run(row.id);
         continue;
       }
-      if (["error", "left"].includes(row.state)) continue;
+      if (["error", "left"].includes(row.state)) {
+        if (row.retry_at === null || row.retry_at > Date.now()) continue;
+        this.store.db.prepare("UPDATE xmpp_remote_rooms SET state='joining',role='none',retry_at=NULL,updated_at=? WHERE id=?").run(Date.now(), row.id);
+        row.state = "joining";
+      }
       desired.push({ session: row.session, from: `${this.xmpp.jid(this.store.user(row.user_id))}/archipel-room-${row.session}`, room: row.room, nick: row.nick });
       if (active.includes(row.session)) this.store.db.prepare("UPDATE xmpp_remote_rooms SET updated_at=? WHERE id=?").run(Date.now(), row.id);
       if (row.state !== "joined" || !active.includes(row.session) || !["participant", "moderator"].includes(row.role)) continue;

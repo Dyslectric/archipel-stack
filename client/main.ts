@@ -22,7 +22,8 @@ import {
   type Session,
 } from "./shared.js";
 import { redrawChat, refreshCurrent, resetChat, showChat } from "./chat.js";
-import { adoptLayout, renderSidebar } from "./sidebar.js";
+import { adoptLayout, renderSidebar, toggleSidebar } from "./sidebar.js";
+import "./attach.js";
 import { showInbox, tickInbox } from "./inbox.js";
 import "./people.js";
 import {
@@ -61,7 +62,7 @@ function renderShell() {
   const s = state.session,
     instance = esc(s.instance);
   app.innerHTML = `<div class="app"><a class="skip-link" href="#view">Skip to content</a><header class="top"><div class="top-inner">
-    <button type="button" id="mobile-menu" class="icon-button" aria-label="Show channels" title="Channels and direct messages">${icon("menu")}</button>
+    <button type="button" id="mobile-menu" class="icon-button" aria-label="Show channels" title="Show or hide channels and direct messages">${icon("sidebar")}</button>
     <a class="brand" href="#/" aria-label="Archipel home">${icon("logo", "brand-mark")}<span>Archipel</span></a>
     <nav class="primary" aria-label="Main">
       <a class="nav-item" data-nav="chat" href="#/" title="Chat">${icon("chat")}<span class="label">Chat</span></a>
@@ -80,9 +81,7 @@ function renderShell() {
       <div class="menu-section"><button type="button" class="menu-item" id="sign-out-menu">${icon("logout")}<span class="grow">Sign out</span></button></div>
     </div></details></div></header><div id="view"></div></div>`;
   renderAccount();
-  $("#mobile-menu").addEventListener("click", () =>
-    document.querySelector("#sidebar")?.classList.toggle("mobile-open"),
-  );
+  $("#mobile-menu").addEventListener("click", toggleSidebar);
   $("#sign-out-menu").addEventListener("click", () => action(hooks.signOut));
 }
 // Menus and the channel drawer close on a click elsewhere, on Escape, and once they've been used.
@@ -184,6 +183,11 @@ const federationPolicy = (s: Session) =>
     s.user?.federation_receive,
     s.user?.federation_subscribe,
     s.user?.federation_post,
+    s.user?.instance_role?.id,
+    s.user?.create_channels,
+    s.user?.direct_messages,
+    s.user?.attachments,
+    s.user?.xmpp_rooms,
   ]);
 function connection(up: boolean) {
   const status = document.querySelector<HTMLElement>("#connection-status");

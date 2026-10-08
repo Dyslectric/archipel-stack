@@ -12,7 +12,7 @@ local domain = module:get_option_string("archipel_domain");
 
 local function request(path, input)
   local wait, done = async.waiter();
-  local result, status, completed;
+  local result, status, completed, reason;
   local pending = http.request(api_url .. path, {
     method = "POST";
     headers = { ["Content-Type"] = "application/json"; ["Authorization"] = "Bearer " .. secret };
@@ -21,7 +21,12 @@ local function request(path, input)
     if completed then return; end
     completed = true;
     status = code;
-    if code == 200 then result = json.decode(body); end
+    if code == 200 then result = json.decode(body);
+    elseif body then
+      -- Archipel says why it refused, in words meant for the member.
+      local ok, refusal = pcall(json.decode, body);
+      if ok and type(refusal) == "table" and type(refusal.error) == "string" and #refusal.error <= 300 then reason = refusal.error; end
+    end
     done();
   end);
   module:add_timer(5, function()
@@ -33,7 +38,7 @@ local function request(path, input)
     end
   end);
   wait();
-  return result, status;
+  return result, status, reason;
 end
 local function operation(event, op, extras)
   local stanza, origin = event.stanza, event.origin;
@@ -48,12 +53,12 @@ local function operation(event, op, extras)
   origin.archipel_stream_id = origin.archipel_stream_id or uuid.generate();
   input.stream = origin.archipel_stream_id;
   input.id = stanza.attr.id or uuid.generate();
-  local result, status = request("/operation", input);
+  local result, status, reason = request("/operation", input);
   if not result and stanza.attr.type ~= "error" and stanza.attr.type ~= "result" then
     local condition = status == 404 and "item-not-found" or
       status == 400 and "bad-request" or status == 409 and "conflict" or
       (status == 401 or status == 403) and "forbidden" or "service-unavailable";
-    origin.send(st.error_reply(stanza, "cancel", condition, "Archipel could not authorize this operation."));
+    origin.send(st.error_reply(stanza, "cancel", condition, reason or "Archipel could not authorize this operation."));
   end
   return result;
 end

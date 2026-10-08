@@ -8,8 +8,10 @@ supported yet. Local mirrors are described at the end of this document.
 
 ## Enable and grant access
 
-1. An administrator opens **Profile → Instance administration → Federation
-   controls**, enables federation, and saves permissions for each local user.
+1. An administrator opens **Settings → Instance federation** and enables
+   federation, then under **Settings → Roles** creates a role with the grants
+   below (or adds them to the default role) and gives it to accounts under
+   **Settings → People**.
 2. A local channel's owner, moderator, or instance admin opens channel settings →
    **Federation and remote followers** and enables that channel.
 3. Users open **Profile → Federated conversations** to subscribe to
@@ -33,7 +35,8 @@ inspect recent delivery results in the same panel. Changes are audited.
 Subscribing requires receive and subscribe. Posting on a remote channel requires
 all four grants and accepted membership. Posting in an opted-in home channel
 requires send and post. Local channels without federation retain ordinary local
-permissions. Admin privileges do not bypass federation grants.
+permissions. Admin privileges do not bypass federation grants. A role also says
+whether its accounts may open their own channels to federation at all.
 
 Revoking receive or subscribe withdraws remote subscriptions, removes access,
 and queues an `Undo`. Queue processing rechecks the current policy before every

@@ -1,3 +1,4 @@
+import { grant } from "./roles.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Store, Problem } from "../src/store.js";
@@ -15,7 +16,7 @@ function fixture() {
   const alice = store.loginIdentity("urn:archipel:development", "alice", "alice", [], true);
   const bob = store.loginIdentity("urn:archipel:development", "bob", "bob", []);
   fed.setEnabled(alice, true);
-  fed.setPermissions(alice, alice.id, all);
+  grant(fed.store, alice, alice.id, all);
   const a = xmpp.issue(alice, "Desktop"), b = xmpp.issue(bob, "Phone");
   const plaza = store.createChannel(alice, { name: "plaza", mode: "timeline", visibility: "public", admission: "open" });
   fed.setChannel(alice, plaza.id, true);
@@ -79,7 +80,7 @@ test("foreign occupants are admitted only over s2s into federated public rooms t
 
 test("foreign occupants read bounded join history, live messages and the room archive under author grants and tombstones", () => {
   const f = fixture();
-  f.fed.setPermissions(f.alice, f.bob.id, all);
+  grant(f.fed.store, f.alice, f.bob.id, all);
   f.store.join(f.bob, f.plaza.id);
   const first = f.store.post(f.alice, f.plaza.id, { body: "First" });
   f.store.post(f.bob, f.plaza.id, { body: "From Bob" });
@@ -87,7 +88,7 @@ test("foreign occupants read bounded join history, live messages and the room ar
   f.store.deleteMessage(f.alice, removed.id);
   f.store.post(f.alice, f.plaza.id, { body: "Latest" });
   // An author whose send grant was withdrawn no longer leaves the instance.
-  f.fed.setPermissions(f.alice, f.bob.id, { ...all, federation_send: false });
+  grant(f.fed.store, f.alice, f.bob.id, { ...all, federation_send: false });
 
   const history = (f.xmpp.operation(f.from("join", { history: 25 })) as { history: { body: string; from: string; to: string; id: string }[] }).history;
   assert.deepEqual(history.map(m => m.body), ["First", "This message was removed.", "Latest"]);
@@ -160,7 +161,7 @@ test("personal blocks and receive grants hide foreign authors from local readers
   assert.equal(f.store.inbox(f.bob).length, 0);
   assert.equal(f.sync(bobRoom).messages.filter(m => m.to === `${f.b.jid}/test`).length, 0);
   assert.equal((f.xmpp.archive(f.bob, { room: f.room }) as { count: number }).count, 0);
-  f.fed.setPermissions(f.alice, f.bob.id, { ...none, federation_receive: true });
+  grant(f.fed.store, f.alice, f.bob.id, { ...none, federation_receive: true });
   assert.equal(f.store.messages(f.bob, f.plaza.id)[0].body, "Visible to grantees");
   assert.equal(f.store.overview(f.bob).unread[f.plaza.id], 1);
   assert.equal(f.sync(bobRoom).messages.find(m => m.to === `${f.b.jid}/test`)!.body, "Visible to grantees");

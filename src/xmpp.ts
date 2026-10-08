@@ -196,6 +196,7 @@ export class Xmpp {
     return address;
   }
   sendDirect(user: User, to: unknown, bodyValue: unknown) {
+    this.store.requirePermission(user, "direct_messages");
     const target = this.remoteJid(to);
     if (target.endsWith(`@${this.config.xmppDomain}`)) {
       const recipient = this.local(target);
@@ -304,13 +305,18 @@ export class Xmpp {
         return { valid: true };
       }
       case "rooms": return { rooms: this.status(user).channels };
+      // The rooms a client should open by itself: the local timeline channels this account is in.
+      case "bookmarks": return { nick: this.account(user).node,
+        rooms: this.store.listChannels(user).filter(c => !c.remote_actor && c.mode === "timeline" && c.role)
+          .map(c => ({ name: c.name, jid: `${c.name}@${this.rooms}` })) };
       case "join": {
         const channel = this.room(input.to);
         this.store.join(user, channel.id);
         this.store.requireRead(user, channel);
         return { name: channel.name, description: channel.description };
       }
-      case "read": { this.roomAccess(user, text(input.to, "Room", 512)); return { valid: true }; }
+      // What a room is can be asked by whoever may read the channel, so a client learns its features before joining.
+      case "read": { this.store.requireRead(user, this.room(input.to)); return { valid: true }; }
       case "post": {
         const channel = this.roomAccess(user, text(input.to, "Room", 512));
         this.store.requirePost(user, channel);

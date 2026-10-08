@@ -1,3 +1,4 @@
+import { grant } from "./roles.js";
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
@@ -54,8 +55,8 @@ async function instance(t: TestContext) {
   );
   const bob = store.loginIdentity("urn:archipel:development", "bob", "bob", []);
   fed.setEnabled(alice, true);
-  fed.setPermissions(alice, alice.id, permissions);
-  fed.setPermissions(alice, bob.id, permissions);
+  grant(fed.store, alice, alice.id, permissions);
+  grant(fed.store, alice, bob.id, permissions);
   const result = {
     server,
     origin,
@@ -249,7 +250,7 @@ test("two real instances subscribe, exchange signed messages, edit, delete, and 
   );
   const homeCopy = a.store.messages(a.alice, home.id).at(-1)!;
   const session = a.store.createSession(a.bob.id);
-  a.fed.setPermissions(a.alice, a.bob.id, {
+  grant(a.fed.store, a.alice, a.bob.id, {
     ...permissions,
     federation_receive: false,
   });
@@ -344,7 +345,7 @@ test("all four user controls are enforced for direct messages, subscriptions, re
     federation_subscribe: false,
     federation_post: false,
   };
-  b.fed.setPermissions(b.alice, b.bob.id, denied);
+  grant(b.fed.store, b.alice, b.bob.id, denied);
   await assert.rejects(
     b.fed.subscribe(b.bob, a.fed.channelActor(home)),
     Problem,
@@ -354,16 +355,16 @@ test("all four user controls are enforced for direct messages, subscriptions, re
     Problem,
   );
   assert.throws(
-    () => b.fed.setPermissions(b.bob, b.bob.id, permissions),
+    () => grant(b.fed.store, b.bob, b.bob.id, permissions),
     Problem,
   );
-  b.fed.setPermissions(b.alice, b.bob.id, permissions);
+  grant(b.fed.store, b.alice, b.bob.id, permissions);
   const sub = await b.fed.subscribe(
     b.store.user(b.bob.id),
     a.fed.channelActor(home),
   );
   await drain(a, b);
-  b.fed.setPermissions(b.alice, b.bob.id, {
+  grant(b.fed.store, b.alice, b.bob.id, {
     ...permissions,
     federation_post: false,
   });
@@ -371,11 +372,11 @@ test("all four user controls are enforced for direct messages, subscriptions, re
     b.fed.remotePost(b.bob, sub.channel.id, { body: "Denied post" }),
     Problem,
   );
-  b.fed.setPermissions(b.alice, b.bob.id, permissions);
+  grant(b.fed.store, b.alice, b.bob.id, permissions);
   await b.fed.sendDirect(b.bob, a.fed.userActor(a.bob), "Private hello");
   await drain(a, b);
   assert.equal(a.fed.directMessages(a.bob)[0].body, "Private hello");
-  a.fed.setPermissions(a.alice, a.bob.id, {
+  grant(a.fed.store, a.alice, a.bob.id, {
     ...permissions,
     federation_receive: false,
   });
@@ -396,7 +397,7 @@ test("all four user controls are enforced for direct messages, subscriptions, re
     visibility: "public",
     admission: "open",
   });
-  b.fed.setPermissions(b.alice, b.bob.id, denied);
+  grant(b.fed.store, b.alice, b.bob.id, denied);
   b.store.post(b.store.user(b.bob.id), local.id, { body: "Local still works" });
   assert.equal(
     b.store.messages(b.store.user(b.bob.id), local.id)[0].body,
@@ -412,7 +413,7 @@ test("queued deliveries persist and recheck disabled users and blocked instances
     a.fed.userActor(a.bob),
     "Cancelled before send",
   );
-  b.fed.setPermissions(b.alice, b.bob.id, {
+  grant(b.fed.store, b.alice, b.bob.id, {
     ...permissions,
     federation_send: false,
   });
@@ -426,7 +427,7 @@ test("queued deliveries persist and recheck disabled users and blocked instances
     "cancelled",
   );
   assert.deepEqual(a.fed.directMessages(a.bob), []);
-  b.fed.setPermissions(b.alice, b.bob.id, permissions);
+  grant(b.fed.store, b.alice, b.bob.id, permissions);
   await b.fed.sendDirect(b.bob, a.fed.userActor(a.bob), "Blocked peer");
   b.fed.block(b.alice, { kind: "instance", target: a.origin, blocked: true });
   await b.fed.tick();
@@ -746,7 +747,7 @@ test("cached foreign channel messages are hidden when receiving is denied and re
   await drain(a, b);
   a.store.post(a.alice, home.id, { body: "Foreign history" });
   await drain(a, b);
-  b.fed.setPermissions(b.alice, b.bob.id, {
+  grant(b.fed.store, b.alice, b.bob.id, {
     ...permissions,
     federation_receive: false,
   });

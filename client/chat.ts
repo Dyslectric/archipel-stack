@@ -18,6 +18,7 @@ import {
   modeLabel,
   nameButton,
   refreshTimes,
+  richHtml,
   sameDay,
   state,
   toast,
@@ -29,6 +30,8 @@ import {
 } from "./shared.js";
 import { closePicker, togglePicker } from "./picker.js";
 import { renderSidebar, wireSidebar } from "./sidebar.js";
+import { attachButton, pickFiles } from "./attach.js";
+import { markdownText } from "./markdown.js";
 
 interface Page {
   messages: Message[];
@@ -63,6 +66,7 @@ export function resetChat() {
   current = null;
   messages = [];
   generation++;
+  renderMembers();
 }
 // A direct conversation is shown as a two-person timeline: its id is dm:<peer>.
 const dmChannel = (c: Conversation): Channel => ({
@@ -126,7 +130,7 @@ function postBlocked() {
       !s.user?.federation_send ||
       !s.user?.federation_post)
   )
-    return "Your administrator must enable sending and posting in federated channels before you can write here.";
+    return "Your administrator must enable sending and posting in federated channels for your role before you can write here.";
   return null;
 }
 const canPost = () => !!current?.role && !postBlocked();
@@ -140,14 +144,22 @@ export function chatFrame(view: HTMLElement) {
       <a class="side-foot" href="#/channels">${icon("compass")}<span>Browse all channels</span></a>
       <a class="side-foot" href="#/settings/federation/remote">${icon("globe")}<span>Join a federated channel</span></a>
       <a class="side-foot" href="#/xmpp">${icon("globe")}<span>Join an XMPP room</span></a>
-      <button type="button" class="side-foot" data-new-dm>${icon("pencil")}<span>New direct message</span></button></aside>
+      <button type="button" class="side-foot" data-new-dm>${icon("pencil")}<span>New direct message</span></button>
+      <div class="side-resize" id="side-resize" role="separator" aria-orientation="vertical" aria-label="Sidebar width" aria-valuemin="180" aria-valuemax="520" tabindex="0" title="Drag to resize. Double-click to reset."></div></aside>
       <main class="conversation" id="main"><header class="channel-header"><div id="channel-heading"></div><div class="header-actions" id="channel-actions"></div></header>
       <div class="feed-wrap"><div id="message-list" class="feed" role="log" aria-label="Conversation" tabindex="-1"><div class="feed-inner"><div id="feed-top"></div><div id="rows"></div><div id="feed-empty"></div></div></div>
       <button type="button" id="new-pill" class="new-pill" hidden></button></div>
-      <div id="composer-area"></div></main></div>`;
+      <div id="composer-area"></div></main>
+      <aside class="members-panel" id="member-panel" aria-label="Members" hidden></aside></div>`;
   painted = false;
   wireSidebar($("#channel-list"));
   wireFeed();
+  $("#channel-actions").addEventListener("click", (e) => {
+    if ((e.target as Element).closest("#members")) toggleMembers();
+  });
+  $("#member-panel").addEventListener("click", (e) => {
+    if ((e.target as Element).closest("[data-close-members]")) toggleMembers();
+  });
 }
 export async function showChat(
   view: HTMLElement,
@@ -215,8 +227,53 @@ function paint() {
   $("#rows").innerHTML = "";
   renderSidebar();
   renderHeader();
+  renderMembers();
   renderComposer(false);
   render({ bottom: true });
+}
+
+// ---- who is here: the channel's members, beside the conversation ----
+const MEMBERS = "archipel-members";
+function membersOpen() {
+  try {
+    const saved = localStorage.getItem(MEMBERS);
+    return saved ? saved === "1" : innerWidth >= 1100;
+  } catch {
+    return innerWidth >= 1100;
+  }
+}
+function toggleMembers() {
+  try {
+    localStorage.setItem(MEMBERS, membersOpen() ? "0" : "1");
+  } catch {
+    /* Without storage the panel keeps its default. */
+  }
+  renderHeader();
+  renderMembers();
+}
+const ranks = [
+  ["owner", "Owner"],
+  ["moderator", "Moderators"],
+  ["member", "Members"],
+] as const;
+function renderMembers() {
+  const panel = document.querySelector<HTMLElement>("#member-panel");
+  if (!panel) return;
+  const c = current,
+    show = !!c && !c.dm && membersOpen();
+  panel.hidden = !show;
+  if (!show) return;
+  const members = c.members || [];
+  const html = `<div class="panel-head"><h2 class="grow">Members <span class="muted">${members.length}</span></h2><a class="icon-button" href="#/settings/channel/members/${c.id}" aria-label="Manage members" title="Roles, invitations and removal">${icon("settings")}</a><button type="button" class="icon-button" data-close-members aria-label="Hide members" title="Hide members">${icon("x")}</button></div>
+    <div class="panel-body">${ranks
+      .map(([role, label]) => {
+        const list = members.filter((u) => u.role === role);
+        return list.length
+          ? `<h3 class="side-label">${label}${role === "owner" ? "" : ` · ${list.length}`}</h3><ul class="plain member-rows">${list.map((u) => `<li>${avatar(u, "small")}${nameButton(u, u.actor_url, "member-name")}${u.actor_url?.startsWith("xmpp:") ? '<span class="mode-tag">XMPP</span>' : u.actor_url && !u.actor_url.startsWith(location.origin) ? `<span class="mode-tag" title="On another instance">${icon("globe")}</span>` : ""}</li>`).join("")}</ul>`
+          : "";
+      })
+      .join("")}</div>`;
+  if (panel.dataset.html !== html) panel.innerHTML = panel.dataset.html = html;
 }
 
 export function sortedTopics() {
@@ -238,7 +295,7 @@ function renderHeader() {
   $("#channel-heading").innerHTML =
     `<h1>${channelIcon(c)}<strong>${esc(c.name)}</strong>${topic ? `${icon("chevron-right", "sep")}<span class="topic-name">${esc(topic.title)}</span>` : ""}</h1><span class="pill">${modeLabel(c.mode)}</span>${c.remote_actor ? '<span class="pill new">Remote</span>' : c.federation_enabled ? '<span class="pill new">Federated</span>' : ""}${c.bridge_room ? `<span class="pill new" title="Bridged with the XMPP room ${esc(c.bridge_room)}">Bridged</span>` : ""}${c.mirror ? `<span class="pill new">${c.mirror === "writable" ? "Fork" : "Mirror"}</span>` : ""}${c.description ? `<span class="desc muted small">${esc(c.description)}</span>` : ""}`;
   $("#channel-actions").innerHTML =
-    `<a class="act" id="members" href="#/settings/channel/members/${c.id}" title="Members of #${esc(c.name)}">${icon("people")}<span>${c.member_count} member${c.member_count === 1 ? "" : "s"}</span></a><a class="icon-button" href="#/settings/channel/overview/${c.id}" aria-label="Channel settings" title="Channel settings">${icon("settings")}</a>`;
+    `<button type="button" class="act" id="members" aria-pressed="${membersOpen()}" title="Show or hide the members of #${esc(c.name)}">${icon("people")}<span>${c.member_count} member${c.member_count === 1 ? "" : "s"}</span></button><a class="icon-button" href="#/settings/channel/overview/${c.id}" aria-label="Channel settings" title="Channel settings">${icon("settings")}</a>`;
 }
 
 // ---- messages ----
@@ -250,8 +307,8 @@ const edited = (m: Message) =>
     : "";
 function bodyHtml(m: Message, cls = "") {
   if (editing === m.id && !m.deleted_at)
-    return `<form class="stack inline-form picker-host" data-edit-form="${m.id}">${m.title !== null ? `<input name="title" maxlength="160" value="${esc(m.title)}" aria-label="Thread title" required>` : ""}<textarea name="body" rows="3" maxlength="8000" aria-label="Edited message" required>${esc(m.body)}</textarea><p class="form-error" role="alert"></p><div class="row"><button class="small">Save changes</button><button type="button" class="small secondary" data-cancel-edit>Cancel</button><button type="button" class="icon-button" data-emoji-for aria-label="Choose emoji" title="Emoji">${icon("smile")}</button></div></form>`;
-  return `<div class="message-body${cls ? ` ${cls}` : ""}${m.deleted_at ? " faded" : ""}">${m.deleted_at ? "This message was removed." : emojiHtml(m.body, m.emojis || [])}</div>`;
+    return `<form class="stack inline-form picker-host" data-edit-form="${m.id}">${m.title !== null ? `<input name="title" maxlength="160" value="${esc(m.title)}" aria-label="Thread title" required>` : ""}<textarea name="body" rows="3" maxlength="8000" aria-label="Edited message" required>${esc(m.body)}</textarea><p class="form-error" role="alert"></p><div class="row"><button class="small">Save changes</button><button type="button" class="small secondary" data-cancel-edit>Cancel</button><button type="button" class="icon-button" data-emoji-for aria-label="Choose emoji" title="Emoji">${icon("smile")}</button>${attachButton("data-attach-for")}</div></form>`;
+  return `<div class="message-body${cls ? ` ${cls}` : ""}${m.deleted_at ? " faded" : " markdown"}">${m.deleted_at ? "This message was removed." : richHtml(m.body, m.emojis || [])}</div>`;
 }
 // Direct messages stay as they were sent.
 const mine = (m: Message) =>
@@ -270,7 +327,7 @@ function chatMessage(m: Message, cont: boolean) {
     ? messages.find((p) => p.id === m.parent_id)
     : null;
   const context = parent
-    ? `<button type="button" class="reply-context" data-jump="${parent.id}">${icon("reply")}<strong>${esc(parent.display_name)}</strong><span>${parent.deleted_at ? "removed message" : emojiHtml(excerpt(parent.body), parent.emojis || [])}</span></button>`
+    ? `<button type="button" class="reply-context" data-jump="${parent.id}">${icon("reply")}<strong>${esc(parent.display_name)}</strong><span>${parent.deleted_at ? "removed message" : emojiHtml(excerpt(markdownText(parent.body)), parent.emojis || [])}</span></button>`
     : m.parent_id
       ? `<div class="reply-context">${icon("reply")}<span>Reply to an earlier message</span></div>`
       : "";
@@ -334,7 +391,7 @@ function chatNodes(list: Message[]): Node[] {
 function threadActions(m: Message) {
   const parts = [
     canPost() && !m.deleted_at
-      ? `<details class="reply-box"><summary aria-label="Reply to ${esc(m.display_name)}">${icon("reply")} Reply</summary><form class="stack inline-form picker-host" data-reply-form="${m.id}"><textarea name="body" rows="3" maxlength="8000" required aria-label="Reply" placeholder="Reply to ${esc(m.display_name)}"></textarea><p class="form-error" role="alert"></p><div class="row"><button class="small">Reply</button><button type="button" class="icon-button" data-emoji-for aria-label="Choose emoji" title="Emoji">${icon("smile")}</button><span class="muted">Ctrl + Enter to send</span></div></form></details>`
+      ? `<details class="reply-box"><summary aria-label="Reply to ${esc(m.display_name)}">${icon("reply")} Reply</summary><form class="stack inline-form picker-host" data-reply-form="${m.id}"><textarea name="body" rows="3" maxlength="8000" required aria-label="Reply" placeholder="Reply to ${esc(m.display_name)}"></textarea><p class="form-error" role="alert"></p><div class="row"><button class="small">Reply</button><button type="button" class="icon-button" data-emoji-for aria-label="Choose emoji" title="Emoji">${icon("smile")}</button>${attachButton("data-attach-for")}<span class="muted">Ctrl + Enter to send</span></div></form></details>`
       : "",
     mine(m)
       ? `<button type="button" class="link edit-button" data-edit="${m.id}" aria-label="Edit message">Edit</button>`
@@ -372,13 +429,14 @@ function threadNodes(list: Message[]): Node[] {
       if (m.parent_id)
         return {
           key: `t-${m.id}`,
-          html: '<section class="thread"><p class="muted small thread-orphan">In reply to an earlier message</p><div class="comments" data-kids></div></section>',
+          html: '<section class="thread card"><p class="muted small thread-orphan">In reply to an earlier message</p><div class="comments" data-kids></div></section>',
           kids: [comment(m, 0)],
         };
+      // The post and everything said under it share one card; the replies fold away together.
       const n = count(m);
       return {
         key: `t-${m.id}`,
-        html: `<section class="thread"><article class="card post message" id="m-${m.id}">${m.title && editing !== m.id ? `<h2 class="thread-title">${emojiHtml(m.title, m.emojis || [])}</h2>` : ""}<div class="meta small message-meta">${byline(m)} · ${replies(n)}</div>${bodyHtml(m, "md")}${threadActions(m)}</article><div class="comments" data-kids></div></section>`,
+        html: `<section class="thread card"><article class="post message" id="m-${m.id}">${m.title && editing !== m.id ? `<h2 class="thread-title">${emojiHtml(m.title, m.emojis || [])}</h2>` : ""}<div class="meta small message-meta">${byline(m)}</div>${bodyHtml(m, "md")}${threadActions(m)}</article>${n ? `<details open class="thread-replies" data-key="r-${m.id}"><summary title="Show or hide every reply in this thread">${icon("chevron-down", "chev")}<span>${replies(n)}</span></summary><div class="comments" data-kids></div></details>` : '<div class="comments" data-kids></div>'}</section>`,
         kids: (children.get(m.id) || []).map((child) => comment(child, 0)),
       };
     });
@@ -462,7 +520,7 @@ function render(
   $("#feed-empty").innerHTML = shown.length
     ? ""
     : `<p class="card empty muted">${c.mode === "threaded" ? "No threads yet." : narrow ? "No messages in this topic yet." : "No messages yet."}</p>`;
-  for (const d of $$<HTMLDetailsElement>("details.comment", list))
+  for (const d of $$<HTMLDetailsElement>(folds, list))
     d.open = !collapsed.has(d.dataset.key!);
   refreshTimes(list);
   const arrived = popped.filter((key) =>
@@ -479,6 +537,8 @@ function render(
   else unseen.push(...arrived);
   updatePill();
 }
+// What folds in a threaded channel: one reply with those under it, or all of a thread's replies.
+const folds = "details.comment, details.thread-replies";
 function inView(el: Element) {
   const box = $("#message-list").getBoundingClientRect(),
     r = el.getBoundingClientRect();
@@ -511,9 +571,9 @@ function reveal(id: string) {
   const el = document.getElementById(`m-${id}`);
   if (!el) return;
   for (
-    let p = el.parentElement?.closest<HTMLDetailsElement>("details.comment");
+    let p = el.parentElement?.closest<HTMLDetailsElement>(folds);
     p;
-    p = p.parentElement?.closest<HTMLDetailsElement>("details.comment")
+    p = p.parentElement?.closest<HTMLDetailsElement>(folds)
   ) {
     collapsed.delete(p.dataset.key!);
     p.open = true;
@@ -564,7 +624,7 @@ function wireFeed() {
     (e) => {
       const d = e.target as HTMLDetailsElement;
       if (d.matches("details.reply-box") && d.open) $("textarea", d).focus();
-      if (!d.matches("details.comment")) return;
+      if (!d.matches(folds)) return;
       if (d.open) collapsed.delete(d.dataset.key!);
       else collapsed.add(d.dataset.key!);
     },
@@ -618,6 +678,8 @@ function wireFeed() {
           );
         collapsed.delete(form.dataset.replyForm!);
         merge(message);
+        for (let up: Message | undefined = message; up; up = messages.find((m) => m.id === up!.parent_id))
+          if (!up.parent_id) collapsed.delete(`r-${up.id}`);
         render();
         document
           .getElementById(`m-${message.id}`)
@@ -634,11 +696,15 @@ function wireFeed() {
       d.open = false;
       if (!inView($("summary", d))) d.scrollIntoView({ block: "nearest" });
     } else if ((hit = on("[data-fold]"))) {
-      for (const d of $$<HTMLDetailsElement>("details.comment", list))
-        d.open = hit.dataset.fold === "open";
+      // Collapsing leaves the posts; expanding opens every reply under them.
+      const open = hit.dataset.fold === "open";
+      for (const d of $$<HTMLDetailsElement>(open ? folds : "details.thread-replies", list))
+        d.open = open;
     } else if ((hit = on("[data-jump]"))) reveal(hit.dataset.jump!);
     else if ((hit = on("[data-emoji-for]")))
       togglePicker(hit, $<HTMLTextAreaElement>("textarea", hit.closest("form")!));
+    else if ((hit = on("[data-attach-for]")))
+      pickFiles($<HTMLTextAreaElement>("textarea", hit.closest("form")!));
     else if ((hit = on("[data-reply]"))) {
       reply = messages.find((m) => m.id === hit!.dataset.reply) || null;
       renderComposer();
@@ -741,7 +807,7 @@ function renderComposer(keepDraft = true) {
     ${c.mode === "threaded" ? `<input id="thread-title" class="thread-input" maxlength="160" placeholder="New thread title" aria-label="Thread title" required value="${esc(title)}">` : ""}
     ${reply ? `<div class="reply-banner small">${icon("reply")}<span>Replying to <strong>${esc(reply.display_name)}</strong></span><button type="button" id="cancel-reply" class="icon-button" aria-label="Cancel reply">${icon("x")}</button></div>` : ""}
     <textarea id="message-body" maxlength="8000" rows="1" placeholder="${esc(place)}" aria-label="Message" required>${esc(draft)}</textarea>
-    <div class="composer-bar"><button type="button" id="choose-emoji" class="icon-button" aria-label="Choose emoji" title="Emoji" aria-expanded="false">${icon("smile")}</button><span class="muted small composer-hint-keys"><kbd>Enter</kbd> to send · <kbd>Shift</kbd> + <kbd>Enter</kbd> for a new line</span><button id="send-message" type="submit" aria-label="Send message">${icon("send")}<span>${c.mode === "threaded" ? "Post thread" : "Send"}</span></button></div></form></div>`;
+    <div class="composer-bar"><button type="button" id="choose-emoji" class="icon-button" aria-label="Choose emoji" title="Emoji" aria-expanded="false">${icon("smile")}</button>${attachButton('id="attach-file"')}<span class="muted small composer-hint-keys"><kbd>Enter</kbd> to send · <kbd>Shift</kbd> + <kbd>Enter</kbd> for a new line · <span title="**bold**, *italic*, ~~struck~~, \`code\`, &gt; quote, - list, [text](link), ||spoiler||">Markdown</span></span><button id="send-message" type="submit" aria-label="Send message">${icon("send")}<span>${c.mode === "threaded" ? "Post thread" : "Send"}</span></button></div></form></div>`;
   const body = $<HTMLTextAreaElement>("#message-body");
   const grow = () => {
     body.style.height = "auto";
@@ -759,6 +825,9 @@ function renderComposer(keepDraft = true) {
   $("#choose-emoji").addEventListener("click", (e) =>
     togglePicker(e.currentTarget as HTMLElement, body),
   );
+  document
+    .querySelector("#attach-file")
+    ?.addEventListener("click", () => pickFiles(body));
   body.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
@@ -881,6 +950,7 @@ export async function refreshCurrent() {
   markSeen();
   if (roleChanged || federationChanged || headerChanged || topicsChanged)
     renderHeader();
+  renderMembers();
   const signature = JSON.stringify(messages);
   if (signature !== lastSignature || roleChanged || federationChanged) {
     lastSignature = signature;

@@ -72,6 +72,7 @@ export class Federation {
       .run();
     store.federationHooks = {
       profile: (user) => this.profileChanged(user),
+      permissions: (user) => this.permissionsChanged(user),
       write: (user, channel) => {
         if (this.importing) return;
         if (channel.remote_actor)
@@ -410,40 +411,16 @@ export class Federation {
     if (value) this.keys();
     return this.status();
   }
-  setPermissions(admin: User, id: string, input: Doc) {
-    this.store.requireAdmin(admin);
-    const target = this.store.user(id);
-    if (
-      target.remote_actor ||
-      !flags.every((flag) => typeof input[flag] === "boolean") ||
-      Object.keys(input).some((key) => !flags.includes(key as any))
-    )
-      throw new Problem(
-        400,
-        "Provide all four federation permissions for a local user.",
-      );
-    this.store.transaction(() => {
-      this.store.db
-        .prepare(
-          "UPDATE users SET federation_send=?,federation_receive=?,federation_subscribe=?,federation_post=? WHERE id=?",
-        )
-        .run(...flags.map((flag) => Number(input[flag])), id);
-      if (!input.federation_subscribe || !input.federation_receive) {
-        const subscriptions = this.store.db
-          .prepare(
-            "SELECT * FROM federation_subscriptions WHERE user_id=? AND status IN ('pending','accepted')",
-          )
-          .all(id) as unknown as { channel_id: string; follow_id: string }[];
-        for (const sub of subscriptions)
-          this.unsubscribe(target, sub.channel_id, true);
-      }
-      this.store.audit(
-        admin.id,
-        "federation.permissions",
-        JSON.stringify({ user: id, ...input }),
-      );
-    });
-    return this.store.profile(this.store.user(id), true);
+  // A role that no longer lets an account follow remote channels ends the follows it had.
+  private permissionsChanged(user: User) {
+    if (user.federation_subscribe && user.federation_receive) return;
+    const subscriptions = this.store.db
+      .prepare(
+        "SELECT * FROM federation_subscriptions WHERE user_id=? AND status IN ('pending','accepted')",
+      )
+      .all(user.id) as unknown as { channel_id: string; follow_id: string }[];
+    for (const sub of subscriptions)
+      this.unsubscribe(user, sub.channel_id, true);
   }
   block(admin: User, input: Doc) {
     this.store.requireAdmin(admin);
@@ -484,6 +461,8 @@ export class Federation {
     if (enabled && this.store.mirrorState(id))
       throw new Problem(400, "Mirrors cannot be federated.");
     if (enabled) this.ensureEnabled();
+    if (enabled && !channel.federation_enabled)
+      this.store.requirePermission(user, "federate_channels");
     this.store.transaction(() => {
       this.store.db
         .prepare("UPDATE channels SET federation_enabled=? WHERE id=?")
@@ -945,6 +924,7 @@ export class Federation {
     );
   }
   async sendDirect(user: User, value: unknown, bodyValue: unknown) {
+    this.store.requirePermission(user, "direct_messages");
     this.require(user, "federation_send");
     const peer = await this.resolve(value);
     if (peer.type !== "Person")
@@ -1002,6 +982,7 @@ export class Federation {
   }
   // Finds the person behind an address, so a conversation with them can be opened.
   async resolveDirect(user: User, value: unknown) {
+    this.store.requirePermission(user, "direct_messages");
     this.require(user, "federation_send");
     const peer = await this.resolve(value);
     if (peer.type !== "Person")

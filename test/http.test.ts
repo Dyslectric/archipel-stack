@@ -1040,3 +1040,69 @@ test("channel rename and delete APIs enforce CSRF and ownership", async (t) => {
   assert.equal((await charlie.request(`/api/channels/${c.id}`)).status, 404);
   assert.deepEqual(await (await charlie.request("/api/channels")).json(), []);
 });
+
+test("attachments upload by role, serve by unguessable address with ranges, and leave with their message", async t => {
+  const f = await application(t);
+  const alice = browser(f.origin), bob = browser(f.origin);
+  const admin = await alice.login("alice"); await bob.login("bob");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC1lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=", "base64");
+  const upload = async (who: ReturnType<typeof browser>, data: Buffer, name: string, type = "image/png", csrf = true) => fetch(`${f.origin}/api/attachments`, {
+    method: "POST", body: new Uint8Array(data),
+    headers: { Origin: f.origin, "Content-Type": type, "X-Filename": encodeURIComponent(name),
+      Cookie: [...who.cookies].map(([k, v]) => `${k}=${v}`).join("; "), ...(csrf ? { "X-CSRF-Token": (await who.session()).csrf } : {}) },
+  });
+  assert.equal((await fetch(`${f.origin}/api/attachments`, { method: "POST", body: new Uint8Array(png), headers: { Origin: f.origin, "Content-Type": "image/png" } })).status, 401);
+  assert.equal((await upload(bob, png, "cat.png", "image/png", false)).status, 403);
+  // What a file is comes from its bytes, never from what the browser called it.
+  assert.equal((await upload(bob, Buffer.from("<svg onload=alert(1)>"), "x.png")).status, 415);
+  assert.equal((await upload(bob, Buffer.from("<html><script>alert(1)</script>"), "x.mp4", "video/mp4")).status, 415);
+  const heic = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypheic"), Buffer.alloc(16)]);
+  assert.equal((await upload(bob, heic, "x.mp4", "video/mp4")).status, 415);
+  const sent = await upload(bob, png, 'my [cat](x) "1".png', "text/html");
+  assert.equal(sent.status, 201);
+  const file = await sent.json();
+  assert.deepEqual([file.mime, file.name, file.size], ["image/png", "my catx 1.png", png.length]);
+  assert.match(file.url, new RegExp(`^${f.origin}/media/[A-Za-z0-9_-]{43}\.png$`));
+  const mp4 = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypisom"), Buffer.alloc(16)]);
+  const video = await (await upload(bob, mp4, "clip.mp4", "video/mp4")).json();
+  assert.equal(video.mime, "video/mp4");
+  // Anyone holding the address reads it, signed in or not; it can never act as a page.
+  const got = await fetch(file.url);
+  assert.equal(got.status, 200);
+  assert.equal(got.headers.get("content-type"), "image/png");
+  assert.equal(got.headers.get("content-security-policy"), "default-src 'none'; sandbox");
+  assert.equal(got.headers.get("x-content-type-options"), "nosniff");
+  assert.deepEqual(Buffer.from(await got.arrayBuffer()), png);
+  const part = await fetch(file.url, { headers: { Range: "bytes=1-3" } });
+  assert.equal(part.status, 206);
+  assert.equal(part.headers.get("content-range"), `bytes 1-3/${png.length}`);
+  assert.deepEqual(Buffer.from(await part.arrayBuffer()), png.subarray(1, 4));
+  const tail = await fetch(file.url, { headers: { Range: "bytes=-4" } });
+  assert.deepEqual(Buffer.from(await tail.arrayBuffer()), png.subarray(png.length - 4));
+  assert.equal((await fetch(file.url, { headers: { Range: `bytes=${png.length}-` } })).status, 416);
+  assert.equal((await fetch(file.url.replace(/\.png$/, ".mp4"))).status, 404);
+  assert.equal((await fetch(`${f.origin}/media/${"a".repeat(43)}.png`)).status, 404);
+  // Removing the message removes what its author attached to it, and nobody else's copy of the address.
+  const channel = await (await bob.request("/api/channels", "POST", { name: "pictures", description: "", mode: "timeline", visibility: "public", admission: "open" })).json();
+  await alice.session();
+  assert.equal((await alice.request(`/api/channels/${channel.id}/join`, "POST", {})).status, 200);
+  const theirs = await (await alice.request(`/api/channels/${channel.id}/messages`, "POST", { body: `Reposting ![cat](${video.url})` })).json();
+  await bob.session();
+  const mine = await (await bob.request(`/api/channels/${channel.id}/messages`, "POST", { body: `Look ![cat](${file.url}) and ![clip](${video.url})` })).json();
+  assert.equal((await alice.request(`/api/messages/${theirs.id}`, "DELETE")).status, 200);
+  assert.equal((await fetch(video.url)).status, 200);
+  assert.equal((await bob.request(`/api/messages/${mine.id}`, "DELETE")).status, 200);
+  assert.equal((await fetch(file.url)).status, 404);
+  assert.equal((await fetch(video.url)).status, 404);
+  // A role without the grant cannot upload.
+  await alice.session();
+  const role = await (await alice.request("/api/admin/roles", "POST", { name: "Text only", attachments: false })).json();
+  assert.equal((await bob.request("/api/admin/roles")).status, 403);
+  const member = (await bob.session()).user;
+  assert.equal((await bob.request(`/api/admin/users/${admin.id}/role`, "PATCH", { role_id: role.id })).status, 403);
+  assert.equal((await alice.request(`/api/admin/users/${member.id}/role`, "PATCH", { role_id: role.id })).status, 200);
+  assert.equal((await upload(bob, png, "cat.png")).status, 403);
+  assert.deepEqual([(await bob.session()).user.attachments, (await bob.session()).user.instance_role.name], [false, "Text only"]);
+  assert.equal((await alice.request(`/api/admin/roles/${role.id}`, "DELETE")).status, 200);
+  assert.equal((await upload(bob, png, "cat.png")).status, 201);
+});

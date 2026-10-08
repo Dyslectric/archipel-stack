@@ -234,6 +234,49 @@ export function createApp(config: Config, store: Store) {
     next();
   });
   app.get("/health", (_req, res) => res.json({ status: "ok" }));
+  // Attachments are fetched by address alone: the unguessable name in a message is the permission,
+  // so the same link works for readers on other servers. Nothing served here can run as a page.
+  app.get(
+    "/media/:file",
+    rateLimit({
+      windowMs: 60000,
+      limit: 600,
+      message: { error: "Too many requests. Please try again shortly." },
+    }),
+    (req, res) => {
+      const file = store.attachment(String(req.params.file));
+      res.setHeader("Accept-Ranges", "bytes");
+      res.setHeader("Cache-Control", "private, max-age=31536000, immutable");
+      res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
+      res.setHeader(
+        "Content-Disposition",
+        `inline; filename*=UTF-8''${encodeURIComponent(file.name)}`,
+      );
+      res.type(file.mime);
+      let start = 0,
+        end = file.size - 1;
+      const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || "");
+      if (range && (range[1] || range[2])) {
+        if (range[1]) {
+          start = Number(range[1]);
+          if (range[2]) end = Math.min(end, Number(range[2]));
+        } else start = Math.max(0, file.size - Number(range[2]));
+        if (start > end || start >= file.size) {
+          res.setHeader("Content-Range", `bytes */${file.size}`);
+          res.status(416).end();
+          return;
+        }
+        res.status(206);
+        res.setHeader("Content-Range", `bytes ${start}-${end}/${file.size}`);
+      }
+      res.setHeader("Content-Length", end - start + 1);
+      if (req.method === "HEAD") {
+        res.end();
+        return;
+      }
+      res.end(store.attachmentBytes(file.id, start, end - start + 1));
+    },
+  );
   app.get("/api/session", (req, res) => {
     const session = store.session(cookie(req, authCookie));
     res.json({
@@ -357,6 +400,24 @@ export function createApp(config: Config, store: Store) {
   app.get("/api/emojis", (_req, res) =>
     res.json(store.emojiCatalog(user(res))),
   );
+  // The file itself is the request body; its name travels beside it.
+  app.post(
+    "/api/attachments",
+    (req, res, next) => {
+      store.requirePermission(user(res), "attachments");
+      next();
+    },
+    express.raw({ type: () => true, limit: "51mb" }),
+    (req, res) => {
+      let name = "";
+      try {
+        name = decodeURIComponent(String(req.headers["x-filename"] || ""));
+      } catch {
+        /* An unreadable name is replaced with a plain one. */
+      }
+      res.status(201).json(store.addAttachment(user(res), req.body, name));
+    },
+  );
   app.get("/api/xmpp", (_req, res) => res.json(xmpp.status(user(res))));
   app.get("/api/xmpp/rooms", (_req, res) => res.json(xmpp.remoteRooms.list(user(res))));
   app.post("/api/xmpp/rooms", (req, res) => res.status(201).json(xmpp.remoteRooms.join(user(res), req.body || {})));
@@ -417,13 +478,20 @@ export function createApp(config: Config, store: Store) {
   app.patch("/api/admin/federation", (req, res) =>
     res.json(federation.setEnabled(user(res), req.body?.enabled)),
   );
-  app.patch("/api/admin/users/:id/federation", (req, res) =>
+  app.get("/api/admin/roles", (_req, res) => res.json(store.roles(user(res))));
+  app.post("/api/admin/roles", (req, res) =>
+    res.status(201).json(store.createRole(user(res), req.body || {})),
+  );
+  app.patch("/api/admin/roles/:id", (req, res) =>
+    res.json(store.updateRole(user(res), String(req.params.id), req.body || {})),
+  );
+  app.delete("/api/admin/roles/:id", (req, res) => {
+    store.deleteRole(user(res), String(req.params.id));
+    res.json({ ok: true });
+  });
+  app.patch("/api/admin/users/:id/role", (req, res) =>
     res.json(
-      federation.setPermissions(
-        user(res),
-        String(req.params.id),
-        req.body || {},
-      ),
+      store.setUserRole(user(res), String(req.params.id), req.body?.role_id),
     ),
   );
   app.post("/api/admin/federation/blocks", (req, res) =>

@@ -108,7 +108,7 @@ Archipel profile; they are not standardized just by selecting these types.
 The first profile uses signed HTTP requests, author-signed embedded notes,
 home-channel distribution, and approval-controlled history. All federation
 permissions default to disabled, with separate send/receive/subscribe/post
-grants for local users. Local account privileges do not bypass these grants.
+grants given to local users through instance roles. Local account privileges do not bypass these grants.
 
 The [ActivityPub delivery specification](https://www.w3.org/TR/activitypub/#delivery)
 defines inbox addressing, recipient deduplication, and asynchronous delivery

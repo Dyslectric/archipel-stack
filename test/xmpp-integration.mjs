@@ -1,3 +1,4 @@
+import { grant } from "./roles.ts";
 // Real TLS streams against the pinned Prosody image. Requires Docker and Node 24+.
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -110,6 +111,11 @@ try {
   store.post(alice, room.id, { body: "Hello from browser REST" });
   await until(() => phone.received.find(s => s.getChildText("body") === "Hello from browser REST"), "browser room delivery");
   console.log("PASS native/browser shared messages, discovery and stable stanza IDs");
+  // Clients find the rooms an account belongs to in its bookmarks, beside whatever they saved themselves.
+  await phone.native.iqCaller.request(xml("iq", { type: "set" }, xml("query", { xmlns: "jabber:iq:private" }, xml("storage", { xmlns: "storage:bookmarks" }, xml("conference", { jid: "elsewhere@muc.example", autojoin: "false" })))));
+  const bookmarks = (await phone.native.iqCaller.request(xml("iq", { type: "get" }, xml("query", { xmlns: "jabber:iq:private" }, xml("storage", { xmlns: "storage:bookmarks" }))))).getChild("query").getChild("storage", "storage:bookmarks").getChildren("conference");
+  assert.deepEqual(bookmarks.map(c => [c.attrs.jid, c.attrs.autojoin, c.getChildText("nick") ?? null]), [["elsewhere@muc.example", "false", null], [roomJid, "true", "bob"]]);
+  console.log("PASS room bookmarks list joined channels beside the client's own");
   assert.equal(delivered.attrs.id, "native-message");
   await desktop.native.send(xml("message", { to: roomJid, type: "groupchat", id: "native-edit" }, xml("body", {}, "Edited from native"), xml("replace", { xmlns: "urn:xmpp:message-correct:0", id: "native-message" })));
   await until(() => phone.received.find(s => s.getChildText("body") === "Edited from native"), "native correction");
@@ -173,7 +179,7 @@ Component "muc.remote.test" "muc"
   await desktop.native.send(xml("message", { type: "chat", to: "other@remote.test", id: "fed-denied" }, xml("body", {}, "Federation starts disabled")));
   await until(() => desktop.received.find(s => s.attrs.id === "fed-denied" && s.attrs.type === "error"), "default federation rejection");
   app.locals.federation.setEnabled(alice, true);
-  app.locals.federation.setPermissions(alice, alice.id, { federation_send: true, federation_receive: true, federation_subscribe: false, federation_post: false });
+  grant(app.locals.federation.store, alice, alice.id, { federation_send: true, federation_receive: true, federation_subscribe: false, federation_post: false });
   await peer.native.iqCaller.request(xml("iq", { type: "set" }, xml("vCard", { xmlns: "vcard-temp" }, xml("PHOTO", {}, xml("TYPE", {}, "image/png"), xml("BINVAL", {}, avatarImage)))));
   await desktop.native.send(xml("message", { type: "chat", to: "other@remote.test", id: "fed-native" }, xml("body", {}, "Hello to ordinary Prosody")));
   await until(() => {
@@ -196,7 +202,7 @@ Component "muc.remote.test" "muc"
   console.log("PASS bidirectional federated vCard pictures and avatar removal");
   console.log("PASS certificate-authenticated TLS federation with an ordinary Prosody peer");
   // Foreign MUCs use an ordinary peer, including browser resources without c2s sessions.
-  app.locals.federation.setPermissions(alice, alice.id, { federation_send: true, federation_receive: true, federation_subscribe: true, federation_post: true });
+  grant(app.locals.federation.store, alice, alice.id, { federation_send: true, federation_receive: true, federation_subscribe: true, federation_post: true });
   const foreignRoom = "lounge@muc.remote.test";
   await peer.native.send(xml("presence", { to: `${foreignRoom}/host` }, xml("x", { xmlns: "http://jabber.org/protocol/muc" })));
   await until(() => peer.received.find(s => s.is("presence") && s.attrs.from === `${foreignRoom}/host`), "foreign room creation");
@@ -240,10 +246,10 @@ Component "muc.remote.test" "muc"
   assert.match(xmpp.remoteRooms.list(alice).find(r => r.id === subscription.id).error, /conflict/);
   xmpp.remoteRooms.join(alice, { room: foreignRoom, nick: "alice-browser" });
   await until(() => xmpp.remoteRooms.list(alice).find(r => r.id === subscription.id)?.state === "joined", "rejoin after conflict");
-  app.locals.federation.setPermissions(alice, alice.id, { federation_send: true, federation_receive: false, federation_subscribe: true, federation_post: true });
+  grant(app.locals.federation.store, alice, alice.id, { federation_send: true, federation_receive: false, federation_subscribe: true, federation_post: true });
   const unavailableCount = peer.received.filter(s => s.is("presence") && s.attrs.from === `${foreignRoom}/alice-browser` && s.attrs.type === "unavailable").length;
   await until(() => peer.received.filter(s => s.is("presence") && s.attrs.from === `${foreignRoom}/alice-browser` && s.attrs.type === "unavailable").length > unavailableCount, "foreign policy revocation evicts browser");
-  app.locals.federation.setPermissions(alice, alice.id, { federation_send: true, federation_receive: true, federation_subscribe: true, federation_post: true });
+  grant(app.locals.federation.store, alice, alice.id, { federation_send: true, federation_receive: true, federation_subscribe: true, federation_post: true });
   xmpp.remoteRooms.leave(alice, subscription.id);
   console.log("PASS foreign MUC joins, history, live messages, confirmed posts, subjects, roles, conflicts, leave and policy revocation");
   // The opposite direction: the ordinary peer's user occupies a federated local room.
@@ -287,7 +293,7 @@ Component "muc.remote.test" "muc"
   console.log("PASS foreign home-server occupants: admission, join history, committed posts, live delivery, room MAM, removal and eviction");
   // A bridged channel shares one conversation with a room on the ordinary peer, each author as themselves.
   const everything = { federation_send: true, federation_receive: true, federation_subscribe: true, federation_post: true };
-  app.locals.federation.setPermissions(alice, bob.id, everything);
+  grant(app.locals.federation.store, alice, bob.id, everything);
   const annexRoom = "annex@muc.remote.test";
   await peer.native.send(xml("presence", { to: `${annexRoom}/host` }, xml("x", { xmlns: "http://jabber.org/protocol/muc" })));
   await until(() => peer.received.find(s => s.is("presence") && s.attrs.from === `${annexRoom}/host`), "bridged room creation");
@@ -309,7 +315,7 @@ Component "muc.remote.test" "muc"
   assert.deepEqual(xmpp.remoteRooms.list(bob), []);
   xmpp.remoteRooms.removeBridge(alice, annex.id);
   await until(() => peer.received.find(s => s.is("presence") && s.attrs.from === `${annexRoom}/bob` && s.attrs.type === "unavailable"), "bridge removal retires its occupants");
-  app.locals.federation.setPermissions(alice, bob.id, { federation_send: false, federation_receive: false, federation_subscribe: false, federation_post: false });
+  grant(app.locals.federation.store, alice, bob.id, { federation_send: false, federation_receive: false, federation_subscribe: false, federation_post: false });
   console.log("PASS bridged channel: room messages enter once with their author, members speak in the room as themselves");
   store.setUserBlock(bob, `${store.baseUrl}/actors/users/${alice.id}`, true);
   await desktop.native.send(xml("message", { to: b.jid, type: "chat", id: "blocked-dm" }, xml("body", {}, "Must not arrive")));

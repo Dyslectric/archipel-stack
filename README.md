@@ -39,6 +39,14 @@ usernames match. New instances start without fabricated channels or conversation
 - Standard :emoji: shortcodes, a searchable picker, admin-managed instance images,
   and personal uploads or locally saved emoji adopted from other instances.
 - Author-only message editing, edited markers, and conflict checks.
+- Markdown in channels, threads, direct messages and XMPP rooms: emphasis, code,
+  quotes, lists, headings, links and spoilers, escaped and rendered in the browser.
+- Image, GIF and video attachments (PNG, JPEG, GIF, WebP up to 10 MiB; MP4, WebM up
+  to 50 MiB), attached with the paperclip, by pasting, or by dropping a file.
+- Instance roles: a default role and any number of others, each granting channel
+  creation, channel federation, direct messages, attachments, XMPP room joining and
+  the four federation grants. See [roles](#roles).
+- A sidebar that resizes and folds away, and a member list beside each channel.
 - Invite-only instance registration with a private admin approval queue for provider identities and verified socials.
 - Timeline channels, topics, and titled threads with nested replies.
 - Public or members-only reading; open or invited membership.
@@ -50,15 +58,16 @@ usernames match. New instances start without fabricated channels or conversation
 - Optional verified social disclosure and a responsive browser interface.
 - Opt-in Archipel federation: signed channel subscriptions, messages, edits,
   removals, and direct messages, with durable retries and verified author provenance.
-- Administrator controls for each user's federated sending, receiving,
-  subscriptions, and channel posting, plus remote instance/actor blocks.
+- Role-based control of federated sending, receiving, subscriptions, and channel
+  posting, plus remote instance/actor blocks.
 - Stable actor URLs with ActivityStreams discovery and signed, authorized channel history.
 - Shared profile pictures across ActivityPub and XMPP instances, with local caching
   and propagation of changes and removals.
 - Prosody XMPP integration: native client login with revocable app passwords,
   direct messages, local timeline MUC rooms, authorized MAM history, and TLS
   server-to-server direct messaging. Join foreign XMPP rooms from the browser
-  or a native client, with private browser histories and room role checks.
+  or a native client, with private browser histories and room role checks; rooms
+  joined from the browser are rejoined by themselves after either server restarts.
   See [XMPP setup and supported profile](docs/xmpp.md).
 
 The server is Express/TypeScript; the browser uses TypeScript and Vite. Runtime
@@ -179,11 +188,43 @@ Database upgrades retain existing accounts as approved members.
 
 ## Federation
 
-Federation starts disabled, and all four per-user permissions start disabled,
-including for administrators. Open **Profile → Instance administration →
-Federation controls** to enable it and grant sending, receiving, subscribing,
-and channel posting separately. Owners/moderators must also opt each local
-channel in through its settings → **Federation and remote followers**.
+Federation starts disabled, and the default role grants none of the four
+federation permissions, including to administrators. Open **Settings → Instance
+federation** to enable it, then grant sending, receiving, subscribing, and channel
+posting through a [role](#roles). Owners/moderators must also opt each local
+channel in through its settings → **Federation**.
+
+## Roles
+
+**Settings → Roles** lists what each role allows; **Settings → People** gives an
+account a role. Everyone without one has the default role, and new accounts start
+on it. A role grants, separately:
+
+| Grant | Covers |
+| --- | --- |
+| Create channels | Starting channels and mirrors |
+| Open their channels to federation | Turning federation on for a channel they manage |
+| Send direct messages | Writing to anyone, here or elsewhere; what others send still arrives |
+| Attach images and videos | Uploading files into messages |
+| Join XMPP rooms on other servers | Browser and native-client joins, and speaking through a bridge |
+| Send / receive federated messages | As described under [federation](docs/federation.md) |
+| Subscribe to remote channels, post in federated channels | Likewise |
+
+Upgrading keeps everyone's access: the default role is created with every local
+grant and no federation grant, and accounts that had federation switches of their
+own are moved to roles carrying exactly those. Deleting a role returns its accounts
+to the default one. Administrators follow their role like anyone else.
+
+## Attachments
+
+Files are stored in the database and served from `/media/<name>`. The name is 256
+random bits and is the only permission: a message carries the address, so anyone
+who can read the message — including members of other servers it federates or is
+bridged to — can fetch the file, and nobody else can find it. Responses cannot run
+as pages. Removing a message, or deleting its channel, deletes the files its author
+attached to it. Pictures and videos hosted anywhere else are shown as links, so
+reading a message never contacts a third party. An account may upload 200 files or
+500 MiB a day. If a reverse proxy sits in front, allow request bodies of 51 MiB.
 
 Users open **Profile → Federated conversations** to subscribe to
 `#channel@instance.domain` or send a direct message to `user@instance.domain`.

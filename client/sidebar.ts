@@ -201,7 +201,7 @@ function roomRow(r: XmppRoom) {
   return {
     name: r.room,
     extra: "",
-    link: `<a class="channel-link${on ? " on" : ""}" draggable="false" href="#/xmpp/${r.id}"${on ? ' aria-current="page"' : ""} title="${esc(r.room)}">${icon("globe")}<span class="grow">${esc(r.room)}</span>${r.state !== "joined" ? `<span class="mode-tag">${esc(r.state)}</span>` : ""}</a>`,
+    link: `<a class="channel-link${on ? " on" : ""}" draggable="false" href="#/xmpp/${r.id}"${on ? ' aria-current="page"' : ""} title="${esc(r.room)}">${icon("globe")}<span class="grow">${esc(r.room)}</span>${r.state !== "joined" ? `<span class="mode-tag">${esc(r.reconnecting ? "reconnecting" : r.state)}</span>` : ""}</a>`,
   };
 }
 const empty: Record<SideKind, string> = {
@@ -331,9 +331,96 @@ function groupMenu(button: HTMLElement) {
   });
 }
 
+// ---- the sidebar itself: as wide as the reader drags it, or folded away. Kept for this browser. ----
+const WIDTH = "archipel-sidebar-width",
+  FOLDED = "archipel-sidebar-collapsed";
+function stored(key: string) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+function keep(key: string, value: string | null) {
+  try {
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
+  } catch {
+    /* Without storage the arrangement lasts until the page is reloaded. */
+  }
+}
+const workspace = () => document.querySelector<HTMLElement>(".workspace");
+function setWidth(value: number | null) {
+  const ws = workspace();
+  if (!ws) return;
+  if (value === null) ws.style.removeProperty("--sidebar-w");
+  else {
+    const width = Math.round(Math.max(180, Math.min(value, 520, innerWidth * 0.6)));
+    ws.style.setProperty("--sidebar-w", `${width}px`);
+    ws.querySelector("#side-resize")?.setAttribute("aria-valuenow", String(width));
+  }
+}
+export function sidebarCollapsed() {
+  return stored(FOLDED) === "1";
+}
+export function applySidebar() {
+  const width = Number(stored(WIDTH));
+  setWidth(width >= 180 ? width : null);
+  workspace()?.classList.toggle("side-collapsed", sidebarCollapsed());
+  document
+    .querySelector("#mobile-menu")
+    ?.setAttribute("aria-pressed", String(!sidebarCollapsed()));
+}
+// The button in the top bar: the drawer on a phone, the column on a wider screen.
+export function toggleSidebar() {
+  if (matchMedia("(max-width: 720px)").matches) {
+    document.querySelector("#sidebar")?.classList.toggle("mobile-open");
+    return;
+  }
+  keep(FOLDED, sidebarCollapsed() ? null : "1");
+  applySidebar();
+}
+function wireResize(handle: HTMLElement) {
+  const current = () =>
+    document.querySelector<HTMLElement>("#sidebar")?.getBoundingClientRect().width || 264;
+  const save = () => keep(WIDTH, String(Math.round(current())));
+  handle.addEventListener("pointerdown", (e) => {
+    if (e.button) return;
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    const ws = workspace()!,
+      left = ws.getBoundingClientRect().left;
+    ws.classList.add("resizing");
+    const move = (ev: PointerEvent) => setWidth(ev.clientX - left);
+    const done = () => {
+      ws.classList.remove("resizing");
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", done);
+      handle.removeEventListener("pointercancel", done);
+      save();
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", done);
+    handle.addEventListener("pointercancel", done);
+  });
+  handle.addEventListener("dblclick", () => {
+    setWidth(null);
+    keep(WIDTH, null);
+  });
+  handle.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    setWidth(current() + (e.key === "ArrowLeft" ? -16 : 16));
+    save();
+  });
+}
+
 // ---- wiring: once per sidebar element ----
 export function wireSidebar(list: HTMLElement) {
   html = "";
+  applySidebar();
+  const handle = document.querySelector<HTMLElement>("#side-resize");
+  if (handle) wireResize(handle);
   const sectionOf = (el: Element) =>
     el.closest<HTMLElement>("[data-section]")?.dataset.section as
       | SideKind

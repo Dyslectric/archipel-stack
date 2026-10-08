@@ -99,6 +99,32 @@ module:hook("presence/full", function(event)
   end
 end, 100);
 
+-- Clients keep their room list as bookmarks in private storage. The local channels an account
+-- belongs to are added to what the client saved, so they open by themselves after signing in.
+local private_storage = module:open_store("private", "map");
+module:hook("iq/self/jabber:iq:private:query", function(event)
+  local origin, stanza = event.origin, event.stanza;
+  if stanza.attr.type ~= "get" or origin.type ~= "c2s" then return; end
+  local wanted = stanza.tags[1].tags[1];
+  if not wanted or wanted.name ~= "storage" or wanted.attr.xmlns ~= "storage:bookmarks" then return; end
+  local result = bridge.operation(event, "bookmarks");
+  if not result then return true; end
+  local saved = private_storage:get(origin.username, "storage:storage:bookmarks");
+  local storage = saved and st.deserialize(saved) or st.stanza("storage", { xmlns = "storage:bookmarks" });
+  local ours = {};
+  for _, room in ipairs(result.rooms) do ours[room.jid] = true; end
+  storage:maptags(function(child)
+    if child.name == "conference" and ours[child.attr.jid] then return nil; end
+    return child;
+  end);
+  for _, room in ipairs(result.rooms) do
+    storage:tag("conference", { jid = room.jid; name = "#" .. room.name; autojoin = "true" })
+      :tag("nick"):text(result.nick):up():up();
+  end
+  origin.send(st.reply(stanza):tag("query", { xmlns = "jabber:iq:private" }):add_child(storage));
+  return true;
+end, 100);
+
 local function direct(event)
   local stanza, origin = event.stanza, event.origin;
   if stanza._archipel or stanza.attr.type == "error" then return; end

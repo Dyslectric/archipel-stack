@@ -20,6 +20,16 @@ export function decodeRasterImage(encoded: unknown, maxBytes: number, label: str
     image.toString("base64") !== encoded
   )
     throw new Problem(400, `Invalid image or image exceeds ${limit}.`);
+  const mime = imageMime(image);
+  if (!mime)
+    throw new Problem(
+      400,
+      `Only PNG, JPEG, GIF and WebP ${label} images are supported.`,
+    );
+  return { image, mime };
+}
+// The image type its first bytes declare, or "" when it is none of the four accepted here.
+export function imageMime(image: Buffer) {
   let mime = "";
   if (
     image.length >= 24 &&
@@ -47,10 +57,5 @@ export function decodeRasterImage(encoded: unknown, maxBytes: number, label: str
     image.toString("ascii", 8, 12) === "WEBP"
   )
     mime = "image/webp";
-  if (!mime)
-    throw new Problem(
-      400,
-      `Only PNG, JPEG, GIF and WebP ${label} images are supported.`,
-    );
-  return { image, mime };
+  return mime;
 }
