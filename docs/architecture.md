@@ -58,7 +58,8 @@ Store messages independently of their visual presentation:
 
 The three modes have explicit invariants:
 
-- **Timeline:** a chronological channel stream. Begin with plain messages.
+- **Timeline:** a chronological channel stream. A message may reply to another
+  in the same channel, and links back to it.
 - **Topical:** every message belongs to a topic in the same channel; replies
   stay within that topic.
 - **Threaded:** titled root posts with nested replies. Parent references stay

@@ -40,6 +40,8 @@ export interface Channel {
   owner_id: string;
   remote_actor: string | null;
   federation_enabled: number;
+  show_members: number; // members see who else is in the channel
+  hide_handles: number; // members see names without the handles behind them
   created_at: string;
 }
 export interface Message {
@@ -147,7 +149,7 @@ export class Store {
     ) => void;
     read: (user: User, channel: Channel) => void;
     // Runs inside the change's transaction, while the channel's rows still exist.
-    channel: (channel: Channel, change: "rename" | "delete") => void;
+    channel: (channel: Channel, change: "rename" | "privacy" | "delete") => void;
     direct: (user: User, peer: string) => DirectAccess;
   };
   mirrorHooks?: {
@@ -173,7 +175,7 @@ export class Store {
     const version = (
       this.db.prepare("PRAGMA user_version").get() as { user_version: number }
     ).user_version;
-    if (version > 14) throw new Error("Database is newer than this application");
+    if (version > 15) throw new Error("Database is newer than this application");
     if (version === 0)
       this.transaction(() =>
         this.db.exec(
@@ -259,6 +261,10 @@ export class Store {
     if (version < 14)
       this.transaction(() => this.db.exec(readFileSync(
         new URL("../migrations/014_prefs_push.sql", import.meta.url), "utf8",
+      )));
+    if (version < 15)
+      this.transaction(() => this.db.exec(readFileSync(
+        new URL("../migrations/015_channel_privacy.sql", import.meta.url), "utf8",
       )));
   }
   close() {
@@ -1054,10 +1060,29 @@ export class Store {
       .get(id) as { writable: number } | undefined;
     return row ? (row.writable ? ("writable" as const) : ("read-only" as const)) : null;
   }
+  // What a channel can keep from its members: who else is in it, and the handles behind the names.
+  // Its owner, its moderators and those they allowed see them all the same.
+  sees(user: User, channel: Channel, what: "members" | "handles") {
+    if (what === "members" ? channel.show_members : !channel.hide_handles)
+      return true;
+    if (user.admin) return true;
+    const role = this.role(channel.id, user.id);
+    if (!role) return false;
+    if (!channel.remote_actor && role !== "member") return true;
+    return !!(
+      this.db
+        .prepare(
+          `SELECT see_${what} AS allowed FROM channel_grants WHERE channel_id=? AND user_id=?`,
+        )
+        .get(channel.id, user.id) as { allowed: number } | undefined
+    )?.allowed;
+  }
   channelInfo(user: User, channel: Channel) {
     const rule = this.rule(channel.id, user.id);
     return {
       ...channel,
+      sees_members: this.sees(user, channel, "members"),
+      sees_handles: this.sees(user, channel, "handles"),
       actor_url:
         channel.remote_actor || `${this.baseUrl}/actors/channels/${channel.id}`,
       role: this.role(channel.id, user.id),
@@ -1210,6 +1235,7 @@ export class Store {
         "topics",
         "memberships",
         "channel_rules",
+        "channel_grants",
         "conversation_prefs",
       ])
         this.db.prepare(`DELETE FROM ${table} WHERE channel_id=?`).run(id);
@@ -1248,26 +1274,68 @@ export class Store {
     this.db
       .prepare("DELETE FROM memberships WHERE channel_id=? AND user_id=?")
       .run(id, user.id);
+    this.dropGrants(id, user.id);
+  }
+  // What a member was allowed to see ends with their membership.
+  dropGrants(channelId: string, userId: string) {
+    this.db
+      .prepare("DELETE FROM channel_grants WHERE channel_id=? AND user_id=?")
+      .run(channelId, userId);
   }
   details(user: User, id: string) {
     const channel = this.channel(id);
     this.requireRead(user, channel);
-    const members = this.db
-      .prepare(
-        "SELECT u.*, m.role FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.channel_id=? ORDER BY u.username",
-      )
-      .all(id) as unknown as (User & { role: string })[];
+    const members = this.sees(user, channel, "members")
+      ? (this.db
+          .prepare(
+            "SELECT u.*, m.role, COALESCE(g.see_members,0) AS see_members, COALESCE(g.see_handles,0) AS see_handles FROM memberships m JOIN users u ON u.id=m.user_id LEFT JOIN channel_grants g ON g.channel_id=m.channel_id AND g.user_id=m.user_id WHERE m.channel_id=? ORDER BY u.username",
+          )
+          .all(id) as unknown as (User & {
+          role: string;
+          see_members: number;
+          see_handles: number;
+        })[])
+      : [];
     const topics = this.db
       .prepare("SELECT * FROM topics WHERE channel_id=? ORDER BY created_at")
       .all(id);
+    const handles = this.sees(user, channel, "handles");
     return {
       ...this.channelInfo(user, channel),
       members: members.map((u) => ({
         ...this.profile(u), role: u.role,
         display_name: u.remote_actor ? this.contactName(user, u.remote_actor) ?? u.display_name : u.display_name,
+        see_members: !!u.see_members,
+        see_handles: !!u.see_handles,
+        // Without the handle there is nothing to look the member up by.
+        ...(handles || u.id === user.id
+          ? {}
+          : { username: "", actor_url: null, verified_socials: [] }),
       })),
       topics,
     };
+  }
+  // The owner decides what the channel shows its members of one another.
+  setPrivacy(user: User, id: string, input: Record<string, unknown>) {
+    const channel = this.channel(id);
+    this.requireOwner(user, channel);
+    for (const key of ["show_members", "hide_handles"] as const)
+      if (input[key] !== undefined && typeof input[key] !== "boolean")
+        throw new Problem(400, "Choose what the channel shows its members.");
+    const show = input.show_members ?? !!channel.show_members,
+      hide = input.hide_handles ?? !!channel.hide_handles;
+    return this.transaction(() => {
+      this.db
+        .prepare("UPDATE channels SET show_members=?,hide_handles=? WHERE id=?")
+        .run(Number(show), Number(hide), id);
+      this.federationHooks?.channel(this.channel(id), "privacy");
+      this.audit(
+        user.id,
+        "channel.privacy",
+        JSON.stringify({ channel: id, show_members: show, hide_handles: hide }),
+      );
+      return this.channelInfo(user, this.channel(id));
+    });
   }
   setMember(
     user: User,
@@ -1302,9 +1370,17 @@ export class Store {
       throw new Problem(409, "The user must join before receiving a role.");
     if (input.role === "moderator" && this.user(targetId).remote_actor)
       throw new Problem(400, "Only local members can moderate a channel.");
+    const grants = (["see_members", "see_handles"] as const).filter(
+      (key) => input[key] !== undefined,
+    );
+    if (grants.some((key) => typeof input[key] !== "boolean"))
+      throw new Problem(400, "Choose whether the member is allowed to see it.");
+    if (grants.length && !role)
+      throw new Problem(409, "The user must join before being allowed to see more.");
     if (
       input.rule === undefined &&
       input.role === undefined &&
+      !grants.length &&
       input.remove !== true
     )
       throw new Problem(400, "Choose a membership change.");
@@ -1319,11 +1395,18 @@ export class Store {
             "INSERT INTO channel_rules VALUES(?,?,?) ON CONFLICT(channel_id,user_id) DO UPDATE SET rule=excluded.rule",
           )
           .run(channelId, targetId, input.rule as string);
-      if (input.remove === true || input.rule === "block")
+      for (const key of grants)
+        this.db
+          .prepare(
+            `INSERT INTO channel_grants(channel_id,user_id,${key}) VALUES(?,?,?) ON CONFLICT(channel_id,user_id) DO UPDATE SET ${key}=excluded.${key}`,
+          )
+          .run(channelId, targetId, Number(input[key]));
+      if (input.remove === true || input.rule === "block") {
         this.db
           .prepare("DELETE FROM memberships WHERE channel_id=? AND user_id=?")
           .run(channelId, targetId);
-      else if (input.role)
+        this.dropGrants(channelId, targetId);
+      } else if (input.role)
         this.db
           .prepare(
             "UPDATE memberships SET role=? WHERE channel_id=? AND user_id=?",
@@ -1380,11 +1463,8 @@ export class Store {
       input.title === undefined || input.title === null
         ? null
         : text(input.title, "Thread title", 160);
-    if (channel.mode === "timeline" && (parentId || topicId || title))
-      throw new Problem(
-        400,
-        "Timeline messages cannot have a parent, topic, or title.",
-      );
+    if (channel.mode === "timeline" && (topicId || title))
+      throw new Problem(400, "Timeline messages cannot have a topic or title.");
     if (channel.mode !== "topical" && topicId)
       throw new Problem(400, "This channel does not use topics.");
     if (channel.mode === "topical") {
@@ -1482,12 +1562,19 @@ export class Store {
         ) as unknown as Message[]
     )
       .reverse()
-      .map((m) => this.messageFor(user, m));
+      .map((m) => this.veiled(user, this.messageFor(user, m)));
     // Threads this reader hid stay in the page, marked, so they can be shown again.
     const hidden = this.hiddenThreadMessages(user.id, id);
     return hidden.size
       ? page.map((m) => (hidden.has(m.id) ? { ...m, hidden_thread: true } : m))
       : page;
+  }
+  // Where a channel hides handles, its readers get names alone: nothing to look an author up by.
+  veiled<T extends { channel_id: string; author_id: string }>(user: User, info: T) {
+    return info.author_id === user.id ||
+      this.sees(user, this.channel(info.channel_id), "handles")
+      ? info
+      : { ...info, username: "", author_actor_url: null };
   }
   messageFor(user: User, message: Message) {
     const info = this.messageInfo(message, user);
@@ -1977,7 +2064,7 @@ export class Store {
             ...this.unreadArgs(me, c.id, this.channelMark(me.id, c.id)),
           ) as unknown as Message[]
       ).map((m) => ({
-        ...this.messageInfo(m, me),
+        ...this.veiled(me, this.messageInfo(m, me)),
         kind: "channel" as const,
         target: c.id,
         channel: {

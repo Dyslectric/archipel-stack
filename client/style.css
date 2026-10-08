@@ -230,15 +230,19 @@ main.page { padding: 0 16px; }
 .side-resize { position: absolute; top: 0; bottom: 0; right: -4px; width: 8px; z-index: 6; cursor: col-resize; touch-action: none; }
 .side-resize::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: var(--accent);
   opacity: 0; transition: opacity .12s; }
-.side-resize:hover::after, .side-resize:focus-visible::after, .resizing .side-resize::after { opacity: 1; }
+.side-resize:hover::after, .side-resize:focus-visible::after, .resizing #side-resize::after,
+.resizing-members #members-resize::after { opacity: 1; }
 .side-resize:focus-visible { outline: none; }
-.workspace.resizing { cursor: col-resize; user-select: none; }
+.workspace.resizing, .workspace.resizing-members { cursor: col-resize; user-select: none; }
 .sidebar > .side-foot { white-space: nowrap; overflow: hidden; }
 .sidebar > .side-foot span { overflow: hidden; text-overflow: ellipsis; }
 
 /* ---- who is in the channel, on the right ---- */
-.members-panel { width: 240px; background: var(--card); border-left: 1px solid var(--line); display: flex; flex-direction: column;
-  min-height: 0; }
+.members-panel { width: var(--members-w, 240px); background: var(--card); border-left: 1px solid var(--line); display: flex;
+  flex-direction: column; min-height: 0; position: relative; }
+/* Its left edge drags, as the sidebar's right edge does. */
+#members-resize { left: -4px; right: auto; }
+.members-inner { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .panel-head { display: flex; align-items: center; gap: 2px; min-height: 48px; padding: 6px 6px 6px 16px;
   border-bottom: 1px solid var(--line); }
 .panel-head h2 { margin: 0; font-size: 1rem; }

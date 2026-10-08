@@ -4,7 +4,7 @@ import { markdownHtml } from "./markdown.js";
 export type { CustomEmoji };
 export interface User {
   id: string;
-  actor_url?: string;
+  actor_url?: string | null; // kept back, with the handle, where a channel hides handles
   avatar_url?: string | null;
   username: string;
   display_name: string;
@@ -14,6 +14,9 @@ export interface User {
   share_socials?: boolean;
   verified_socials: unknown[];
   role?: string;
+  // What a channel's owner or moderator allowed this member to see there.
+  see_members?: boolean;
+  see_handles?: boolean;
   federation_send?: boolean;
   federation_receive?: boolean;
   federation_subscribe?: boolean;
@@ -43,6 +46,11 @@ export interface Channel {
   can_join: boolean;
   member_count: number;
   members?: User[];
+  // What the channel shows its members of one another, and whether this reader sees it anyway.
+  show_members: number;
+  hide_handles: number;
+  sees_members: boolean;
+  sees_handles: boolean;
   topics?: Topic[];
   remote_actor: string | null;
   federation_enabled: number;
@@ -114,7 +122,7 @@ export interface Message {
   edited_at: string | null;
   emojis?: CustomEmoji[];
   queued?: boolean;
-  author_actor_url?: string;
+  author_actor_url?: string | null;
   history_placeholder?: number;
   hidden_thread?: boolean; // in a thread the reader hid
 }
@@ -242,7 +250,7 @@ export const avatar = (
   u: { username: string; display_name: string; avatar_url?: string | null },
   cls = "",
 ) =>
-  `<span class="avatar av-${hue(u.username)}${cls ? ` ${cls}` : ""}" aria-hidden="true">${esc((u.display_name || u.username).trim().slice(0, 1).toUpperCase())}${u.avatar_url ? `<img src="${esc(u.avatar_url)}" alt="" loading="lazy" decoding="async">` : ""}</span>`;
+  `<span class="avatar av-${hue(u.username || u.display_name)}${cls ? ` ${cls}` : ""}" aria-hidden="true">${esc((u.display_name || u.username).trim().slice(0, 1).toUpperCase())}${u.avatar_url ? `<img src="${esc(u.avatar_url)}" alt="" loading="lazy" decoding="async">` : ""}</span>`;
 
 // Keep the initial visible if a removed or unavailable picture fails to load.
 document.addEventListener("error", (event) => {
@@ -253,12 +261,15 @@ document.addEventListener("error", (event) => {
 // The author of a message or a member in a list: a click offers to write to them (people.ts).
 export const nameButton = (
   u: { username: string; display_name: string; avatar_url?: string | null },
-  actor: string | undefined,
+  actor: string | null | undefined,
   cls = "author",
 ) =>
   actor
     ? `<button type="button" class="${cls} name-button" data-user="${esc(actor)}" data-username="${esc(u.username)}" data-name="${esc(u.display_name)}" data-avatar="${esc(u.avatar_url || "")}" title="About ${esc(u.display_name)}">${esc(u.display_name)}</button>`
     : `<strong class="${cls}">${esc(u.display_name)}</strong>`;
+// The handle beside a name; a channel that hides handles sends none.
+export const handleTag = (username: string) =>
+  username ? `<span class="handle">@${esc(username)}</span>` : "";
 // Direct conversations accept a local member id, an actor URL, or an xmpp: address.
 const localActors = () => `${location.origin}/actors/users/`;
 export const dmHref = (peer: string) =>

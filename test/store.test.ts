@@ -158,6 +158,65 @@ test("topical messages require same-channel topics and same-topic parents", () =
   );
   store.close();
 });
+test("timeline messages can reply to a message in their channel", () => {
+  const { store, alice } = fixture();
+  const c = store.createChannel(alice, channelInput());
+  const other = store.createChannel(alice, channelInput({ name: "another" }));
+  const first = store.post(alice, c.id, { body: "A question" });
+  assert.equal(
+    store.post(alice, c.id, { body: "An answer", parent_id: first.id }).parent_id,
+    first.id,
+  );
+  denied(() => store.post(alice, other.id, { body: "Elsewhere", parent_id: first.id }), 400);
+  denied(() => store.post(alice, c.id, { body: "Titled", title: "No" }), 400);
+  store.close();
+});
+test("a channel can keep its member list and handles to its moderators and those they allow", () => {
+  const { store, alice, bob } = fixture();
+  const c = store.createChannel(alice, channelInput());
+  store.join(bob, c.id);
+  store.post(alice, c.id, { body: "From the owner" });
+  store.post(bob, c.id, { body: "From a member" });
+  assert.equal(store.details(bob, c.id).members.length, 2);
+  assert.equal(store.messages(bob, c.id)[0].username, "alice");
+  // Only the owner decides; the choices are booleans.
+  denied(() => store.setPrivacy(bob, c.id, { show_members: false }));
+  denied(() => store.setPrivacy(alice, c.id, { show_members: "no" }), 400);
+  const set = store.setPrivacy(alice, c.id, { show_members: false, hide_handles: true });
+  assert.deepEqual([set.show_members, set.hide_handles, set.sees_members, set.sees_handles], [0, 1, true, true]);
+  // A member is shown nobody, and names without handles, except their own.
+  let seen = store.details(bob, c.id);
+  assert.deepEqual([seen.sees_members, seen.sees_handles, seen.members.length], [false, false, 0]);
+  let [first, second] = store.messages(bob, c.id);
+  assert.deepEqual([first.username, first.author_actor_url, first.display_name], ["", null, "alice"]);
+  assert.equal(second.username, "bob");
+  assert.equal(store.inbox(bob).find((m) => m.kind === "channel")?.username, "");
+  // The owner still sees everyone, with handles.
+  assert.deepEqual(store.details(alice, c.id).members.map((m) => m.username), ["alice", "bob"]);
+  assert.equal(store.messages(alice, c.id)[1].username, "bob");
+  // Each can be allowed on its own, by those who manage the channel.
+  denied(() => store.setMember(bob, c.id, bob.id, { see_members: true }));
+  denied(() => store.setMember(alice, c.id, bob.id, { see_members: "yes" }), 400);
+  store.setMember(alice, c.id, bob.id, { see_members: true });
+  seen = store.details(bob, c.id);
+  assert.deepEqual([seen.sees_members, seen.sees_handles], [true, false]);
+  assert.deepEqual(seen.members.map((m) => [m.username, m.actor_url === null]), [["", true], ["bob", false]]);
+  store.setMember(alice, c.id, bob.id, { see_handles: true });
+  assert.deepEqual(store.details(bob, c.id).members.map((m) => m.username), ["alice", "bob"]);
+  assert.equal(store.messages(bob, c.id)[0].username, "alice");
+  assert.equal(store.details(alice, c.id).members[1].see_handles, true);
+  store.setMember(alice, c.id, bob.id, { see_members: false });
+  assert.equal(store.details(bob, c.id).members.length, 0);
+  // What was allowed ends with the membership.
+  store.leave(bob, c.id);
+  store.join(bob, c.id);
+  [first] = store.messages(bob, c.id);
+  assert.equal(first.username, "");
+  store.setPrivacy(alice, c.id, { show_members: true, hide_handles: false });
+  assert.equal(store.details(bob, c.id).members.length, 2);
+  store.deleteChannel(alice, c.id);
+  store.close();
+});
 test("threads retain nested structure after deletion and reject cross-channel parents", () => {
   const { store, alice, bob } = fixture();
   const c = store.createChannel(alice, channelInput({ mode: "threaded" }));
@@ -535,7 +594,7 @@ test("version-two emoji messages keep their image metadata through the federatio
     { id: "asset", name: "island", url: "/api/emojis/asset/image" },
   ]);
   assert.equal(store.user("author").federation_send, 0);
-  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 14);
+  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 15);
 });
 
 test("direct messages reach both members, and only the reader's own are news to them", () => {
@@ -644,7 +703,7 @@ test("personal blocks persist across restarts and upgrade an existing version 4 
   let store = new Store(path);
   const alice = store.loginIdentity("https://id.example", "alice", "alice", []);
   const bob = store.loginIdentity("https://id.example", "bob", "bob", []);
-  store.db.exec("DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; DROP TABLE user_blocks; PRAGMA user_version=4;");
+  store.db.exec("DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; DROP TABLE user_blocks; PRAGMA user_version=4;");
   store.close();
   store = new Store(path);
   const peer = `${store.baseUrl}/actors/users/${alice.id}`;
@@ -694,7 +753,7 @@ test("profile picture migration preserves identities and pictures survive restar
   const path = join(directory, "db.sqlite");
   let store = new Store(path);
   const alice = store.loginIdentity("https://id.example", "alice", "alice", []);
-  store.db.exec("DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; PRAGMA user_version=5;");
+  store.db.exec("DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; PRAGMA user_version=5;");
   store.close();
   store = new Store(path);
   const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
@@ -742,9 +801,9 @@ test("version 9 avatar migration preserves pictures and XMPP cursors and remote 
   const image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
   store.setAvatar(alice, image);
   store.db.prepare("INSERT INTO xmpp_events(seq,kind,object_id) VALUES(50,'Direct','old-message')").run();
-  store.db.exec("DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; PRAGMA user_version=9");
+  store.db.exec("DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; PRAGMA user_version=9");
   store.close(); store = new Store(path);
-  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 14);
+  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 15);
   assert.equal(Buffer.from(store.avatarImage(alice.id).image).toString("base64"), image);
   assert.equal(store.db.prepare("SELECT seq FROM xmpp_events WHERE object_id='old-message'").get()?.seq, 50);
   const next = store.db.prepare("INSERT INTO xmpp_events(kind,object_id) VALUES('Profile',?)").run(alice.id);

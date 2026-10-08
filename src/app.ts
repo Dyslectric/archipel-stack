@@ -684,7 +684,7 @@ export function createApp(config: Config, store: Store) {
         403,
         "Receiving federated messages is disabled for this account.",
       );
-    res.json(store.messageFor(user(res), message));
+    res.json(store.veiled(user(res), store.messageFor(user(res), message)));
   });
   app.post("/api/logout", (req, res) => {
     store.logout(cookie(req, authCookie));
@@ -703,6 +703,11 @@ export function createApp(config: Config, store: Store) {
   app.patch("/api/channels/:id", (req, res) =>
     res.json(
       store.renameChannel(user(res), String(req.params.id), req.body?.name),
+    ),
+  );
+  app.patch("/api/channels/:id/privacy", (req, res) =>
+    res.json(
+      store.setPrivacy(user(res), String(req.params.id), req.body || {}),
     ),
   );
   app.delete("/api/channels/:id", (req, res) => {

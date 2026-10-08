@@ -104,7 +104,7 @@ const roleValues = (data: FormData) => ({
   ),
 });
 const person = (u: User, note: string, controls = "") =>
-  `<li class="member-row">${avatar(u)}<div class="grow">${nameButton(u, u.actor_url)} <span class="muted">@${esc(u.username)}</span><div class="muted small">${note}</div></div>${controls}</li>`;
+  `<li class="member-row">${avatar(u)}<div class="grow">${nameButton(u, u.actor_url)}${u.username ? ` <span class="muted">@${esc(u.username)}</span>` : ""}<div class="muted small">${note}</div></div>${controls}</li>`;
 // Buttons that carry out one change and redraw the section.
 function onClick(
   el: HTMLElement,
@@ -612,6 +612,11 @@ const sections: Section[] = [
           : "") +
         (owning
           ? card(
+              "What members see of each other",
+              `<form class="stack narrow-form" id="channel-privacy"><label class="check"><input type="checkbox" name="show_members" ${c.show_members ? "checked" : ""}> Show the list of who is in this channel</label><label class="check"><input type="checkbox" name="hide_handles" ${c.hide_handles ? "checked" : ""}> Hide handles, leaving only display names</label>${error}<button>Save</button></form>`,
+              `The owner and moderators always see both. Allow other members one at a time under <a href="#/settings/channel/members/${c.id}">Members</a>.${c.federation_enabled ? " Instances following this channel are told to do the same for their own members." : ""}`,
+            ) +
+            card(
               "Rename",
               `<form class="stack narrow-form" id="rename-channel"><label>Channel name<span class="input-prefix"><span>#</span><input name="name" value="${esc(c.name)}" required minlength="2" maxlength="40" pattern="[a-zA-Z0-9][a-zA-Z0-9_\\-]{1,39}" autocomplete="off"></span></label>${error}<button>Rename channel</button></form>`,
               "Renaming changes the channel's address. Links to it keep working; anyone using the old address, or its XMPP room, has to switch to the new one.",
@@ -623,6 +628,16 @@ const sections: Section[] = [
             )
           : "");
       if (owning) {
+        onSubmit($("#channel-privacy", el), async (data) => {
+          await api(`/channels/${c.id}/privacy`, "PATCH", {
+            show_members: data.get("show_members") === "on",
+            hide_handles: data.get("hide_handles") === "on",
+          });
+          state.channels = await api<Channel[]>("/channels");
+          if (chatChannel()?.id === c.id) resetChat();
+          toast("Channel updated.");
+          ctx.refresh();
+        });
         onSubmit($("#rename-channel", el), async (data) => {
           await api(`/channels/${c.id}`, "PATCH", { name: data.get("name") });
           state.channels = await api<Channel[]>("/channels");
@@ -675,15 +690,28 @@ const sections: Section[] = [
       const c = ctx.channel!,
         moderating = canModerate(c),
         promoting = !!state.session.user?.admin || c.role === "owner";
+      if (!c.sees_members) {
+        el.innerHTML =
+          '<p class="card empty muted">This channel doesn\'t show its members.</p>';
+        return;
+      }
+      // Where the channel keeps something from its members, a moderator can let one of them see it.
+      const allow = (u: User, grant: "see_members" | "see_handles", what: string) =>
+        `<button type="button" class="small secondary" data-member="${u.id}" data-grant="${grant}" data-allow="${u[grant] ? "" : "1"}">${u[grant] ? `Stop showing ${what}` : `Show ${what}`}</button>`;
+      const grants = (u: User) =>
+        u.role !== "member"
+          ? ""
+          : (c.show_members ? "" : allow(u, "see_members", "members")) +
+            (c.hide_handles ? allow(u, "see_handles", "handles") : "");
       el.innerHTML = card(
         `${c.member_count} member${c.member_count === 1 ? "" : "s"}`,
         `<ul class="plain member-list">${(c.members || [])
           .map((u) =>
             person(
               u,
-              `<span class="pill ${u.role === "owner" ? "kept" : u.role === "moderator" ? "new" : ""}">${esc(u.role)}</span>${u.verified_socials.length ? `<details class="socials"><summary>Shared socials</summary>${socialsHtml(u.verified_socials)}</details>` : ""}`,
+              `<span class="pill ${u.role === "owner" ? "kept" : u.role === "moderator" ? "new" : ""}">${esc(u.role)}</span>${moderating && u.role === "member" && ((!c.show_members && u.see_members) || (c.hide_handles && u.see_handles)) ? ` <span class="pill good">Sees ${[!c.show_members && u.see_members ? "members" : "", c.hide_handles && u.see_handles ? "handles" : ""].filter(Boolean).join(" and ")}</span>` : ""}${u.verified_socials.length ? `<details class="socials"><summary>Shared socials</summary>${socialsHtml(u.verified_socials)}</details>` : ""}`,
               moderating && u.role !== "owner"
-                ? `${promoting ? `<button type="button" class="small secondary" data-member="${u.id}" data-role="${u.role === "moderator" ? "member" : "moderator"}">${u.role === "moderator" ? "Make member" : "Make moderator"}</button>` : ""}<button type="button" class="small secondary bad-text" data-member="${u.id}" data-remove>Remove</button>`
+                ? `${grants(u)}${promoting ? `<button type="button" class="small secondary" data-member="${u.id}" data-role="${u.role === "moderator" ? "member" : "moderator"}">${u.role === "moderator" ? "Make member" : "Make moderator"}</button>` : ""}<button type="button" class="small secondary bad-text" data-member="${u.id}" data-remove>Remove</button>`
                 : "",
             ),
           )
@@ -698,7 +726,9 @@ const sections: Section[] = [
           "PATCH",
           "remove" in button.dataset
             ? { remove: true }
-            : { role: button.dataset.role },
+            : button.dataset.grant
+              ? { [button.dataset.grant]: !!button.dataset.allow }
+              : { role: button.dataset.role },
         );
         toast("Channel permissions updated.");
         ctx.refresh();
@@ -953,7 +983,7 @@ const sections: Section[] = [
         ) +
         card(
           `Applications${applications.length ? ` <span class="count">${applications.length}</span>` : ""}`,
-          `<div class="applications">${applications.length ? applications.map((u) => `<article class="application" data-application="${u.id}"><div class="row">${avatar(u)}<div class="grow">${nameButton(u, u.actor_url)} <span class="muted">@${esc(u.username)}</span><div class="muted small"><span class="pill ${u.admission_status === "rejected" ? "bad" : "warn"}">${esc(u.admission_status)}</span> Applied ${esc(full(u.created_at))}${u.banned ? " · also suspended" : ""}</div></div><button type="button" class="small" data-review="${u.id}" data-decision="approved">Approve</button>${u.admission_status !== "rejected" ? `<button type="button" class="small secondary bad-text" data-review="${u.id}" data-decision="rejected">Decline</button>` : ""}</div>${u.identities.map((identity) => `<dl class="info small"><dt>Issuer</dt><dd><code>${esc(identity.issuer)}</code></dd><dt>Subject</dt><dd><code>${esc(identity.subject)}</code></dd></dl>`).join("")}<h3>Provider-verified socials</h3>${socialsHtml(u.verified_socials)}</article>`).join("") : '<p class="muted">No applications waiting for review.</p>'}</div>`,
+          `<div class="applications">${applications.length ? applications.map((u) => `<article class="application" data-application="${u.id}"><div class="row">${avatar(u)}<div class="grow">${nameButton(u, u.actor_url)}${u.username ? ` <span class="muted">@${esc(u.username)}</span>` : ""}<div class="muted small"><span class="pill ${u.admission_status === "rejected" ? "bad" : "warn"}">${esc(u.admission_status)}</span> Applied ${esc(full(u.created_at))}${u.banned ? " · also suspended" : ""}</div></div><button type="button" class="small" data-review="${u.id}" data-decision="approved">Approve</button>${u.admission_status !== "rejected" ? `<button type="button" class="small secondary bad-text" data-review="${u.id}" data-decision="rejected">Decline</button>` : ""}</div>${u.identities.map((identity) => `<dl class="info small"><dt>Issuer</dt><dd><code>${esc(identity.issuer)}</code></dd><dt>Subject</dt><dd><code>${esc(identity.subject)}</code></dd></dl>`).join("")}<h3>Provider-verified socials</h3>${socialsHtml(u.verified_socials)}</article>`).join("") : '<p class="muted">No applications waiting for review.</p>'}</div>`,
         );
       onSubmit($("#registration-form", el), async (data) => {
         const result = await api<{

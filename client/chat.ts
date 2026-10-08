@@ -14,6 +14,7 @@ import {
   esc,
   full,
   go,
+  handleTag,
   icon,
   modeLabel,
   nameButton,
@@ -87,6 +88,10 @@ const dmChannel = (c: Conversation): Channel => ({
   topics: [],
   remote_actor: null,
   federation_enabled: 0,
+  show_members: 0,
+  hide_handles: 0,
+  sees_members: false,
+  sees_handles: true,
   dm: c,
 });
 const pagePath = (id: string, before?: number | null) =>
@@ -153,10 +158,11 @@ export function chatFrame(view: HTMLElement) {
       <div class="feed-wrap"><div id="message-list" class="feed" role="log" aria-label="Conversation" tabindex="-1"><div class="feed-inner"><div id="feed-top"></div><div id="rows"></div><div id="feed-empty"></div></div></div>
       <button type="button" id="new-pill" class="new-pill" hidden></button></div>
       <div id="composer-area"></div></main>
-      <aside class="members-panel" id="member-panel" aria-label="Members" hidden></aside></div>`;
+      <aside class="members-panel" id="member-panel" aria-label="Members" hidden><div class="side-resize" id="members-resize" role="separator" aria-orientation="vertical" aria-label="Members panel width" aria-valuemin="180" aria-valuemax="520" tabindex="0" title="Drag to resize. Double-click to reset."></div><div class="members-inner" id="member-list"></div></aside></div>`;
   painted = false;
   wireSidebar($("#channel-list"));
   wireFeed();
+  wireMembersResize();
   $("#channel-actions").addEventListener("click", (e) => {
     const at = e.target as Element,
       pref = at.closest<HTMLElement>("[data-pref-menu]");
@@ -264,12 +270,72 @@ const ranks = [
   ["moderator", "Moderators"],
   ["member", "Members"],
 ] as const;
+// The panel is as wide as the reader dragged it, here and in every channel.
+const MEMBERS_WIDTH = "archipel-members-w";
+function membersWidth(value: number | null) {
+  const panel = $("#member-panel");
+  if (value === null) return panel.style.removeProperty("--members-w");
+  const width = Math.round(Math.max(180, Math.min(value, 520, innerWidth * 0.5)));
+  panel.style.setProperty("--members-w", `${width}px`);
+  $("#members-resize").setAttribute("aria-valuenow", String(width));
+}
+function wireMembersResize() {
+  const panel = $("#member-panel"),
+    handle = $("#members-resize");
+  const keep = (value: string | null) => {
+    try {
+      if (value === null) localStorage.removeItem(MEMBERS_WIDTH);
+      else localStorage.setItem(MEMBERS_WIDTH, value);
+    } catch {
+      /* Without storage the width lasts until the page is reloaded. */
+    }
+  };
+  const save = () => keep(String(Math.round(panel.getBoundingClientRect().width)));
+  try {
+    const saved = Number(localStorage.getItem(MEMBERS_WIDTH));
+    if (saved >= 180) membersWidth(saved);
+  } catch {
+    /* The panel keeps its usual width. */
+  }
+  handle.addEventListener("pointerdown", (e) => {
+    if (e.button) return;
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    const ws = panel.parentElement!,
+      right = panel.getBoundingClientRect().right;
+    ws.classList.add("resizing-members");
+    const move = (ev: PointerEvent) => membersWidth(right - ev.clientX);
+    const done = () => {
+      ws.classList.remove("resizing-members");
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", done);
+      handle.removeEventListener("pointercancel", done);
+      save();
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", done);
+    handle.addEventListener("pointercancel", done);
+  });
+  handle.addEventListener("dblclick", () => {
+    membersWidth(null);
+    keep(null);
+  });
+  handle.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    membersWidth(
+      panel.getBoundingClientRect().width + (e.key === "ArrowLeft" ? 16 : -16),
+    );
+    save();
+  });
+}
 function renderMembers() {
-  const panel = document.querySelector<HTMLElement>("#member-panel");
-  if (!panel) return;
+  const frame = document.querySelector<HTMLElement>("#member-panel"),
+    panel = document.querySelector<HTMLElement>("#member-list");
+  if (!frame || !panel) return;
   const c = current,
-    show = !!c && !c.dm && membersOpen();
-  panel.hidden = !show;
+    show = !!c && !c.dm && c.sees_members && membersOpen();
+  frame.hidden = !show;
   if (!show) return;
   const members = c.members || [];
   const html = `<div class="panel-head"><h2 class="grow">Members <span class="muted">${members.length}</span></h2><a class="icon-button" href="#/settings/channel/members/${c.id}" aria-label="Manage members" title="Roles, invitations and removal">${icon("settings")}</a><button type="button" class="icon-button" data-close-members aria-label="Hide members" title="Hide members">${icon("x")}</button></div>
@@ -342,7 +408,7 @@ function renderHeader() {
   $("#channel-heading").innerHTML =
     `<h1>${channelIcon(c)}<strong>${esc(c.name)}</strong>${topic ? `${icon("chevron-right", "sep")}<span class="topic-name">${esc(topic.title)}</span>` : ""}</h1>${topic && isHidden(`topic:${topic.id}`) ? '<span class="pill warn">Hidden</span>' : ""}<span class="pill">${modeLabel(c.mode)}</span>${c.remote_actor ? '<span class="pill new">Remote</span>' : c.federation_enabled ? '<span class="pill new">Federated</span>' : ""}${c.bridge_room ? `<span class="pill new" title="Bridged with the XMPP room ${esc(c.bridge_room)}">Bridged</span>` : ""}${c.mirror ? `<span class="pill new">${c.mirror === "writable" ? "Fork" : "Mirror"}</span>` : ""}${c.description ? `<span class="desc muted small">${esc(c.description)}</span>` : ""}`;
   $("#channel-actions").innerHTML =
-    `${!c.role ? "" : topic ? prefButton("topic", `topic:${topic.id}`, topic.title) : prefButton("channel", c.id, `#${c.name}`)}<button type="button" class="act" id="members" aria-pressed="${membersOpen()}" title="Show or hide the members of #${esc(c.name)}">${icon("people")}<span>${c.member_count} member${c.member_count === 1 ? "" : "s"}</span></button><a class="icon-button" href="#/settings/channel/overview/${c.id}" aria-label="Channel settings" title="Channel settings">${icon("settings")}</a>`;
+    `${!c.role ? "" : topic ? prefButton("topic", `topic:${topic.id}`, topic.title) : prefButton("channel", c.id, `#${c.name}`)}${c.sees_members ? `<button type="button" class="act" id="members" aria-pressed="${membersOpen()}" title="Show or hide the members of #${esc(c.name)}">${icon("people")}<span>${c.member_count} member${c.member_count === 1 ? "" : "s"}</span></button>` : ""}<a class="icon-button" href="#/settings/channel/overview/${c.id}" aria-label="Channel settings" title="Channel settings">${icon("settings")}</a>`;
 }
 
 // ---- messages ----
@@ -364,6 +430,9 @@ const removable = (m: Message) =>
   !m.deleted_at &&
   !current!.dm &&
   (m.author_id === me().id || canModerate(current!));
+// A reply links back to what it answers. Threads have their own; direct messages have none.
+const repliable = (m: Message) =>
+  canPost() && !m.deleted_at && !current!.dm && !threaded();
 // Occupants of other XMPP servers are marked; their handle is their full address.
 const author = (m: Message) =>
   nameButton(m, m.history_placeholder ? undefined : m.author_actor_url) +
@@ -380,7 +449,7 @@ function chatMessage(m: Message, cont: boolean) {
       : "";
   const time = `<time datetime="${esc(m.created_at)}" title="${esc(full(m.created_at))}">${esc(clock(m.created_at))}</time>`;
   const tools = [
-    canPost() && !m.deleted_at && current!.mode === "topical"
+    repliable(m)
       ? `<button type="button" class="icon-button reply-button" data-reply="${m.id}" aria-label="Reply to ${esc(m.display_name)}" title="Reply">${icon("reply")}</button>`
       : "",
     canPost() && !m.deleted_at
@@ -394,7 +463,7 @@ function chatMessage(m: Message, cont: boolean) {
       : "",
   ].join("");
   return `<article class="message${cont ? " cont" : ""}${m.deleted_at ? " deleted" : ""}" id="m-${m.id}"><div class="msg-gutter">${cont ? time : avatar(m)}</div>
-    <div class="message-content">${cont ? "" : `<div class="message-meta">${author(m)}<span class="handle">@${esc(m.username)}</span>${time}${edited(m)}</div>`}${context}${bodyHtml(m)}${cont ? edited(m) : ""}</div>${tools ? `<div class="message-actions">${tools}</div>` : ""}</article>`;
+    <div class="message-content">${cont ? "" : `<div class="message-meta">${author(m)}${handleTag(m.username)}${time}${edited(m)}</div>`}${context}${bodyHtml(m)}${cont ? edited(m) : ""}</div>${tools ? `<div class="message-actions">${tools}</div>` : ""}</article>`;
 }
 // Consecutive messages from one person within ten minutes share a header, as in Zulip.
 function chatKids(list: Message[]): Node[] {
@@ -453,7 +522,7 @@ function threadActions(m: Message) {
   return parts ? `<div class="obj-actions small">${parts}</div>` : "";
 }
 const byline = (m: Message) =>
-  `${author(m)} <span class="handle">@${esc(m.username)}</span> · ${when(m.created_at)}${m.edited_at && !m.deleted_at ? ` · ${edited(m)}` : ""}`;
+  `${author(m)} ${handleTag(m.username)} ·${when(m.created_at)}${m.edited_at && !m.deleted_at ? ` · ${edited(m)}` : ""}`;
 function threadNodes(list: Message[]): Node[] {
   const ids = new Set(list.map((m) => m.id)),
     children = new Map<string, Message[]>();
@@ -782,6 +851,13 @@ function wireFeed() {
       // The answer belongs with what it quotes, unless it is already a reply to something else.
       if (topic && !reply && quoted.topic_id)
         topic.value = topicOf(quoted.topic_id)?.title || topic.value;
+      if (!reply && repliable(quoted)) {
+        const old = $<HTMLTextAreaElement>("#message-body"),
+          [from, to] = [old.selectionStart, old.selectionEnd];
+        reply = quoted;
+        renderComposer();
+        $<HTMLTextAreaElement>("#message-body").setSelectionRange(from, to);
+      }
       quoteInto($<HTMLTextAreaElement>("#message-body"), quoted.body);
     } else if ((hit = on("[data-edit]"))) {
       editing = hit.dataset.edit!;
@@ -1010,6 +1086,7 @@ export async function refreshCurrent() {
       JSON.stringify(detail.topics) !== JSON.stringify(current.topics),
     headerChanged =
       detail.member_count !== current.member_count ||
+      detail.sees_members !== current.sees_members ||
       detail.description !== current.description ||
       detail.dm?.avatar_url !== current.dm?.avatar_url ||
       detail.name !== current.name;

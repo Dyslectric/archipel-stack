@@ -35,6 +35,8 @@ const context = [
     mode: "archipel:mode",
     admission: "archipel:admission",
     visibility: "archipel:visibility",
+    showMembers: "archipel:showMembers",
+    hideHandles: "archipel:hideHandles",
     topic: "archipel:topic",
     topics: "archipel:topics",
     proof: "archipel:proof",
@@ -225,6 +227,8 @@ export class Federation {
         mode: channel.mode,
         visibility: channel.visibility,
         admission: channel.admission,
+        showMembers: !!channel.show_members,
+        hideHandles: !!channel.hide_handles,
       };
     }
     return {
@@ -313,7 +317,13 @@ export class Federation {
     `).all(user.id, user.id, user.id) as { actor: string }[]).map(r => r.actor);
     if (recipients.length) this.queue("Update", this.userActor(user), this.publicActor("users", user.id), recipients, "profile", user.id, null);
   }
-  private channelChanged(channel: Channel, change: "rename" | "delete") {
+  // A followed channel shows its members here what its home shows them there.
+  private keepPrivacy(channelId: string, actor: Doc) {
+    this.store.db
+      .prepare("UPDATE channels SET show_members=?,hide_handles=? WHERE id=?")
+      .run(Number(actor.showMembers !== false), Number(actor.hideHandles === true), channelId);
+  }
+  private channelChanged(channel: Channel, change: "rename" | "privacy" | "delete") {
     const actor = this.channelActor(channel),
       announce = this.enabled() && !!channel.federation_enabled;
     const follows = this.store.db
@@ -323,7 +333,7 @@ export class Federation {
       follow_id: string;
       status: string;
     }[];
-    if (change === "rename") {
+    if (change !== "delete") {
       const recipients = follows
         .filter((f) => f.status === "accepted")
         .map((f) => f.actor);
@@ -675,6 +685,7 @@ export class Federation {
             time(),
             actor.id,
           );
+        this.keepPrivacy(id, actor);
         channel = this.store.channel(id);
       }
       const previous = this.store.db
@@ -1040,7 +1051,7 @@ export class Federation {
           | undefined)
       : null;
     if (
-      (channel.mode === "timeline" && (title || parent || input.topic_id)) ||
+      (channel.mode === "timeline" && (title || input.topic_id)) ||
       (channel.mode === "threaded" &&
         ((!parent && !title) || (parent && title) || input.topic_id)) ||
       (channel.mode === "topical" &&
@@ -1507,7 +1518,7 @@ export class Federation {
           .run(topicId, parentId);
     }
     if (
-      (channel.mode === "timeline" && (parentId || topicId || note.name)) ||
+      (channel.mode === "timeline" && (topicId || note.name)) ||
       (channel.mode === "threaded" &&
         ((!parentId && !note.name) || (parentId && note.name) || topicId)) ||
       (channel.mode === "topical" &&
@@ -1716,6 +1727,7 @@ export class Federation {
         if (!this.store.db.prepare("SELECT 1 FROM channels WHERE name=? AND id!=?").get(name, channel.id))
           this.store.db.prepare("UPDATE channels SET name=?,description=? WHERE id=?")
             .run(name, String(renamed!.summary || "").slice(0, 500), channel.id);
+        this.keepPrivacy(channel.id, renamed!);
       } else if (profileUpdate || profileRelay) {
         const author = profileUpdate ? sender.id : object.actor;
         const cached = this.store.db.prepare("SELECT document FROM federation_actors WHERE id=?").get(author) as { document: string };

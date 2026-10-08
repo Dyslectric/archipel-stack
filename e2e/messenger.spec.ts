@@ -144,14 +144,45 @@ test("topics separate conversations and allow replies within their topic", async
   await expect(box).toHaveValue("> Time to build.\n\n");
   await expect(box).toBeFocused();
   await expect(topic).toHaveValue("Building");
+  // A quote answers what it quotes, unless the reply is called off.
+  await expect(page.locator(".reply-banner")).toContainText("Replying to alice");
   await box.pressSequentially("Agreed.");
   await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.locator(".message-body blockquote")).toHaveText(
     "Time to build.",
   );
   await expect(
-    page.locator(".message-body").filter({ hasText: "Agreed." }),
-  ).toBeVisible();
+    page.locator(".message").filter({ hasText: "Agreed." }).locator(".reply-context"),
+  ).toContainText("Time to build.");
+});
+
+test("a timeline reply links back to the message it answers", async ({ page }) => {
+  await login(page);
+  await createChannel(page, "hallway");
+  await send(page, "Who is in today?");
+  await send(page, "Something else entirely.");
+  const first = page.locator(".message").filter({ hasText: "Who is in today?" }).first();
+  await first.hover();
+  await first.getByRole("button", { name: "Reply to alice" }).click();
+  await expect(page.locator(".reply-banner")).toContainText("Replying to alice");
+  await send(page, "I am.");
+  const answer = page.locator(".message").filter({ hasText: "I am." });
+  await expect(answer.locator(".reply-context")).toContainText("Who is in today?");
+  await answer.locator(".reply-context").click();
+  await expect(first).toHaveClass(/flash-target/);
+  // Quoting replies too; the reply can be dropped and the quote kept.
+  const box = page.getByRole("textbox", { name: "Message", exact: true });
+  await first.hover();
+  await first.getByRole("button", { name: "Quote alice" }).click();
+  await expect(box).toHaveValue("> Who is in today?\n\n");
+  await expect(page.locator(".reply-banner")).toBeVisible();
+  await page.getByRole("button", { name: "Cancel reply" }).click();
+  await expect(box).toHaveValue("> Who is in today?\n\n");
+  await box.pressSequentially("Only quoting.");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(
+    page.locator(".message").filter({ hasText: "Only quoting." }).locator(".reply-context"),
+  ).toHaveCount(0);
 });
 
 test("nested threads preserve replies when a parent is removed", async ({

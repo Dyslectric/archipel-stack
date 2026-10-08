@@ -854,6 +854,29 @@ test("an offline peer with a backlog cannot prevent delivery to another peer", a
   await b.fed.tick();
   assert.equal(c.fed.directMessages(c.bob)[0].body, "Independent recipient");
 });
+test("a followed channel keeps from its readers what its home keeps from its members, and timeline replies cross", async (t) => {
+  const a = await instance(t),
+    b = await instance(t);
+  const home = channel(a),
+    host = new URL(a.origin).host;
+  a.store.setPrivacy(a.alice, home.id, { show_members: false });
+  const sub = await b.fed.subscribe(b.bob, `#general@${host}`);
+  await drain(a, b);
+  const first = a.store.post(a.alice, home.id, { body: "A question" });
+  await drain(a, b);
+  const copy = () => b.store.details(b.bob, sub.channel.id);
+  assert.deepEqual([copy().sees_members, copy().members.length], [false, 0]);
+  assert.equal(b.store.messages(b.bob, sub.channel.id)[0].username.startsWith("alice"), true);
+  a.store.setPrivacy(a.alice, home.id, { show_members: true, hide_handles: true });
+  await drain(a, b);
+  assert.deepEqual([copy().sees_members, copy().sees_handles], [true, false]);
+  assert.equal(b.store.messages(b.bob, sub.channel.id)[0].username, "");
+  const question = b.store.messages(b.bob, sub.channel.id)[0];
+  await b.fed.remotePost(b.bob, sub.channel.id, { body: "An answer", parent_id: question.id });
+  await drain(a, b);
+  assert.equal(a.store.messages(a.alice, home.id).at(-1)?.parent_id, first.id);
+  assert.equal(b.store.messages(b.bob, sub.channel.id).at(-1)?.parent_id, question.id);
+});
 test("renaming a home channel renames its remote copies and deleting it ends their subscriptions", async (t) => {
   const a = await instance(t),
     b = await instance(t);

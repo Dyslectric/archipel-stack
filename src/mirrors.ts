@@ -143,9 +143,12 @@ export class Mirrors {
     let cursor = source.cursor;
     // Marked as remote content: readers need the receive grant, and nothing relays it onward.
     const marker = (original: string) => `mirror:${source.id}:${original}`;
-    const copy = (original: string, author: string, body: string, stamp: string, emojis = "[]") =>
-      this.store.db.prepare("INSERT OR IGNORE INTO messages(id,channel_id,author_id,body,created_at,remote_object,emoji_tags) VALUES(?,?,?,?,?,?,?)")
-        .run(randomUUID(), mirror.id, author, body, stamp, marker(original), emojis);
+    const copied = (id: string | null) => id
+      ? (this.store.db.prepare("SELECT id FROM messages WHERE remote_object=?").get(marker(id)) as { id: string } | undefined)?.id ?? null
+      : null;
+    const copy = (original: string, author: string, body: string, stamp: string, emojis = "[]", parent: string | null = null) =>
+      this.store.db.prepare("INSERT OR IGNORE INTO messages(id,channel_id,author_id,body,parent_id,created_at,remote_object,emoji_tags) VALUES(?,?,?,?,?,?,?,?)")
+        .run(randomUUID(), mirror.id, author, body, parent, stamp, marker(original), emojis);
     // Topics are matched by title, so sources that share one meet in it.
     const topic = (id: string | null) => {
       if (!id) return null;
@@ -156,9 +159,6 @@ export class Mirrors {
       this.store.db.prepare("INSERT INTO topics(id,channel_id,title,created_at) VALUES(?,?,?,?)").run(created, mirror.id, title, new Date().toISOString());
       return created;
     };
-    const copied = (id: string | null) => id
-      ? (this.store.db.prepare("SELECT id FROM messages WHERE remote_object=?").get(marker(id)) as { id: string } | undefined)?.id ?? null
-      : null;
     for (;;) {
       let count = 0;
       if (source.kind === "channel") {
@@ -169,7 +169,8 @@ export class Mirrors {
         for (const row of rows) {
           cursor = row.seq;
           if (mirror.mode === "timeline") {
-            if (!row.history_placeholder && !row.deleted_at) copy(row.id, row.author_id, row.body, row.created_at, row.emoji_tags);
+            // A reply keeps its link when what it answers was copied too.
+            if (!row.history_placeholder && !row.deleted_at) copy(row.id, row.author_id, row.body, row.created_at, row.emoji_tags, copied(row.parent_id));
             continue;
           }
           // Topics and threads keep their shape, so what was already removed or never received

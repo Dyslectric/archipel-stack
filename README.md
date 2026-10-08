@@ -48,7 +48,10 @@ usernames match. New instances start without fabricated channels or conversation
   the four federation grants. See [roles](#roles).
 - A sidebar that resizes and folds away, and a member list beside each channel.
 - Invite-only instance registration with a private admin approval queue for provider identities and verified socials.
-- Timeline channels, topics, and titled threads with nested replies.
+- Timeline channels, topics, and titled threads with nested replies. Timeline
+  and topic messages can reply to one another and link back to what they answer.
+- Per-channel privacy: the owner can keep the member list, and the handles
+  behind display names, to the owner and moderators and the members they allow.
 - Public or members-only reading; open or invited membership.
 - Identity allowlists, blocks, member removal, and delegated moderators.
 - Owner protection, backend permission checks, instance account suspension,
