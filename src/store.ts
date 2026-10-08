@@ -1150,13 +1150,19 @@ export class Store {
       ["open", "allowlist"],
       "admission",
     );
+    // What members see of each other; the owner can change either later.
+    for (const key of ["show_members", "hide_handles"] as const)
+      if (input[key] !== undefined && typeof input[key] !== "boolean")
+        throw new Problem(400, "Choose what the channel shows its members.");
+    const showMembers = input.show_members !== false,
+      hideHandles = input.hide_handles === true;
     return this.transaction(() => {
       if (this.db.prepare("SELECT 1 FROM channels WHERE name=?").get(name))
         throw new Problem(409, "That channel name is already taken.");
       const id = randomUUID();
       this.db
         .prepare(
-          "INSERT INTO channels(id,name,description,mode,visibility,admission,owner_id,created_at) VALUES(?,?,?,?,?,?,?,?)",
+          "INSERT INTO channels(id,name,description,mode,visibility,admission,owner_id,created_at,show_members,hide_handles) VALUES(?,?,?,?,?,?,?,?,?,?)",
         )
         .run(
           id,
@@ -1167,6 +1173,8 @@ export class Store {
           admission,
           user.id,
           now(),
+          Number(showMembers),
+          Number(hideHandles),
         );
       this.db
         .prepare("INSERT INTO memberships VALUES(?,?,?)")

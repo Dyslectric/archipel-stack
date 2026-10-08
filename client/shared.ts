@@ -427,6 +427,48 @@ export function confirmDialog(title: string, copy: string, label: string) {
     dialog.showModal();
   });
 }
+// Before joining somewhere, what joining shares, to be acknowledged. Each line is markup.
+export function shareDialog(title: string, shared: string[], label: string) {
+  return new Promise<boolean>((resolve) => {
+    const dialog = document.createElement("dialog");
+    dialog.className = "card dialog share-dialog";
+    dialog.innerHTML = `<h2>${esc(title)}</h2><p class="muted">Joining shares this about you:</p><ul>${shared.map((line) => `<li>${line}</li>`).join("")}</ul><form method="dialog" class="row end"><button value="no" class="secondary">Cancel</button><button value="yes">${esc(label)}</button></form>`;
+    document.body.append(dialog);
+    dialog.addEventListener("close", () => {
+      dialog.remove();
+      resolve(dialog.returnValue === "yes");
+    });
+    dialog.showModal();
+  });
+}
+// What a member's verified socials are, in a line of a share dialog.
+function socialsLine(seen: string) {
+  const user = state.session.user!,
+    count = user.verified_socials.length;
+  return !count
+    ? ""
+    : user.share_socials
+      ? `Your ${count} verified social${count === 1 ? "" : "s"}, ${seen}: only that your identity provider verified them. Turn this off under <a href="#/settings/personal/profile">Profile</a>.`
+      : "Not your verified socials: you chose not to share them.";
+}
+// What joining a channel hosted here shares, given what the channel shows its members.
+export function channelShares(c: Channel) {
+  const user = state.session.user!,
+    readers = c.visibility === "members" ? "to its members" : "to everyone who can read it",
+    few = "only to its owner, its moderators and the members they allow";
+  return [
+    `Your display name, <strong>${esc(user.display_name)}</strong>, and profile picture, on what you write, ${readers}.`,
+    `Your handle, <strong>@${esc(user.username)}</strong>, ${c.hide_handles ? few : readers}.`,
+    `That you are a member, ${c.show_members ? readers : few}.`,
+    c.show_members ? socialsLine(readers) : socialsLine(few),
+    c.federation_enabled
+      ? `This channel is federated: what you write goes, with your name and your address <strong>@${esc(user.username)}@${esc(state.session.instance)}</strong>, to the instances and XMPP servers of the people following it.`
+      : "",
+    c.bridge_room
+      ? `It is bridged with the XMPP room <strong>${esc(c.bridge_room)}</strong>: what you write is repeated there under your XMPP address.`
+      : "",
+  ].filter(Boolean);
+}
 // Asks for one short line of text; null when dismissed.
 export function promptDialog(
   title: string,

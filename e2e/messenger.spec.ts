@@ -55,6 +55,12 @@ async function send(page: Page, value: string) {
     page.locator(".message-body").filter({ hasText: value }),
   ).toBeVisible();
 }
+// Joining first says what it shares; the dialog's own button goes ahead.
+async function agree(page: Page, label: string) {
+  const dialog = page.locator("dialog.share-dialog");
+  await expect(dialog).toContainText("Joining shares this about you");
+  await dialog.getByRole("button", { name: label, exact: true }).click();
+}
 // In a threaded channel a reply is written under the message it answers.
 async function replyUnder(page: Page, message: Locator, value: string) {
   await message.locator("details.reply-box > summary").first().click();
@@ -82,6 +88,7 @@ test("two independent browsers exchange messages and retain history after reload
   await login(bob, "bob");
   await openChannel(bob, "living-room");
   await bob.getByRole("button", { name: "Join channel", exact: true }).click();
+  await agree(bob, "Join channel");
   await send(bob, "Hello from Bob.");
   await expect(
     page.locator(".message-body").filter({ hasText: "Hello from Bob." }),
@@ -655,6 +662,7 @@ test("two browser instances federate a channel and a direct message with admin-c
   await bob
     .getByRole("button", { name: "Subscribe to channel", exact: true })
     .click();
+  await agree(bob, "Subscribe");
   await expect(async () => {
     await bob
       .getByRole("button", { name: "Refresh subscriptions", exact: true })
@@ -886,6 +894,7 @@ test("the inbox gathers new channel and direct messages, and the sidebar folds a
   await login(bob, "bob");
   await openChannel(bob, "harbour");
   await bob.getByRole("button", { name: "Join channel", exact: true }).click();
+  await agree(bob, "Join channel");
   // Charlie looks elsewhere, so what Bob says next is news.
   await page.locator("[data-nav=inbox]").click();
   await expect(page.locator("#feed-empty")).toContainText("all caught up");
@@ -992,6 +1001,7 @@ test("external XMPP room browser flow joins, renders safe content, posts and fol
   await page.getByLabel("Room address").fill("browser-test@muc.remote.example");
   await page.getByLabel("Nickname", { exact: true }).fill("alice-browser");
   await page.getByRole("button", { name: "Join room", exact: true }).click();
+  await agree(page, "Join room");
   await expect(page.locator("#channel-heading")).toContainText("browser-test@muc.remote.example");
   await expect(page.locator("#channel-heading")).toContainText("joining");
   const roomId = page.url().split("/xmpp/")[1];

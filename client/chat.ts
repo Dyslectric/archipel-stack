@@ -6,6 +6,7 @@ import {
   avatar,
   canModerate,
   channelIcon,
+  channelShares,
   clock,
   confirmDialog,
   dayLabel,
@@ -21,6 +22,7 @@ import {
   refreshTimes,
   richHtml,
   sameDay,
+  shareDialog,
   state,
   toast,
   when,
@@ -920,6 +922,8 @@ function renderComposer(keepDraft = true) {
     area.innerHTML = `<div class="composer-wrap"><div class="card join-bar"><div><strong>You're reading #${esc(c.name)} without having joined.</strong><p class="muted small">${c.can_join ? "Join the channel to post in it." : "This channel needs an invitation from a moderator."}</p></div>${c.can_join ? '<button type="button" id="join-channel">Join channel</button>' : ""}</div></div>`;
     document.querySelector("#join-channel")?.addEventListener("click", () =>
       action(async () => {
+        if (!(await shareDialog(`Join #${c.name}?`, channelShares(c), "Join channel")))
+          return;
         await api(`/channels/${c.id}/join`, "POST", {});
         state.channels = await api<Channel[]>("/channels");
         generation++;

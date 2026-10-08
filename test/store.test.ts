@@ -215,6 +215,10 @@ test("a channel can keep its member list and handles to its moderators and those
   store.setPrivacy(alice, c.id, { show_members: true, hide_handles: false });
   assert.equal(store.details(bob, c.id).members.length, 2);
   store.deleteChannel(alice, c.id);
+  // A channel can start that way.
+  const quiet = store.createChannel(alice, channelInput({ name: "quiet", show_members: false, hide_handles: true }));
+  assert.deepEqual([quiet.show_members, quiet.hide_handles], [0, 1]);
+  denied(() => store.createChannel(alice, channelInput({ name: "wrong", hide_handles: "yes" })), 400);
   store.close();
 });
 test("threads retain nested structure after deletion and reject cross-channel parents", () => {

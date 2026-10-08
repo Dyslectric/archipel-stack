@@ -1,4 +1,4 @@
-import { $, action, api, avatar, clock, dayLabel, esc, full, go, icon, nameButton, richHtml, onSubmit, sameDay, state, type XmppRoom } from "./shared.js";
+import { $, action, api, avatar, clock, dayLabel, esc, full, go, icon, nameButton, richHtml, onSubmit, sameDay, shareDialog, state, type XmppRoom } from "./shared.js";
 import { attachButton, pickFiles, quoteInto } from "./attach.js";
 import { chatFrame, resetChat } from "./chat.js";
 import { renderSidebar } from "./sidebar.js";
@@ -37,6 +37,12 @@ export async function showXmppRooms(view: HTMLElement, id?: string) {
   $("#rows").innerHTML = `<section class="card xmpp-join"><h2>Your rooms</h2><ul class="plain">${state.xmppRooms.map(r => `<li class="member-row"><a class="grow" href="#/xmpp/${r.id}">${esc(r.room)}</a><span class="muted small">${esc(r.reconnecting ? "reconnecting" : r.state)}</span></li>`).join("") || '<li class="muted">You haven’t joined an external room yet.</li>'}</ul></section>`;
   $("#feed-empty").innerHTML = "";
   if (document.querySelector("#xmpp-room-join")) onSubmit($("#xmpp-room-join"), async data => {
+    if (!(await shareDialog(`Join ${String(data.get("room")).slice(0, 80)}?`, [
+      `Your XMPP address, <strong>${esc(connection.jid)}</strong>, to the room's server and its moderators, and to everyone in the room unless it hides addresses.`,
+      `Your nickname, <strong>${esc(data.get("nick"))}</strong>, and your profile picture, to everyone in the room.`,
+      "What you write there, to everyone in the room and to its archive, under that server's rules.",
+      state.session.user!.verified_socials.length ? "Not your verified socials: they stay on this instance." : "",
+    ].filter(Boolean), "Join room"))) return;
     const room = await api<XmppRoom>("/xmpp/rooms", "POST", Object.fromEntries(data));
     state.xmppRooms = await api("/xmpp/rooms");
     if (token === generation && view.isConnected) go(`#/xmpp/${room.id}`);

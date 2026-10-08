@@ -570,6 +570,9 @@ dialog.dialog { max-width: 420px; width: calc(100vw - 32px); margin: auto; color
 dialog.dialog::backdrop { background: rgba(0, 0, 0, .4); }
 dialog.dialog h2 { margin-bottom: 6px; }
 dialog.dialog form { margin-top: 16px; }
+dialog.share-dialog { max-width: 520px; }
+dialog.share-dialog ul { margin: 8px 0 0; padding-left: 20px; }
+dialog.share-dialog li + li { margin-top: 6px; }
 #toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 40; display: flex;
   flex-direction: column; gap: 8px; width: min(520px, calc(100vw - 32px)); pointer-events: none; }
 .toast { pointer-events: auto; display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 16px;

@@ -6,11 +6,13 @@ import {
   app,
   avatar,
   channelIcon,
+  channelShares,
   esc,
   go,
   hooks,
   icon,
   modeLabel,
+  shareDialog,
   onSubmit,
   socialsHtml,
   state,
@@ -75,6 +77,8 @@ export function showChannels(view: HTMLElement, create: boolean) {
       <label>Conversation style<select name="mode"><option value="timeline">Timeline: one running conversation</option><option value="topical">Topics: messages grouped by subject</option><option value="threaded">Threads: posts with nested replies</option></select></label>
       <label>Who can read?<select name="visibility"><option value="public">Everyone on this instance</option><option value="members">Members only</option></select></label>
       <label>Who can join?<select name="admission"><option value="open">Anyone on this instance</option><option value="allowlist">Invited users only</option></select></label>
+      <label class="check"><input type="checkbox" name="show_members" checked> Show members the list of who is in the channel</label>
+      <label class="check"><input type="checkbox" name="hide_handles"> Hide handles, leaving only display names</label>
       <p class="form-error" role="alert"></p><button>Create channel</button></form></section></aside></div></div></div>`;
   const list = $("#browse-list"),
     search = $<HTMLInputElement>("#channel-search");
@@ -105,6 +109,8 @@ export function showChannels(view: HTMLElement, create: boolean) {
     if (!channel || channel.readable || !channel.can_join) return;
     e.preventDefault();
     action(async () => {
+      if (!(await shareDialog(`Join #${channel.name}?`, channelShares(channel), "Join channel")))
+        return;
       await api(`/channels/${channel.id}/join`, "POST", {});
       state.channels = await api<Channel[]>("/channels");
       go(`#/c/${channel.id}`);
@@ -115,7 +121,11 @@ export function showChannels(view: HTMLElement, create: boolean) {
     const channel = await api<Channel>(
       "/channels",
       "POST",
-      Object.fromEntries(data),
+      {
+        ...Object.fromEntries(data),
+        show_members: data.get("show_members") === "on",
+        hide_handles: data.get("hide_handles") === "on",
+      },
     );
     state.channels = await api<Channel[]>("/channels");
     go(`#/c/${channel.id}`);

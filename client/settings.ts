@@ -17,6 +17,7 @@ import {
   modeLabel,
   nameButton,
   onSubmit,
+  shareDialog,
   socialsHtml,
   state,
   themeSeg,
@@ -445,6 +446,22 @@ const sections: Section[] = [
           "A subscription is pending until the channel's home instance accepts it.",
         );
       onSubmit($("#remote-subscribe", el), async (data) => {
+        const me = s.user!;
+        if (
+          !(await shareDialog(
+            `Subscribe to ${String(data.get("address")).slice(0, 80)}?`,
+            [
+              `Your address, <strong>@${esc(me.username)}@${esc(s.instance)}</strong>, your display name, <strong>${esc(me.display_name)}</strong>, and your profile picture, to the channel's home instance and to whoever it shows them.`,
+              "That you follow the channel, to its home instance. Its owner decides whether other members see who is in it.",
+              "What you write there, to the home instance and to the instances and XMPP servers of everyone following the channel.",
+              me.verified_socials.length
+                ? "Not your verified socials: they stay on this instance."
+                : "",
+            ].filter(Boolean),
+            "Subscribe",
+          ))
+        )
+          return;
         await api("/federation/subscriptions", "POST", Object.fromEntries(data));
         ctx.refresh();
       });
@@ -612,11 +629,6 @@ const sections: Section[] = [
           : "") +
         (owning
           ? card(
-              "What members see of each other",
-              `<form class="stack narrow-form" id="channel-privacy"><label class="check"><input type="checkbox" name="show_members" ${c.show_members ? "checked" : ""}> Show the list of who is in this channel</label><label class="check"><input type="checkbox" name="hide_handles" ${c.hide_handles ? "checked" : ""}> Hide handles, leaving only display names</label>${error}<button>Save</button></form>`,
-              `The owner and moderators always see both. Allow other members one at a time under <a href="#/settings/channel/members/${c.id}">Members</a>.${c.federation_enabled ? " Instances following this channel are told to do the same for their own members." : ""}`,
-            ) +
-            card(
               "Rename",
               `<form class="stack narrow-form" id="rename-channel"><label>Channel name<span class="input-prefix"><span>#</span><input name="name" value="${esc(c.name)}" required minlength="2" maxlength="40" pattern="[a-zA-Z0-9][a-zA-Z0-9_\\-]{1,39}" autocomplete="off"></span></label>${error}<button>Rename channel</button></form>`,
               "Renaming changes the channel's address. Links to it keep working; anyone using the old address, or its XMPP room, has to switch to the new one.",
@@ -628,16 +640,6 @@ const sections: Section[] = [
             )
           : "");
       if (owning) {
-        onSubmit($("#channel-privacy", el), async (data) => {
-          await api(`/channels/${c.id}/privacy`, "PATCH", {
-            show_members: data.get("show_members") === "on",
-            hide_handles: data.get("hide_handles") === "on",
-          });
-          state.channels = await api<Channel[]>("/channels");
-          if (chatChannel()?.id === c.id) resetChat();
-          toast("Channel updated.");
-          ctx.refresh();
-        });
         onSubmit($("#rename-channel", el), async (data) => {
           await api(`/channels/${c.id}`, "PATCH", { name: data.get("name") });
           state.channels = await api<Channel[]>("/channels");
@@ -689,7 +691,8 @@ const sections: Section[] = [
     async draw(el, ctx) {
       const c = ctx.channel!,
         moderating = canModerate(c),
-        promoting = !!state.session.user?.admin || c.role === "owner";
+        promoting = !!state.session.user?.admin || c.role === "owner",
+        owning = !c.remote_actor && promoting;
       if (!c.sees_members) {
         el.innerHTML =
           '<p class="card empty muted">This channel doesn\'t show its members.</p>';
@@ -703,7 +706,13 @@ const sections: Section[] = [
           ? ""
           : (c.show_members ? "" : allow(u, "see_members", "members")) +
             (c.hide_handles ? allow(u, "see_handles", "handles") : "");
-      el.innerHTML = card(
+      el.innerHTML = (owning
+        ? card(
+            "What members see of each other",
+            `<form class="stack narrow-form" id="channel-privacy"><label class="check"><input type="checkbox" name="show_members" ${c.show_members ? "checked" : ""}> Show the list of who is in this channel</label><label class="check"><input type="checkbox" name="hide_handles" ${c.hide_handles ? "checked" : ""}> Hide handles, leaving only display names</label>${error}<button>Save</button></form>`,
+            `The owner and moderators always see both. Other members can be allowed one at a time, below.${c.federation_enabled ? " Instances following this channel are told to do the same for their own members." : ""}`,
+          )
+        : "") + card(
         `${c.member_count} member${c.member_count === 1 ? "" : "s"}`,
         `<ul class="plain member-list">${(c.members || [])
           .map((u) =>
@@ -720,6 +729,17 @@ const sections: Section[] = [
           ? `Invite or block people under <a href="#/settings/channel/access/${c.id}">Access rules</a>.`
           : "",
       );
+      if (owning)
+        onSubmit($("#channel-privacy", el), async (data) => {
+          await api(`/channels/${c.id}/privacy`, "PATCH", {
+            show_members: data.get("show_members") === "on",
+            hide_handles: data.get("hide_handles") === "on",
+          });
+          state.channels = await api<Channel[]>("/channels");
+          if (chatChannel()?.id === c.id) resetChat();
+          toast("Channel updated.");
+          ctx.refresh();
+        });
       onClick(el, "[data-member]", async (button) => {
         await api(
           `/channels/${c.id}/members/${button.dataset.member}`,
