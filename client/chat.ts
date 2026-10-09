@@ -33,6 +33,7 @@ import {
   type Channel,
   type Conversation,
   type Message,
+  type Reaction,
   type Topic,
 } from "./shared.js";
 import { closePicker, togglePicker } from "./picker.js";
@@ -99,6 +100,7 @@ const dmChannel = (c: Conversation): Channel => ({
   federation_enabled: 0,
   show_members: 0,
   hide_handles: 0,
+  reactions: 0,
   sees_members: false,
   sees_handles: true,
   dm: c,
@@ -456,11 +458,35 @@ const edited = (m: Message) =>
 // Shaded until the other instance has it; nothing can be done to it before then.
 const queuedClass = (m: Message) =>
   m.queued ? ` queued${m.failed ? " failed" : ""}` : "";
+// Emoji reactions under a message: the ones given, and a button to add yours.
+function reactionsHtml(m: Message) {
+  if (!current?.reactions || current.dm || current.remote_actor || m.deleted_at || m.queued)
+    return "";
+  const can = canPost(),
+    chips = (m.reactions || [])
+      .map(
+        (r) =>
+          `<button type="button" class="reaction${r.mine ? " mine" : ""}" data-react="${m.id}" data-emoji="${esc(r.emoji)}" aria-pressed="${r.mine}" aria-label="${esc(r.emoji)}, ${r.count}" title=":${esc(r.emoji)}:"${can ? "" : " disabled"}>${emojiHtml(`:${r.emoji}:`)}<span>${r.count}</span></button>`,
+      )
+      .join("");
+  if (!chips && !can) return "";
+  return `<div class="reactions picker-host${chips ? "" : " empty"}">${chips}${can ? `<button type="button" class="reaction add" data-react-add="${m.id}" aria-label="Add reaction" aria-haspopup="dialog" title="Add reaction">${icon("smile")}</button>` : ""}</div>`;
+}
+function react(id: string, emoji: string, on: boolean) {
+  action(async () => {
+    const token = generation;
+    const reactions = await api<Reaction[]>(`/messages/${id}/reactions`, "PUT", { emoji, on });
+    if (token !== generation) return;
+    const m = messages.find((m) => m.id === id);
+    if (m) m.reactions = reactions;
+    render();
+  });
+}
 function bodyHtml(m: Message, cls = "") {
   if (editing === m.id && !m.deleted_at)
     return `<form class="stack inline-form picker-host" data-edit-form="${m.id}">${m.title !== null ? `<input name="title" maxlength="160" value="${esc(m.title)}" aria-label="Thread title" required>` : ""}<textarea name="body" rows="3" maxlength="8000" aria-label="Edited message" required>${esc(m.body)}</textarea><p class="form-error" role="alert"></p><div class="row"><button class="small">Save changes</button><button type="button" class="small secondary" data-cancel-edit>Cancel</button><button type="button" class="icon-button" data-emoji-for aria-label="Choose emoji" title="Emoji">${icon("smile")}</button>${attachButton("data-attach-for")}</div></form>`;
   const big = !m.deleted_at && emojiOnly(m.body, m.emojis || []);
-  return `<div class="message-body${cls ? ` ${cls}` : ""}${m.deleted_at ? " faded" : " markdown"}${big ? " emoji-only" : ""}">${m.deleted_at ? "This message was removed." : richHtml(m.body, m.emojis || [])}</div>`;
+  return `<div class="message-body${cls ? ` ${cls}` : ""}${m.deleted_at ? " faded" : " markdown"}${big ? " emoji-only" : ""}">${m.deleted_at ? "This message was removed." : richHtml(m.body, m.emojis || [])}</div>${reactionsHtml(m)}`;
 }
 // Direct messages stay as they were sent.
 const mine = (m: Message) =>
@@ -908,6 +934,14 @@ function wireFeed() {
       reply = messages.find((m) => m.id === hit!.dataset.reply) || null;
       renderComposer();
       $("#message-body").focus();
+    } else if ((hit = on("[data-react]"))) {
+      react(hit.dataset.react!, hit.dataset.emoji!, hit.getAttribute("aria-pressed") !== "true");
+    } else if ((hit = on("[data-react-add]"))) {
+      const id = hit.dataset.reactAdd!;
+      togglePicker(hit, (name) => {
+        const had = messages.find((m) => m.id === id)?.reactions?.find((r) => r.emoji === name)?.mine;
+        if (!had) react(id, name, true);
+      });
     } else if ((hit = on("[data-quote]"))) {
       // An XMPP room's rows sit in this feed too, and answer for themselves (xmpp-rooms.ts).
       const quoted = messages.find((m) => m.id === hit!.dataset.quote),

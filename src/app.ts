@@ -719,6 +719,14 @@ export function createApp(config: Config, store: Store) {
       store.setPrivacy(user(res), String(req.params.id), req.body || {}),
     ),
   );
+  app.patch("/api/channels/:id/reactions", (req, res) =>
+    res.json(
+      store.setReactions(user(res), String(req.params.id), req.body?.enabled),
+    ),
+  );
+  app.put("/api/messages/:id/reactions", (req, res) =>
+    res.json(store.react(user(res), String(req.params.id), req.body || {})),
+  );
   app.delete("/api/channels/:id", (req, res) => {
     store.deleteChannel(user(res), String(req.params.id));
     res.json({ ok: true });

@@ -608,6 +608,7 @@ const sections: Section[] = [
         owning =
           !c.remote_actor &&
           (!!state.session.user?.admin || c.role === "owner");
+      const reacting = !c.remote_actor && canModerate(c);
       const address =`#${c.name}@${c.remote_actor ? new URL(c.remote_actor).host : state.session.instance}`;
       el.innerHTML =
         card(
@@ -630,6 +631,13 @@ const sections: Section[] = [
               "Keeps your own copy in a channel you own here, so the conversation stays readable if this one goes away.",
             )
           : "") +
+        (reacting
+          ? card(
+              "Reactions",
+              `<form class="stack narrow-form" id="channel-reactions"><label class="check"><input type="checkbox" name="reactions" ${c.reactions ? "checked" : ""}> Let members react to messages with emoji</label>${error}<button>Save</button></form>`,
+              "Turning reactions off hides them in this channel. Existing reactions are kept and show again if you turn them back on. Reactions stay on this instance, including for instances following the channel.",
+            )
+          : "") +
         (owning
           ? card(
               "Rename",
@@ -642,6 +650,16 @@ const sections: Section[] = [
               "Removes the channel and every message in it for everyone. This can't be undone.",
             )
           : "");
+      if (reacting)
+        onSubmit($("#channel-reactions", el), async (data) => {
+          await api(`/channels/${c.id}/reactions`, "PATCH", {
+            enabled: data.get("reactions") === "on",
+          });
+          state.channels = await api<Channel[]>("/channels");
+          if (chatChannel()?.id === c.id) resetChat();
+          toast("Channel updated.");
+          ctx.refresh();
+        });
       if (owning) {
         onSubmit($("#rename-channel", el), async (data) => {
           await api(`/channels/${c.id}`, "PATCH", { name: data.get("name") });

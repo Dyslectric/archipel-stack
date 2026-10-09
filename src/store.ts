@@ -42,6 +42,7 @@ export interface Channel {
   federation_enabled: number;
   show_members: number; // members see who else is in the channel
   hide_handles: number; // members see names without the handles behind them
+  reactions: number; // members may react to messages with emoji
   created_at: string;
 }
 const notifyChoice = (n: number | null) =>
@@ -186,7 +187,7 @@ export class Store {
     const version = (
       this.db.prepare("PRAGMA user_version").get() as { user_version: number }
     ).user_version;
-    if (version > 16) throw new Error("Database is newer than this application");
+    if (version > 17) throw new Error("Database is newer than this application");
     if (version === 0)
       this.transaction(() =>
         this.db.exec(
@@ -280,6 +281,10 @@ export class Store {
     if (version < 16)
       this.transaction(() => this.db.exec(readFileSync(
         new URL("../migrations/016_channel_roster.sql", import.meta.url), "utf8",
+      )));
+    if (version < 17)
+      this.transaction(() => this.db.exec(readFileSync(
+        new URL("../migrations/017_reactions.sql", import.meta.url), "utf8",
       )));
   }
   close() {
@@ -1257,6 +1262,9 @@ export class Store {
         )
         .all(id) as { body: string; author_id: string }[])
         this.dropMedia(message.body, message.author_id);
+      this.db
+        .prepare(`DELETE FROM message_reactions WHERE message_id IN ${said}`)
+        .run(id);
       this.db.prepare("DELETE FROM messages WHERE channel_id=?").run(id);
       // Members' occupants in a bridged room existed only for this channel.
       this.db
@@ -1591,11 +1599,93 @@ export class Store {
     )
       .reverse()
       .map((m) => this.veiled(user, this.messageFor(user, m)));
+    this.withReactions(user, page);
     // Threads this reader hid stay in the page, marked, so they can be shown again.
     const hidden = this.hiddenThreadMessages(user.id, id);
     return hidden.size
       ? page.map((m) => (hidden.has(m.id) ? { ...m, hidden_thread: true } : m))
       : page;
+  }
+  // ---- reactions: emoji put on a message, if its channel allows them ----
+  // Adds { emoji, count, mine } for each reaction to the messages of a page, in the order first used.
+  private withReactions(user: User, page: (Message & { reactions?: unknown })[]) {
+    if (!page.length) return;
+    const rows = this.db
+      .prepare(
+        `SELECT message_id,emoji,user_id FROM message_reactions WHERE message_id IN (${page.map(() => "?").join(",")}) ORDER BY created_at,rowid`,
+      )
+      .all(...page.map((m) => m.id)) as { message_id: string; emoji: string; user_id: string }[];
+    const by = new Map<string, Map<string, { emoji: string; count: number; mine: boolean }>>();
+    for (const r of rows) {
+      const list = by.get(r.message_id) ?? new Map();
+      const entry = list.get(r.emoji) ?? { emoji: r.emoji, count: 0, mine: false };
+      entry.count++;
+      if (r.user_id === user.id) entry.mine = true;
+      list.set(r.emoji, entry);
+      by.set(r.message_id, list);
+    }
+    for (const m of page)
+      m.reactions = [...(by.get(m.id)?.values() ?? [])];
+  }
+  // Moderators (and the owner) decide whether a channel has reactions.
+  setReactions(user: User, id: string, enabled: unknown) {
+    const channel = this.channel(id);
+    this.requireManage(user, channel);
+    if (typeof enabled !== "boolean")
+      throw new Problem(400, "Choose whether reactions are on.");
+    return this.transaction(() => {
+      this.db
+        .prepare("UPDATE channels SET reactions=? WHERE id=?")
+        .run(Number(enabled), id);
+      this.audit(
+        user.id,
+        "channel.reactions",
+        JSON.stringify({ channel: id, reactions: enabled }),
+      );
+      return this.channelInfo(user, this.channel(id));
+    });
+  }
+  // Puts the reader's reaction on a message, or takes it off.
+  react(user: User, messageId: string, input: Record<string, unknown>) {
+    const message = this.message(messageId),
+      channel = this.channel(message.channel_id);
+    this.requirePost(user, channel);
+    if (channel.remote_actor)
+      throw new Problem(403, "Reactions stay on the instance that hosts the channel.");
+    if (!channel.reactions)
+      throw new Problem(403, "Reactions are turned off in this channel.");
+    if (message.deleted_at)
+      throw new Problem(409, "Removed messages cannot be reacted to.");
+    if (typeof input.emoji !== "string" || typeof input.on !== "boolean")
+      throw new Problem(400, "Choose an emoji.");
+    const emoji = input.emoji;
+    if (
+      !standardEmojis.has(emoji) &&
+      !this.db.prepare("SELECT 1 FROM custom_emojis WHERE name=?").get(emoji)
+    )
+      throw new Problem(400, "That emoji is not available here.");
+    this.transaction(() => {
+      if (!input.on)
+        this.db
+          .prepare("DELETE FROM message_reactions WHERE message_id=? AND user_id=? AND emoji=?")
+          .run(messageId, user.id, emoji);
+      else {
+        const total = this.db
+          .prepare("SELECT COUNT(DISTINCT emoji) AS n FROM message_reactions WHERE message_id=?")
+          .get(messageId) as { n: number };
+        const used = this.db
+          .prepare("SELECT 1 FROM message_reactions WHERE message_id=? AND emoji=?")
+          .get(messageId, emoji);
+        if (!used && Number(total.n) >= 20)
+          throw new Problem(409, "A message has up to 20 different reactions.");
+        this.db
+          .prepare("INSERT OR IGNORE INTO message_reactions VALUES(?,?,?,?)")
+          .run(messageId, user.id, emoji, now());
+      }
+    });
+    const page = [this.message(messageId)] as (Message & { reactions?: unknown })[];
+    this.withReactions(user, page);
+    return page[0].reactions;
   }
   // Where a channel hides handles, its readers get names alone: nothing to look an author up by.
   veiled<T extends { channel_id: string; author_id: string }>(user: User, info: T) {

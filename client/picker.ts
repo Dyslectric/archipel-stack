@@ -54,7 +54,11 @@ const section = (id: string, title: string, names: string[]) =>
     ? `<section data-section="${esc(id)}"><h3>${esc(title)}</h3><div class="ep-grid">${names.map(button).join("")}</div></section>`
     : "";
 
-export function togglePicker(opener: HTMLElement, target: HTMLTextAreaElement) {
+// Picks into a compose box, or hands the chosen name to a function (a reaction).
+export function togglePicker(
+  opener: HTMLElement,
+  target: HTMLTextAreaElement | ((name: string) => void),
+) {
   const wasOpen = opener.getAttribute("aria-expanded") === "true";
   closePicker();
   if (wasOpen) return;
@@ -120,6 +124,12 @@ export function togglePicker(opener: HTMLElement, target: HTMLTextAreaElement) {
     if (!panel.contains(at) && !opener.contains(at)) close();
   }
   function pick(name: string, keep: boolean) {
+    if (typeof target === "function") {
+      remember(name);
+      close();
+      opener.focus();
+      return target(name);
+    }
     target.setRangeText(
       `:${name}:`,
       target.selectionStart,
@@ -155,7 +165,7 @@ export function togglePicker(opener: HTMLElement, target: HTMLTextAreaElement) {
       e.preventDefault();
       e.stopPropagation();
       close();
-      target.focus();
+      (typeof target === "function" ? opener : target).focus();
       return;
     }
     if (!e.key.startsWith("Arrow")) return;

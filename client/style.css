@@ -687,3 +687,14 @@ dialog.share-dialog li + li { margin-top: 6px; }
 @media (max-width: 360px) {
   .top-inner .brand, .conn { display: none; }
 }
+
+.reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.reaction { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; min-height: 26px; font-size: .9rem;
+  border: 1px solid var(--line); border-radius: 999px; background: transparent; color: inherit; cursor: pointer; }
+.reaction.mine { background: color-mix(in srgb, var(--accent) 18%, transparent); border-color: var(--accent); }
+.reaction:disabled { cursor: default; }
+.reaction.add { padding: 1px 6px; opacity: .6; }
+.reactions.empty { opacity: 0; }
+article:hover .reactions.empty, article:focus-within .reactions.empty, .reactions.empty:focus-within { opacity: 1; }
+@media (hover: none) { .reactions.empty { opacity: 1; } }
+.reactions .emoji-picker { top: 100%; }

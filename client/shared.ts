@@ -51,6 +51,7 @@ export interface Channel {
   // What the channel shows its members of one another, and whether this reader sees it anyway.
   show_members: number;
   hide_handles: number;
+  reactions: number; // members may react to messages with emoji
   sees_members: boolean;
   sees_handles: boolean;
   topics?: Topic[];
@@ -108,6 +109,11 @@ export interface XmppRoom {
   can_post: boolean; post_blocked: string | null;
   reconnecting?: boolean; // the room dropped the session and it is being joined again
 }
+export interface Reaction {
+  emoji: string; // a shortcode name
+  count: number;
+  mine: boolean;
+}
 export interface Message {
   id: string;
   seq: number;
@@ -123,6 +129,7 @@ export interface Message {
   deleted_at: string | null;
   edited_at: string | null;
   emojis?: CustomEmoji[];
+  reactions?: Reaction[];
   queued?: boolean; // still on its way to another instance
   failed?: string; // why it never got there
   author_actor_url?: string | null;
