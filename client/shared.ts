@@ -14,6 +14,8 @@ export interface User {
   share_socials?: boolean;
   verified_socials: unknown[];
   role?: string;
+  // In a member list: false for someone whose membership another instance holds.
+  held?: boolean;
   // What a channel's owner or moderator allowed this member to see there.
   see_members?: boolean;
   see_handles?: boolean;

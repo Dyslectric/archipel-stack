@@ -137,6 +137,14 @@ function choice<T extends string>(
   return value as T;
 }
 
+const everyone = `
+  SELECT user_id, role, 1 AS held FROM memberships WHERE channel_id=?
+  UNION ALL SELECT u.id, 'member', 0 FROM federation_follows f JOIN users u ON u.remote_actor=f.actor
+    WHERE f.channel_id=? AND f.status='accepted' AND u.banned=0
+    AND NOT EXISTS (SELECT 1 FROM channel_rules b WHERE b.channel_id=f.channel_id AND b.user_id=u.id AND b.rule='block')
+  UNION ALL SELECT r.user_id, r.role, 0 FROM channel_roster r
+    WHERE r.channel_id=? AND NOT EXISTS (SELECT 1 FROM memberships m WHERE m.channel_id=r.channel_id AND m.user_id=r.user_id)`;
+
 export class Store {
   db: DatabaseSync;
   private transactionDepth = 0;
@@ -178,7 +186,7 @@ export class Store {
     const version = (
       this.db.prepare("PRAGMA user_version").get() as { user_version: number }
     ).user_version;
-    if (version > 15) throw new Error("Database is newer than this application");
+    if (version > 16) throw new Error("Database is newer than this application");
     if (version === 0)
       this.transaction(() =>
         this.db.exec(
@@ -268,6 +276,10 @@ export class Store {
     if (version < 15)
       this.transaction(() => this.db.exec(readFileSync(
         new URL("../migrations/015_channel_privacy.sql", import.meta.url), "utf8",
+      )));
+    if (version < 16)
+      this.transaction(() => this.db.exec(readFileSync(
+        new URL("../migrations/016_channel_roster.sql", import.meta.url), "utf8",
       )));
   }
   close() {
@@ -1099,11 +1111,25 @@ export class Store {
       member_count: Number(
         (
           this.db
-            .prepare("SELECT COUNT(*) AS n FROM memberships WHERE channel_id=?")
-            .get(channel.id) as { n: number }
+            .prepare(`SELECT COUNT(*) AS n FROM (${everyone})`)
+            .get(channel.id, channel.id, channel.id) as { n: number }
         ).n,
       ),
     };
+  }
+  // Everyone in a channel: members here, a home channel's accepted followers on other
+  // instances, and whoever a followed channel's home says is in it.
+  members(id: string) {
+    return this.db
+      .prepare(
+        `SELECT u.*, e.role, e.held, COALESCE(g.see_members,0) AS see_members, COALESCE(g.see_handles,0) AS see_handles FROM (${everyone}) e JOIN users u ON u.id=e.user_id LEFT JOIN channel_grants g ON g.channel_id=? AND g.user_id=e.user_id ORDER BY u.username`,
+      )
+      .all(id, id, id, id) as unknown as (User & {
+      role: string;
+      held: number; // a membership kept here, which this instance can change
+      see_members: number;
+      see_handles: number;
+    })[];
   }
   listChannels(user: User) {
     this.active(user.id);
@@ -1245,6 +1271,7 @@ export class Store {
         "channel_bridges",
         "topics",
         "memberships",
+        "channel_roster",
         "channel_rules",
         "channel_grants",
         "conversation_prefs",
@@ -1296,17 +1323,7 @@ export class Store {
   details(user: User, id: string) {
     const channel = this.channel(id);
     this.requireRead(user, channel);
-    const members = this.sees(user, channel, "members")
-      ? (this.db
-          .prepare(
-            "SELECT u.*, m.role, COALESCE(g.see_members,0) AS see_members, COALESCE(g.see_handles,0) AS see_handles FROM memberships m JOIN users u ON u.id=m.user_id LEFT JOIN channel_grants g ON g.channel_id=m.channel_id AND g.user_id=m.user_id WHERE m.channel_id=? ORDER BY u.username",
-          )
-          .all(id) as unknown as (User & {
-          role: string;
-          see_members: number;
-          see_handles: number;
-        })[])
-      : [];
+    const members = this.sees(user, channel, "members") ? this.members(id) : [];
     const topics = this.db
       .prepare("SELECT * FROM topics WHERE channel_id=? ORDER BY created_at")
       .all(id);
@@ -1314,7 +1331,7 @@ export class Store {
     return {
       ...this.channelInfo(user, channel),
       members: members.map((u) => ({
-        ...this.profile(u), role: u.role,
+        ...this.profile(u), role: u.role, held: !!u.held,
         display_name: u.remote_actor ? this.contactName(user, u.remote_actor) ?? u.display_name : u.display_name,
         see_members: !!u.see_members,
         see_handles: !!u.see_handles,

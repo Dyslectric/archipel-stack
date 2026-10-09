@@ -722,7 +722,7 @@ const sections: Section[] = [
             person(
               u,
               `<span class="pill ${u.role === "owner" ? "kept" : u.role === "moderator" ? "new" : ""}">${roleLabel(u.role)}</span>${moderating && u.role === "member" && ((!c.show_members && u.see_members) || (c.hide_handles && u.see_handles)) ? ` <span class="pill good">Sees ${[!c.show_members && u.see_members ? "members" : "", c.hide_handles && u.see_handles ? "handles" : ""].filter(Boolean).join(" and ")}</span>` : ""}${u.verified_socials.length ? `<details class="socials"><summary>Shared socials</summary>${socialsHtml(u.verified_socials)}</details>` : ""}`,
-              moderating && u.role !== "owner"
+              moderating && u.role !== "owner" && u.held !== false
                 ? `${grants(u)}${promoting ? `<button type="button" class="small secondary" data-member="${u.id}" data-role="${u.role === "moderator" ? "member" : "moderator"}">${u.role === "moderator" ? "Make member" : "Make moderator"}</button>` : ""}<button type="button" class="small secondary bad-text" data-member="${u.id}" data-remove>Remove</button>`
                 : "",
             ),

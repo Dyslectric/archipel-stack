@@ -142,6 +142,12 @@ export function createApp(config: Config, store: Store) {
       .type("application/activity+json")
       .json(federation.history(actor, String(req.params.id), before));
   });
+  app.get("/actors/channels/:id/members", async (req, res) => {
+    const actor = await federation.authenticate(req);
+    res
+      .type("application/activity+json")
+      .json(federation.roster(actor, String(req.params.id)));
+  });
   app.get("/actors/:kind/:id", (req, res, next) => {
     if (
       !/application\/(activity\+json|ld\+json)/i.test(req.headers.accept || "")
@@ -697,9 +703,12 @@ export function createApp(config: Config, store: Store) {
   app.post("/api/channels", (req, res) =>
     res.status(201).json(store.createChannel(user(res), req.body || {})),
   );
-  app.get("/api/channels/:id", (req, res) =>
-    res.json(store.details(user(res), String(req.params.id))),
-  );
+  app.get("/api/channels/:id", (req, res) => {
+    const detail = store.details(user(res), String(req.params.id));
+    // A followed channel's member list is its home's to tell; it is asked again in the background.
+    void federation.refreshRoster(user(res), detail.id).catch(() => {});
+    res.json(detail);
+  });
   app.patch("/api/channels/:id", (req, res) =>
     res.json(
       store.renameChannel(user(res), String(req.params.id), req.body?.name),

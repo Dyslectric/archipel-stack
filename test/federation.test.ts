@@ -947,6 +947,49 @@ test("a followed channel keeps from its readers what its home keeps from its mem
   assert.equal(a.store.messages(a.alice, home.id).at(-1)?.parent_id, first.id);
   assert.equal(b.store.messages(b.bob, sub.channel.id).at(-1)?.parent_id, question.id);
 });
+test("a federated channel lists its members on every instance, unless its home keeps the list", async (t) => {
+  const a = await instance(t),
+    b = await instance(t),
+    c = await instance(t);
+  const home = channel(a),
+    host = new URL(a.origin).host;
+  a.store.join(a.bob, home.id);
+  const sub = await b.fed.subscribe(b.bob, `#general@${host}`);
+  await drain(a, b);
+  const list = (i: typeof a, id: string) =>
+    i.store.details(i.bob, id).members.map((u) => `${u.actor_url}|${u.role}|${u.held}`).sort();
+  const everyone = (...extra: string[]) =>
+    [`${a.fed.userActor(a.alice)}|owner|`, `${a.fed.userActor(a.bob)}|member|`, `${b.fed.userActor(b.bob)}|member|`, ...extra].sort();
+  const held = (rows: string[], origin: string) => rows.map((row) => row + row.startsWith(origin));
+  // The home lists its followers, and the follower was told who is at the home when accepted.
+  assert.deepEqual(list(a, home.id), held(everyone(), a.origin));
+  assert.deepEqual(list(b, sub.channel.id), held(everyone(), b.origin));
+  assert.equal(b.store.details(b.bob, sub.channel.id).member_count, 3);
+  // Someone following from a third instance appears at the second once it asks again.
+  const third = await c.fed.subscribe(c.bob, `#general@${host}`);
+  await drain(a, c);
+  assert.equal(list(b, sub.channel.id).length, 3);
+  await b.fed.refreshRoster(b.bob, sub.channel.id);
+  const all = everyone(`${c.fed.userActor(c.bob)}|member|`);
+  assert.deepEqual(list(b, sub.channel.id), held(all, b.origin));
+  assert.deepEqual(list(c, third.channel.id), held(all, c.origin));
+  // The home is not asked again within the minute.
+  a.store.leave(a.bob, home.id);
+  await b.fed.refreshRoster(b.bob, sub.channel.id);
+  assert.equal(list(b, sub.channel.id).length, 4);
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() + 60001 });
+  await b.fed.refreshRoster(b.bob, sub.channel.id);
+  assert.equal(list(b, sub.channel.id).length, 3);
+  // Only an accepted follower is told, and nobody is while the home keeps the list.
+  const url = new URL(`${a.fed.channelActor(home)}/members`);
+  const ask = (i: typeof a, user: typeof a.bob) =>
+    fetch(url, { headers: signedHeaders(url, "GET", i.fed.userActor(user), i.fed.keys().private_key) }).then((r) => r.status);
+  assert.deepEqual([await ask(b, b.bob), await ask(b, b.alice)], [200, 403]);
+  a.store.setPrivacy(a.alice, home.id, { show_members: false });
+  await drain(a, b, c);
+  assert.equal(await ask(b, b.bob), 403);
+  assert.equal(b.store.details(b.bob, sub.channel.id).members.length, 0);
+});
 test("renaming a home channel renames its remote copies and deleting it ends their subscriptions", async (t) => {
   const a = await instance(t),
     b = await instance(t);

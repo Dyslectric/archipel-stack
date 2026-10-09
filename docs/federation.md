@@ -70,6 +70,15 @@ covers the note, so a relaying channel cannot silently replace authorship or
 message content. This proof uses this profile's JSON serialization and is an
 Archipel extension, not a general JSON-LD signature implementation.
 
+A channel's member list is shared across the instances it reaches. The home
+lists its accepted remote followers beside its own members, and serves that list
+to accepted followers at `/actors/channels/<id>/members` (signed, up to 500
+entries) unless the channel keeps its member list to itself. A following
+instance fetches it on admission and again, at most once a minute, when a
+subscriber opens the channel; it shows it beside its own subscribers and applies
+the channel's handle setting. Remote followers are admitted and removed under
+**Federation and remote followers**, not in the member list.
+
 Admission imports up to five signed history pages of twenty records each.
 This is bounded initial history, not complete archival replication. History is
 linked through explicit placeholders when a parent falls outside that window;

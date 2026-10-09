@@ -64,6 +64,7 @@ export class Federation {
   private importing = false;
   private busy = false;
   private peerSends = new Map<string, number[]>();
+  private rosterAsked = new Map<string, number>();
   constructor(
     readonly store: Store,
     readonly config: Config,
@@ -1348,6 +1349,129 @@ export class Federation {
       })),
     };
   }
+  // Who is in a home channel, for the instances following it. Nothing leaves while the channel
+  // keeps its member list to itself. Bounded like history: the first 500 by handle.
+  roster(actor: Doc, id: string) {
+    this.ensureEnabled();
+    const channel = this.store.channel(id);
+    if (
+      !channel.federation_enabled ||
+      channel.remote_actor ||
+      !this.acceptedFollower(id, actor.id)
+    )
+      throw new Problem(403, "An accepted channel subscription is required.");
+    if (!channel.show_members)
+      throw new Problem(403, "This channel does not show its members.");
+    const items = this.store
+      .members(id)
+      .filter((u) => {
+        if (u.banned || u.admission_status !== "approved") return false;
+        if (!u.remote_actor) return true;
+        try {
+          // Occupants of bridged XMPP rooms have no actor to name.
+          return this.allowed(u.remote_actor).protocol !== "xmpp:";
+        } catch {
+          return false;
+        }
+      })
+      .slice(0, 500)
+      .map((u) => ({
+        type: "Person",
+        id: u.remote_actor || this.userActor(u),
+        preferredUsername: u.remote_actor ? u.username.split("@")[0] : u.username,
+        name: u.display_name,
+        role: u.role,
+      }));
+    return {
+      "@context": context,
+      type: "OrderedCollection",
+      id: `${this.channelActor(channel)}/members`,
+      totalItems: items.length,
+      orderedItems: items,
+    };
+  }
+  private async askRoster(channel: Channel, user: User) {
+    try {
+      const url = this.allowed(`${channel.remote_actor}/members`);
+      const roster = await peerJson(
+        url,
+        this.config,
+        signedHeaders(url, "GET", this.userActor(user), this.keys().private_key),
+      );
+      if (
+        roster.type !== "OrderedCollection" ||
+        !Array.isArray(roster.orderedItems) ||
+        roster.orderedItems.length > 500
+      )
+        return;
+      return roster.orderedItems as Doc[];
+    } catch {
+      // A home that hides its members, or does not offer the list, leaves what is known as it is.
+    }
+  }
+  // The home's list replaces the last one. Only the home's own accounts can run the channel,
+  // and a name it gives for someone already known here is not taken over theirs.
+  private keepRoster(channel: Channel, items: Doc[]) {
+    const home = new URL(channel.remote_actor!).origin,
+      local = `${this.config.baseUrl}/actors/users/`;
+    this.store.transaction(() => {
+      this.store.db
+        .prepare("DELETE FROM channel_roster WHERE channel_id=?")
+        .run(channel.id);
+      for (const item of items) {
+        try {
+          if (item?.type !== "Person" || typeof item.id !== "string") continue;
+          const origin = this.allowed(item.id).origin;
+          const known = (
+            item.id.startsWith(local)
+              ? this.store.db
+                  .prepare("SELECT id FROM users WHERE id=? AND remote_actor IS NULL")
+                  .get(item.id.slice(local.length))
+              : this.store.db
+                  .prepare("SELECT id FROM users WHERE remote_actor=?")
+                  .get(item.id)
+          ) as { id: string } | undefined;
+          if (!known && origin === this.config.baseUrl) continue;
+          this.store.db
+            .prepare("INSERT OR IGNORE INTO channel_roster VALUES(?,?,?)")
+            .run(
+              channel.id,
+              known?.id ?? this.remoteUser(item).id,
+              origin === home && ["owner", "moderator"].includes(item.role)
+                ? item.role
+                : "member",
+            );
+        } catch {
+          // A blocked or malformed entry is left out; the rest of the list stands.
+        }
+      }
+    });
+  }
+  // A subscriber opening a followed channel has its home asked again, at most once a minute.
+  async refreshRoster(user: User, id: string) {
+    const channel = this.store.channel(id);
+    if (
+      !this.enabled() ||
+      !channel.remote_actor ||
+      !channel.show_members ||
+      (this.rosterAsked.get(id) || 0) > Date.now() - 60000 ||
+      !user.federation_receive ||
+      !user.federation_subscribe ||
+      !this.store.db
+        .prepare(
+          "SELECT 1 FROM federation_subscriptions WHERE channel_id=? AND user_id=? AND status='accepted'",
+        )
+        .get(id, user.id)
+    )
+      return;
+    this.rosterAsked.set(id, Date.now());
+    const items = await this.askRoster(channel, user);
+    if (
+      items &&
+      this.store.db.prepare("SELECT 1 FROM channels WHERE id=? AND remote_actor IS NOT NULL").get(id)
+    )
+      this.keepRoster(channel, items);
+  }
   private acceptedFollower(id: string, actor: string) {
     const row = this.store.db
       .prepare(
@@ -1735,6 +1859,7 @@ export class Federation {
     const object = activity.object;
     let prepared: Awaited<ReturnType<Federation["prepareNote"]>> | undefined;
     let snapshot: Awaited<ReturnType<Federation["snapshot"]>> | undefined;
+    let roster: Doc[] | undefined;
     const profileUpdate = activity.type === "Update" && object?.type === "Person";
     const profileRelay = activity.type === "Announce" && sender.type === "Group" && object?.type === "Update" && object.object?.type === "Person";
     const channelUpdate = activity.type === "Update" && object?.type === "Group";
@@ -1792,6 +1917,7 @@ export class Federation {
       this.require(user, "federation_receive");
       this.require(user, "federation_subscribe");
       snapshot = await this.snapshot(this.store.channel(sub.channel_id), user);
+      roster = await this.askRoster(this.store.channel(sub.channel_id), user);
     }
     this.ensureEnabled();
     this.allowed(sender.id);
@@ -1913,6 +2039,7 @@ export class Federation {
             .prepare("INSERT OR IGNORE INTO memberships VALUES(?,?,'member')")
             .run(channel.id, sub.user_id);
           this.store.startReading(sub.user_id, channel.id);
+          if (roster) this.keepRoster(channel, roster);
         } else
           this.store.db
             .prepare("DELETE FROM memberships WHERE channel_id=? AND user_id=?")

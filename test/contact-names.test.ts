@@ -79,9 +79,9 @@ test("upgrading version seven preserves the archive and contact names survive re
   const peer = "xmpp:other@remote.test";
   store.db.prepare("INSERT INTO direct_messages(id,user_id,peer,direction,body,created_at) VALUES(?,?,?,'incoming','Saved history',?)")
     .run("saved", alice.id, peer, new Date().toISOString());
-  store.db.exec("DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; PRAGMA user_version=7"); store.close();
+  store.db.exec("DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; PRAGMA user_version=7"); store.close();
   store = new Store(path);
-  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 15);
+  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 16);
   store.setContactName(alice, peer, "Saved name"); store.close();
   store = new Store(path);
   try {
