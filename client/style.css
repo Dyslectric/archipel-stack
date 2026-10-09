@@ -173,7 +173,12 @@ details[open] > summary .chev { transform: rotate(180deg); }
 .profile-picture-form { margin-bottom: 24px; }
 .av-0 { --av: #b4462d; } .av-1 { --av: #9a6a00; } .av-2 { --av: #3f7d3a; } .av-3 { --av: #1f7a78; }
 .av-4 { --av: #2f63b0; } .av-5 { --av: #6b4fb8; } .av-6 { --av: #a23f86; } .av-7 { --av: #5d6470; }
-.custom-emoji { width: 1.4em; height: 1.4em; object-fit: contain; vertical-align: -0.3em; }
+.custom-emoji { width: 1.75em; height: 1.75em; object-fit: contain; vertical-align: -0.45em; }
+/* Standard emoji, larger than the text they sit in without pushing its lines apart. */
+.emoji { font-size: 1.5em; line-height: 1; vertical-align: -0.12em; }
+.emoji-only .emoji, .emoji-sample .emoji, .ep-big .emoji, .es-glyph .emoji, code .emoji { font-size: 1em; vertical-align: baseline; }
+.reply-context .emoji { font-size: 1.15em; }
+.reply-context .custom-emoji { width: 1.3em; height: 1.3em; vertical-align: -0.25em; }
 .author { color: var(--text); font-weight: 600; }
 .handle { color: var(--muted); font-weight: 400; }
 .meta { color: var(--muted); }
@@ -414,7 +419,7 @@ a.attachment > img { object-fit: contain; }
 .spoiler { border-radius: 4px; background: var(--text); color: transparent; cursor: pointer; }
 .spoiler:not(.shown) * { visibility: hidden; }
 .spoiler.shown { background: var(--hover); color: inherit; cursor: auto; }
-.message-body.emoji-only { font-size: 2.4rem; line-height: 1.2; }
+.message-body.emoji-only { font-size: 3rem; line-height: 1.2; }
 .message-body.emoji-only .custom-emoji { width: 1em; height: 1em; vertical-align: -0.15em; }
 .message-body.faded { color: var(--muted); font-style: italic; }
 /* Sent from here but not yet taken by the other instance. */
@@ -548,14 +553,14 @@ details.reply-box form { font-size: 1rem; }
 .ep-scroll section { content-visibility: auto; contain-intrinsic-size: auto 240px; }
 .ep-scroll h3 { position: sticky; top: 0; z-index: 1; margin: 0; padding: 6px 4px 3px; background: var(--card);
   font-size: 0.75em; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
-.ep-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(36px, 1fr)); }
-.ep-emoji { height: 36px; font-size: 1.4rem; line-height: 1; }
-.ep-emoji .custom-emoji { width: 26px; height: 26px; vertical-align: middle; }
+.ep-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(42px, 1fr)); }
+.ep-emoji { height: 42px; font-size: 1.75rem; line-height: 1; }
+.ep-emoji .custom-emoji { width: 32px; height: 32px; vertical-align: middle; }
 .ep-none { padding: 14px 6px; margin: 0; }
 .ep-foot { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 4px 10px; border-top: 1px solid var(--line);
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.ep-big { font-size: 1.5rem; line-height: 1; }
-.ep-big .custom-emoji { width: 26px; height: 26px; }
+.ep-big { font-size: 1.9rem; line-height: 1; }
+.ep-big .custom-emoji { width: 32px; height: 32px; }
 
 /* ---- channels, and settings you can walk around ---- */
 .search-field { position: relative; display: flex; align-items: center; }
@@ -581,7 +586,8 @@ ul.plain.browse-list { margin-top: 12px; background: var(--card); border: 1px so
 .member-row .muted.small { margin-top: 1px; }
 .socials { margin-top: 4px; }
 .socials > summary { cursor: pointer; color: var(--accent); }
-.emoji-sample { font-size: 1.5rem; line-height: 1; min-width: 1.6em; text-align: center; }
+.emoji-sample { font-size: 1.9rem; line-height: 1; min-width: 1.6em; text-align: center; }
+.emoji-sample .custom-emoji { width: 1.2em; height: 1.2em; vertical-align: middle; }
 .application { padding: 12px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
 .application:last-child { border-bottom: none; }
 .application .info { margin: 8px 0 0; }
@@ -698,7 +704,7 @@ dialog.share-dialog li + li { margin-top: 6px; }
 }
 
 .reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
-.reaction { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; min-height: 26px; font-size: .9rem;
+.reaction { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; min-height: 32px; font-size: .9rem;
   border: 1px solid var(--line); border-radius: 999px; background: transparent; color: inherit; cursor: pointer; }
 .reaction.mine { background: color-mix(in srgb, var(--accent) 18%, transparent); border-color: var(--accent); }
 .reaction:disabled { cursor: default; }
@@ -724,5 +730,5 @@ dialog.share-dialog li + li { margin-top: 6px; }
 .es-item { display: flex; align-items: center; gap: 10px; padding: 4px 8px; border: none; border-radius: 7px; background: none; color: inherit;
   font-weight: 400; text-align: left; }
 .es-item.on, .es-item:hover { background: var(--hover); }
-.es-glyph { display: inline-flex; width: 1.6em; justify-content: center; font-size: 1.3rem; line-height: 1; }
-.es-glyph .custom-emoji { width: 1.3rem; height: 1.3rem; }
+.es-glyph { display: inline-flex; width: 1.6em; justify-content: center; font-size: 1.6rem; line-height: 1; }
+.es-glyph .custom-emoji { width: 1.6rem; height: 1.6rem; }

@@ -1,4 +1,4 @@
-import { emojiParts, emojiData, type CustomEmoji } from "../src/emojis.js";
+import { emojiParts, emojiData, markEmoji, type CustomEmoji } from "../src/emojis.js";
 import { markdownHtml } from "./markdown.js";
 
 export type { CustomEmoji };
@@ -387,9 +387,9 @@ export function emojiHtml(body: string, emojis = state.emojis) {
   return emojiParts(body, emojis)
     .map((part) =>
       "text" in part
-        ? esc(part.text)
+        ? markEmoji(esc(part.text))
         : "emoji" in part
-          ? `<span title=":${esc(part.name)}:">${esc(part.emoji)}</span>`
+          ? `<span class="emoji" title=":${esc(part.name)}:">${esc(part.emoji)}</span>`
           : `<img class="custom-emoji" src="${esc(part.url)}" alt=":${esc(part.name)}:"${part.kind ? emojiData(part, esc) : ` title=":${esc(part.name)}:"`}>`,
     )
     .join("");

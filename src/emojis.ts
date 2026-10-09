@@ -27,6 +27,12 @@ export function emojiData(e: Source, escape: (s: string) => string) {
   ].join("");
 }
 
+// Emoji typed as themselves (not as shortcodes) are marked like the rest, so they are sized alike.
+const typed =
+  /(?:[\u{231A}-\u{23FF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{1F000}-\u{1FAFF}][\u{FE0F}\u{1F3FB}-\u{1F3FF}]?(?:\u200D[\u{2600}-\u{27BF}\u{1F000}-\u{1FAFF}][\u{FE0F}\u{1F3FB}-\u{1F3FF}]?)*)+/gu;
+export const markEmoji = (escaped: string) =>
+  escaped.replace(typed, '<span class="emoji">$&</span>');
+
 // Keep the stored message intact so editing and unknown shortcodes are lossless.
 export function emojiParts(body: string, custom: CustomEmoji[]): EmojiPart[] {
   const images = new Map(custom.map((e) => [e.name, e]));

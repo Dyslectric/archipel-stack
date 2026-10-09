@@ -68,7 +68,7 @@ test("markdown shows this instance's attachments in place and links everything e
 test("markdown renders emoji shortcodes outside code and keeps unknown ones as written", () => {
   const emojis = [{ name: "island_wave", id: "1", url: "/api/emojis/1/image" }];
   const html = markdownHtml(":wave: :island_wave: :nope_this: `:wave:`", emojis, origin);
-  assert.match(html, /<span title=":wave:">👋<\/span>/);
+  assert.match(html, /<span class="emoji" title=":wave:">👋<\/span>/);
   assert.match(html, /<img class="custom-emoji" src="\/api\/emojis\/1\/image" alt=":island_wave:"/);
   assert.match(html, /:nope_this:/);
   assert.match(html, /<code>:wave:<\/code>/);
