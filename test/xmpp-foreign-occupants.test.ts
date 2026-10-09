@@ -57,7 +57,8 @@ test("foreign occupants are admitted only over s2s into federated public rooms t
   denied(() => f.xmpp.operation(f.from("read")));
   f.fed.block(f.alice, { kind: "instance", target: "https://remote.example", blocked: false });
 
-  assert.deepEqual(f.xmpp.operation(f.from("read")), { valid: true });
+  // What the room is goes with the answer, so the adapter can describe a room nobody is in yet.
+  assert.deepEqual(f.xmpp.operation(f.from("read")), { valid: true, name: "plaza", description: f.plaza.description });
   const joined = f.xmpp.operation(f.from("join")) as { name: string; history: unknown[] };
   assert.equal(joined.name, "plaza");
   assert.deepEqual(joined.history, []);

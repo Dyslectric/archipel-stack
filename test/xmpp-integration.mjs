@@ -94,6 +94,11 @@ try {
   assert.equal(store.avatarUrl(bob.id), null);
   await until(() => desktop.received.find(s => s.is("presence") && s.getChild("x", "vcard-temp:x:update")?.getChildText("photo")), "authoritative local avatar presence");
   console.log("PASS native vCard reads, shared avatar writes/removals and presence hashes");
+  // A client asks what an address is before joining it: a room nobody is in yet answers as a room.
+  const unjoined = await desktop.native.iqCaller.request(xml("iq", { type: "get", to: roomJid }, xml("query", { xmlns: "http://jabber.org/protocol/disco#info" })));
+  assert.equal(unjoined.getChild("query").getChild("identity").attrs.category, "conference");
+  assert.ok(unjoined.getChild("query").getChildren("feature").some(f => f.attrs.var === "http://jabber.org/protocol/muc"));
+  console.log("PASS a room nobody has joined yet is discoverable as a room");
   await desktop.native.send(xml("presence", { to: `${roomJid}/Alice's phone`, id: "join-alice" }, xml("x", { xmlns: "http://jabber.org/protocol/muc" })));
   await phone.native.send(xml("presence", { to: `${roomJid}/bob`, id: "join-bob" }, xml("x", { xmlns: "http://jabber.org/protocol/muc" })));
   await until(() => phone.received.find(s => s.is("presence") && s.attrs.from === `${roomJid}/bob` && !s.attrs.type), "Bob room join");

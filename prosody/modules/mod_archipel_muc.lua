@@ -8,6 +8,19 @@ local muc_ns = "http://jabber.org/protocol/muc";
 -- Join history for occupants of other servers, held between admission and room entry.
 local pending_history = {};
 
+-- Prosody holds a room from the first time it is asked for, set up as Archipel describes it.
+local function open_room(room_jid, info)
+  local room = muc.get_room_from_jid(room_jid) or muc.create_room(room_jid);
+  if not room then return; end
+  room:set_members_only(true);
+  room:set_hidden(true);
+  room:set_name(info.name);
+  room:set_description(info.description);
+  room:set_changesubject(false);
+  room:set_historylength(0);
+  return room;
+end
+
 -- Gate room creation, presence and discovery before built-in MUC sees them.
 module:hook("presence/full", function(event)
   if event.stanza.attr.type == "unavailable" or event.stanza.attr.type == "error" then return; end
@@ -22,14 +35,8 @@ module:hook("presence/full", function(event)
   end
   local result = bridge.operation(event, "join", extras);
   if not result then return true; end
-  local room = muc.get_room_from_jid(room_jid) or muc.create_room(room_jid);
+  local room = open_room(room_jid, result);
   if not room then event.origin.send(st.error_reply(event.stanza, "wait", "internal-server-error")); return true; end
-  room:set_members_only(true);
-  room:set_hidden(true);
-  room:set_name(result.name);
-  room:set_description(result.description);
-  room:set_changesubject(false);
-  room:set_historylength(0);
   room:set_affiliation(true, jid.bare(event.stanza.attr.from), "member");
   -- Stable account nicks keep history and live messages aligned.
   -- Foreign occupants keep their whole address, which no local account nick can equal.
@@ -107,8 +114,12 @@ module:hook("muc-get-history", function(event)
   end
   return true;
 end, 100);
+-- A client asks what an address is before it joins: a room nobody is in yet must still answer
+-- as a room, or the client takes it for a contact.
 module:hook("iq-get/bare/http://jabber.org/protocol/disco#info:query", function(event)
-  if not bridge.operation(event, "read") then return true; end
+  local result = bridge.operation(event, "read");
+  if not result then return true; end
+  if result.name then open_room(jid.bare(event.stanza.attr.to), result); end
 end, 100);
 module:hook("iq-get/bare/http://jabber.org/protocol/disco#items:query", function(event)
   if not bridge.operation(event, "read") then return true; end

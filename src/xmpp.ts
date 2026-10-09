@@ -316,7 +316,11 @@ export class Xmpp {
         return { name: channel.name, description: channel.description };
       }
       // What a room is can be asked by whoever may read the channel, so a client learns its features before joining.
-      case "read": { this.store.requireRead(user, this.room(input.to)); return { valid: true }; }
+      case "read": {
+        const channel = this.room(input.to);
+        this.store.requireRead(user, channel);
+        return { valid: true, name: channel.name, description: channel.description };
+      }
       case "post": {
         const channel = this.roomAccess(user, text(input.to, "Room", 512));
         this.store.requirePost(user, channel);
@@ -380,7 +384,11 @@ export class Xmpp {
             history: rows.reverse().map(row => this.channelDelivery(occupant, this.store.message(row.id), sender)) };
         });
       }
-      case "read": { this.admissible(address, this.room(input.to)); return { valid: true }; }
+      case "read": {
+        const channel = this.room(input.to);
+        this.admissible(address, channel);
+        return { valid: true, name: channel.name, description: channel.description };
+      }
       case "post": {
         const user = member(), channel = this.roomAccess(user, text(input.to, "Room", 512));
         if (input.replace) throw new Problem(400, "Corrections from other servers are not supported.");
