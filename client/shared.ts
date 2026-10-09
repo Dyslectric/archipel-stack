@@ -400,9 +400,24 @@ export function adoptable(img: Element) {
   const id = /^\/api\/emojis\/([^/]+)\/image$/.exec(img.getAttribute("src") || "")?.[1];
   return id && !state.emojis.some((e) => e.id === id) ? id : null;
 }
+// Whether the reader is using a finger, which cannot hover: what a mouse finds by pointing is
+// then shown by a tap, and <html class="touch"> says so to the stylesheet. A screen that takes
+// both goes by whichever was used last.
+let fingers = typeof matchMedia !== "undefined" && matchMedia("(hover: none)").matches;
+export const touch = () => fingers;
+if (typeof document !== "undefined") {
+  const set = (on: boolean) => document.documentElement.classList.toggle("touch", (fingers = on));
+  set(fingers);
+  // A tap's pointerdown comes before the mouse events made up for it, so nothing is revealed
+  // by their hover in time to take the tap.
+  document.addEventListener("pointerdown", (e) => e.pointerType !== "pen" && set(e.pointerType === "touch"), true);
+  document.addEventListener("pointermove", (e) => e.pointerType === "mouse" && fingers && set(false), true);
+}
 // Hovering over an emoji enlarges it and gives its shortcode: for a standard emoji every
 // shortcode it answers to, for a custom one whose it is and where it comes from. The pointer
 // can move onto the card, where clicking the picture keeps an emoji that can be kept.
+// By touch a tap on an emoji in a message brings the card up, and so does holding a reaction,
+// whose tap is the reaction itself.
 function standardCard(span: HTMLElement) {
   // The card stands in for the tooltip, which would otherwise come up over it.
   const title = span.getAttribute("title");
@@ -462,7 +477,7 @@ if (typeof document !== "undefined") {
       picture = `<img src="${esc(img.getAttribute("src") || "")}" alt="">`;
     card = document.createElement("div");
     card.className = "emoji-card";
-    card.innerHTML = `${id ? `<button type="button" class="ec-keep" aria-label="Keep :${esc(name)}:" title="Keep this emoji">${picture}</button>` : picture}<div class="ec-text"><strong>:${esc(name)}:</strong><span class="ec-kind">${what}</span><span class="ec-kind">${kind === "personal" && owner ? `From ${esc(owner)}${where}` : `From ${esc(origin || "this instance")}`}</span>${id ? '<span class="ec-hint">Click the picture to keep it</span>' : ""}</div>`;
+    card.innerHTML = `${id ? `<button type="button" class="ec-keep" aria-label="Keep :${esc(name)}:" title="Keep this emoji">${picture}</button>` : picture}<div class="ec-text"><strong>:${esc(name)}:</strong><span class="ec-kind">${what}</span><span class="ec-kind">${kind === "personal" && owner ? `From ${esc(owner)}${where}` : `From ${esc(origin || "this instance")}`}</span>${id ? `<span class="ec-hint">${fingers ? "Tap" : "Click"} the picture to keep it</span>` : ""}</div>`;
     document.body.append(card);
     card.addEventListener("mouseenter", () => clearTimeout(leaving));
     card.addEventListener("mouseleave", leave);
@@ -472,12 +487,68 @@ if (typeof document !== "undefined") {
     });
     place(img.getBoundingClientRect());
   };
+  const emoji = "img.custom-emoji[data-kind], span.emoji";
+  // Only where an emoji was used: not where one is being chosen, listed or summarised.
+  const used = (at: Element | null) => {
+    const img = at?.closest?.<HTMLElement>(emoji);
+    return img && !img.closest(".emoji-picker, .emoji-suggest, .emoji-sample, .reply-context, dialog") ? img : null;
+  };
   document.addEventListener("mouseover", (e) => {
+    // A tap is followed by a made-up mouseover: the card is not for that to show or hide.
+    if (fingers) return;
     const at = e.target as Element | null,
-      img = at?.closest?.<HTMLElement>("img.custom-emoji[data-kind], span.emoji");
-    // Only where an emoji was used: not where one is being chosen, listed or summarised.
-    if (img && !img.closest(".emoji-picker, .emoji-suggest, .emoji-sample, .reply-context, dialog")) show(img);
+      img = used(at);
+    if (img) show(img);
     else if (card && !card.contains(at)) leave();
+  });
+  document.addEventListener("click", (e) => {
+    const img = fingers ? used(e.target as Element) : null;
+    if (img && !img.closest(".reaction")) show(img);
+  });
+  // A reaction held for a moment shows its card; the tap that lifting would make is dropped.
+  let holding = 0,
+    held = false;
+  const release = () => clearTimeout(holding);
+  document.addEventListener(
+    "pointerdown",
+    (e) => {
+      const at = e.target as Element;
+      release();
+      held = false;
+      if (e.pointerType !== "touch") return;
+      if (card && !card.contains(at) && used(at) !== shown) hide();
+      const img = at.closest?.(".reaction")?.querySelector<HTMLElement>(emoji);
+      if (!img) return;
+      const { clientX: x, clientY: y } = e;
+      const moved = (m: PointerEvent) => Math.hypot(m.clientX - x, m.clientY - y) > 10 && done();
+      const done = () => {
+        release();
+        document.removeEventListener("pointermove", moved, true);
+      };
+      document.addEventListener("pointermove", moved, true);
+      holding = window.setTimeout(() => {
+        done();
+        held = true;
+        show(img);
+      }, 450);
+    },
+    true,
+  );
+  for (const type of ["pointerup", "pointercancel"]) document.addEventListener(type, release, true);
+  document.addEventListener(
+    "click",
+    (e) => {
+      if (!held) return;
+      held = false;
+      if (!(e.target as Element).closest?.(".reaction")) return;
+      e.preventDefault();
+      e.stopPropagation();
+    },
+    true,
+  );
+  // Holding is ours there: not the browser's menu for the picture or the text.
+  document.addEventListener("contextmenu", (e) => {
+    if (fingers && (e.target as Element).closest?.(".reaction")) e.preventDefault();
   });
   document.addEventListener("mouseleave", leave);
   document.addEventListener("scroll", hide, true);

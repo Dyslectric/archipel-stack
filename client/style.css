@@ -292,7 +292,9 @@ button.member-name { flex: 1; min-width: 0; font-weight: 500; overflow: hidden; 
 .side-row:hover .channel-link:not(.on), .side-row:focus-within .channel-link:not(.on),
 .side-row:has(.row-menu[aria-expanded=true]) .channel-link:not(.on) { background: var(--hover); }
 .row-menu { width: 28px; height: 28px; opacity: 0; pointer-events: none; }
-.side-row:hover .row-menu, .side-row:focus-within .row-menu, .group-head:hover .row-menu, .group-head:focus-within .row-menu,
+/* Not by a finger's hover, which would put the button under the tap that caused it. */
+:root:not(.touch) .side-row:hover .row-menu, :root:not(.touch) .group-head:hover .row-menu,
+.side-row:focus-within .row-menu, .group-head:focus-within .row-menu,
 .row-menu[aria-expanded=true] { opacity: 1; pointer-events: auto; }
 .dragging { opacity: .45; }
 .side-item.drop-before, .side-group.drop-before { box-shadow: 0 -2px 0 var(--accent); }
@@ -436,8 +438,13 @@ button.reply-context:hover { background: none; color: var(--text); }
 .message-actions { position: absolute; right: 10px; top: -14px; z-index: 3; display: flex; gap: 0; padding: 2px;
   background: var(--card); border: 1px solid var(--line); border-radius: 9px; box-shadow: var(--shadow-lift);
   opacity: 0; pointer-events: none; }
-.group-body > article:hover .message-actions, .group-body > article:focus-within .message-actions,
+:root:not(.touch) .group-body > article:hover .message-actions, .group-body > article:focus-within .message-actions,
 .group-body > article.show-actions .message-actions { opacity: 1; pointer-events: auto; }
+/* By touch a tap on the message brings them up, in a row of their own under it: never over
+   what was tapped, nor over the message. */
+.touch .group-body > article .message-actions { display: none; }
+.touch .group-body > article.show-actions .message-actions { display: flex; position: static; grid-column: 2;
+  justify-self: start; margin: 4px 0 6px; box-shadow: none; }
 .message-actions .icon-button { width: 30px; height: 28px; }
 .message-actions .act { font-size: .85em; min-height: 28px; }
 .group-body > article:first-child .message-actions { top: 2px; }
@@ -656,10 +663,8 @@ dialog.share-dialog li + li { margin-top: 6px; }
   .workspace.side-collapsed { grid-template-columns: minmax(0, 1fr) auto; }
   .workspace.side-collapsed > .sidebar { display: none; }
 }
-@media (hover: none) {
-  .msg-gutter time { visibility: visible; }
-  .row-menu { opacity: 1; pointer-events: auto; }
-}
+.touch .msg-gutter time { visibility: visible; }
+.touch .row-menu { opacity: 1; pointer-events: auto; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
 }
@@ -711,6 +716,8 @@ dialog.share-dialog li + li { margin-top: 6px; }
   border: 1px solid var(--line); border-radius: 999px; background: transparent; color: inherit; cursor: pointer; }
 .reaction.mine { background: color-mix(in srgb, var(--accent) 18%, transparent); border-color: var(--accent); }
 .reaction:disabled { cursor: default; }
+/* Held, a reaction shows its emoji's card: not a selection or the browser's own menu. */
+.reaction { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; touch-action: manipulation; }
 .reaction .emoji, .reaction .custom-emoji { vertical-align: middle; }
 .emoji-card { position: fixed; z-index: 60; display: flex; gap: 12px; align-items: center; max-width: 280px; padding: 10px 14px;
   background: var(--card); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow-pop);

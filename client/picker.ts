@@ -217,6 +217,14 @@ export function togglePicker(
     panel.classList.toggle("below", other === "below");
   if (room.above < need && room.below < need)
     panel.scrollIntoView({ block: "nearest" });
+  // Where the timeline cannot scroll that far, the panel sits over its message rather than
+  // under the header or off the page.
+  let frame = host.parentElement;
+  while (frame && !/auto|scroll/.test(getComputedStyle(frame).overflowY)) frame = frame.parentElement;
+  const at = panel.getBoundingClientRect(),
+    top = Math.max(8, (frame?.getBoundingClientRect().top ?? 0) + 4),
+    shift = at.top < top ? top - at.top : Math.min(0, innerHeight - 8 - at.bottom);
+  if (shift) panel.style.translate = `0 ${Math.round(shift)}px`;
   search.focus({ preventScroll: true });
 }
 

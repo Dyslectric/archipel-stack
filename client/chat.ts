@@ -31,6 +31,7 @@ import {
   shareDialog,
   state,
   toast,
+  touch,
   when,
   type Channel,
   type Conversation,
@@ -953,7 +954,8 @@ function wireFeed() {
       $("#message-body").focus();
     } else if ((hit = on<HTMLImageElement>(".message-body img.custom-emoji"))) {
       // An emoji that is someone else's (theirs alone, or another server's) can be kept.
-      const id = adoptable(hit);
+      // By touch the tap shows its card first, which is where it is kept from.
+      const id = !touch() && adoptable(hit);
       if (id)
         adoptEmojiDialog({ id, name: (hit.getAttribute("alt") || "emoji").replaceAll(":", "") });
     } else if ((hit = on("[data-react]"))) {
@@ -999,12 +1001,13 @@ function wireFeed() {
         lastSignature = signature();
         render({ anchor: true });
       });
-    else if ((hit = on(".group-body > article")) && !on("a, button, form")) {
-      // Touch screens have no hover: a tap shows a message's buttons.
+    else if ((hit = on(".group-body > article")) && !on("a, button, form, .spoiler") && !(touch() && on(".emoji, .custom-emoji"))) {
+      // Touch screens have no hover: a tap shows a message's buttons, under it.
       const shown = hit.classList.contains("show-actions");
       for (const el of $$(".show-actions", list))
         el.classList.remove("show-actions");
       hit.classList.toggle("show-actions", !shown);
+      if (!shown && touch()) hit.querySelector(".message-actions")?.scrollIntoView({ block: "nearest" });
     }
   });
 }
