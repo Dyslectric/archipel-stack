@@ -97,6 +97,22 @@ document.addEventListener("click", (event) => {
   if ((!within("sidebar") && !within("mobile-menu")) || at.closest("#sidebar a"))
     document.querySelector("#sidebar")?.classList.remove("mobile-open");
 });
+// On a phone the drawer lies over the page, and a tap beside it only puts it away: nothing
+// behind it is pressed, followed or focused.
+for (const type of ["mousedown", "click"])
+  document.addEventListener(
+    type,
+    (event) => {
+      const side = drawer.matches ? document.querySelector("#sidebar.mobile-open") : null,
+        path = event.composedPath();
+      if (!side || path.includes(side) || path.some((el) => (el as Element).id === "mobile-menu"))
+        return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (type === "click") side.classList.remove("mobile-open");
+    },
+    true,
+  );
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   for (const menu of $$<HTMLDetailsElement>("details.menu[open]"))
