@@ -37,7 +37,7 @@ import {
   type Reaction,
   type Topic,
 } from "./shared.js";
-import { closePicker, togglePicker } from "./picker.js";
+import { closePicker, suggestShortcodes, togglePicker } from "./picker.js";
 import { renderSidebar, sidebarFrame } from "./sidebar.js";
 import { attachButton, pickFiles, quoteInto } from "./attach.js";
 import { markdownText } from "./markdown.js";
@@ -465,7 +465,7 @@ const reactable = (m: Message) =>
 // The button that opens the emoji picker for a reaction, in a message's action panel.
 const reactButton = (m: Message, cls: string) =>
   reactable(m) && canPost()
-    ? `<button type="button" class="${cls}" data-react-add="${m.id}" aria-label="Add reaction" aria-haspopup="dialog" title="Add reaction">${icon("smile")}${cls === "act" ? "<span>React</span>" : ""}</button>`
+    ? `<button type="button" class="${cls}" data-react-add="${m.id}" aria-label="Add reaction" aria-haspopup="dialog" title="Add reaction">${icon("smile")}<span>React</span></button>`
     : "";
 function reactionsHtml(m: Message) {
   if (!reactable(m)) return "";
@@ -608,10 +608,10 @@ function chatNodes(list: Message[]): Node[] {
 function threadActions(m: Message) {
   if (m.queued) return "";
   const parts = [
-    reactButton(m, "link react-button"),
     canPost() && !m.deleted_at
       ? `<details class="reply-box"><summary aria-label="Reply to ${esc(m.display_name)}">${icon("reply")} Reply</summary><form class="stack inline-form picker-host" data-reply-form="${m.id}"><textarea name="body" rows="3" maxlength="8000" required aria-label="Reply" placeholder="Reply to ${esc(m.display_name)}"></textarea><p class="form-error" role="alert"></p><div class="row"><button class="small">Reply</button><button type="button" class="icon-button" data-emoji-for aria-label="Choose emoji" title="Emoji">${icon("smile")}</button>${attachButton("data-attach-for")}<span class="muted">Ctrl + Enter to send</span></div></form></details>`
       : "",
+    reactButton(m, "link react-button"),
     mine(m)
       ? `<button type="button" class="link edit-button" data-edit="${m.id}" aria-label="Edit message">Edit</button>`
       : "",
@@ -1067,6 +1067,7 @@ function renderComposer(keepDraft = true) {
   };
   body.addEventListener("input", grow);
   grow();
+  suggestShortcodes(body);
   updateTopicOptions();
   if (hadFocus) body.focus();
   document.querySelector("#cancel-reply")?.addEventListener("click", () => {

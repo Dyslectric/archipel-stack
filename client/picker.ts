@@ -219,3 +219,80 @@ export function togglePicker(
     panel.scrollIntoView({ block: "nearest" });
   search.focus({ preventScroll: true });
 }
+
+// Candidates above a compose box while a shortcode is being typed (":sm"): arrows to move,
+// Enter or Tab to take one, Escape to dismiss. Clicking one works too.
+export function suggestShortcodes(area: HTMLTextAreaElement) {
+  const host = area.closest<HTMLElement>(".picker-host");
+  if (!host) return;
+  const list = document.createElement("div");
+  list.className = "emoji-suggest";
+  list.setAttribute("role", "listbox");
+  list.setAttribute("aria-label", "Emoji suggestions");
+  list.hidden = true;
+  host.append(list);
+  let names: string[] = [],
+    at = 0,
+    start = 0;
+  const hide = () => {
+    list.hidden = true;
+    names = [];
+  };
+  const draw = () => {
+    list.innerHTML = names
+      .map(
+        (n, i) =>
+          `<button type="button" role="option" class="es-item${i === at ? " on" : ""}" aria-selected="${i === at}" data-name="${esc(n)}"><span class="es-glyph">${byName.has(n) ? esc(byName.get(n)!.char) : emojiHtml(`:${n}:`)}</span><span>:${esc(n)}:</span></button>`,
+      )
+      .join("");
+    $(".on", list)?.scrollIntoView({ block: "nearest" });
+  };
+  const update = () => {
+    const caret = area.selectionStart,
+      match = /(^|[\s(])(:([a-z0-9_+-]{2,}))$/i.exec(area.value.slice(0, caret));
+    if (!match || area.selectionEnd !== caret) return hide();
+    const query = match[3].toLowerCase(),
+      all = [...state.emojis.map((e) => e.name), ...standard.map((e) => e.name)],
+      found = [
+        ...all.filter((n) => n.startsWith(query)),
+        ...all.filter((n) => !n.startsWith(query) && n.includes(query)),
+      ];
+    names = [...new Set(found)].slice(0, 8);
+    if (!names.length) return hide();
+    start = caret - match[2].length;
+    at = 0;
+    list.hidden = false;
+    draw();
+  };
+  const take = (name: string) => {
+    area.setRangeText(`:${name}: `, start, area.selectionStart, "end");
+    hide();
+    remember(name);
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+    area.focus();
+  };
+  area.addEventListener("input", update);
+  area.addEventListener("click", update);
+  area.addEventListener("blur", () => setTimeout(hide, 120));
+  area.addEventListener(
+    "keydown",
+    (e) => {
+      if (list.hidden || e.isComposing) return;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        at = (at + (e.key === "ArrowDown" ? 1 : names.length - 1)) % names.length;
+        draw();
+      } else if (e.key === "Enter" || e.key === "Tab") take(names[at]);
+      else if (e.key === "Escape") hide();
+      else return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    },
+    true,
+  );
+  list.addEventListener("mousedown", (e) => {
+    const item = (e.target as Element).closest<HTMLElement>("[data-name]");
+    if (!item) return;
+    e.preventDefault();
+    take(item.dataset.name!);
+  });
+}
