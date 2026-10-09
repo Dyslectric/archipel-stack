@@ -450,6 +450,9 @@ test("standard and custom shortcodes render, and deleted custom emoji fall back 
   await page.getByRole("button", { name: "Send message" }).click();
   const body = page.locator(".message-body").filter({ hasText: "Hello" });
   await expect(body).toContainText("😄");
+  await body.locator(".emoji").hover();
+  await expect(page.locator(".emoji-card")).toContainText(":smile:");
+  await expect(page.locator(".emoji-card")).toContainText("Standard emoji");
   await expect(
     body.getByAltText(":island_wave:", { exact: true }),
   ).toBeVisible();

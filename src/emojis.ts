@@ -1,6 +1,11 @@
-import { nameToEmoji } from "gemoji";
+import { gemoji, nameToEmoji } from "gemoji";
 
 export const standardEmojis = new Map(Object.entries(nameToEmoji));
+// Every shortcode of a standard emoji, however it was typed: with or without a skin tone or
+// the variation selector.
+const bare = (emoji: string) => emoji.replace(/[\u{FE0F}\u{1F3FB}-\u{1F3FF}]/gu, "");
+const namesOf = new Map(gemoji.map((g) => [bare(g.emoji), g.names]));
+export const emojiNames = (emoji: string) => namesOf.get(bare(emoji)) ?? [];
 export interface CustomEmoji {
   name: string;
   id: string;
@@ -27,9 +32,10 @@ export function emojiData(e: Source, escape: (s: string) => string) {
   ].join("");
 }
 
-// Emoji typed as themselves (not as shortcodes) are marked like the rest, so they are sized alike.
+// Emoji typed as themselves (not as shortcodes) are marked like the rest, so they are sized alike:
+// each on its own (a flag is two letters), so that hovering over one can say which it is.
 const typed =
-  /(?:[\u{231A}-\u{23FF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{1F000}-\u{1FAFF}][\u{FE0F}\u{1F3FB}-\u{1F3FF}]?(?:\u200D[\u{2600}-\u{27BF}\u{1F000}-\u{1FAFF}][\u{FE0F}\u{1F3FB}-\u{1F3FF}]?)*)+/gu;
+  /[\u{1F1E6}-\u{1F1FF}]{2}|[\u{231A}-\u{23FF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{1F000}-\u{1FAFF}][\u{FE0F}\u{1F3FB}-\u{1F3FF}]?(?:\u200D[\u{2600}-\u{27BF}\u{1F000}-\u{1FAFF}][\u{FE0F}\u{1F3FB}-\u{1F3FF}]?)*/gu;
 export const markEmoji = (escaped: string) =>
   escaped.replace(typed, '<span class="emoji">$&</span>');
 

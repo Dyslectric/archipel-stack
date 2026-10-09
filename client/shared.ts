@@ -1,4 +1,4 @@
-import { emojiParts, emojiData, markEmoji, type CustomEmoji } from "../src/emojis.js";
+import { emojiParts, emojiData, emojiNames, markEmoji, type CustomEmoji } from "../src/emojis.js";
 import { markdownHtml } from "./markdown.js";
 
 export type { CustomEmoji };
@@ -400,8 +400,22 @@ export function adoptable(img: Element) {
   const id = /^\/api\/emojis\/([^/]+)\/image$/.exec(img.getAttribute("src") || "")?.[1];
   return id && !state.emojis.some((e) => e.id === id) ? id : null;
 }
-// Hovering over a custom emoji enlarges it and says whose it is and where it comes from. The
-// pointer can move onto the card, where clicking the picture keeps an emoji that can be kept.
+// Hovering over an emoji enlarges it and gives its shortcode: for a standard emoji every
+// shortcode it answers to, for a custom one whose it is and where it comes from. The pointer
+// can move onto the card, where clicking the picture keeps an emoji that can be kept.
+function standardCard(span: HTMLElement) {
+  // The card stands in for the tooltip, which would otherwise come up over it.
+  const title = span.getAttribute("title");
+  if (title) span.dataset.name = title.replaceAll(":", "");
+  span.removeAttribute("title");
+  const glyph = span.textContent || "",
+    names = emojiNames(glyph),
+    name = span.dataset.name || names[0],
+    also = names.filter((n) => n !== name);
+  return name
+    ? `<span class="ec-glyph">${esc(glyph)}</span><div class="ec-text"><strong>:${esc(name)}:</strong><span class="ec-kind">Standard emoji</span>${also.length ? `<span class="ec-kind">Also ${also.map((n) => `:${esc(n)}:`).join(" ")}</span>` : ""}</div>`
+    : "";
+}
 if (typeof document !== "undefined") {
   let card: HTMLElement | null = null,
     shown: Element | null = null,
@@ -416,10 +430,29 @@ if (typeof document !== "undefined") {
     clearTimeout(leaving);
     leaving = window.setTimeout(hide, 35);
   };
-  const show = (img: HTMLImageElement) => {
+  const place = (at: DOMRect) => {
+    const box = card!.getBoundingClientRect(),
+      left = Math.max(8, Math.min(innerWidth - box.width - 8, at.left + at.width / 2 - box.width / 2)),
+      top = at.top - box.height - 4 < 8 ? at.bottom + 4 : at.top - box.height - 4;
+    card!.style.left = `${left}px`;
+    card!.style.top = `${top}px`;
+  };
+  const show = (img: HTMLElement) => {
     clearTimeout(leaving);
     if (shown === img && card) return;
     hide();
+    if (!(img instanceof HTMLImageElement)) {
+      const html = standardCard(img);
+      if (!html) return;
+      shown = img;
+      card = document.createElement("div");
+      card.className = "emoji-card";
+      card.innerHTML = html;
+      document.body.append(card);
+      card.addEventListener("mouseenter", () => clearTimeout(leaving));
+      card.addEventListener("mouseleave", leave);
+      return place(img.getBoundingClientRect());
+    }
     shown = img;
     const { kind, origin, owner } = img.dataset,
       name = (img.getAttribute("alt") || "").replaceAll(":", ""),
@@ -437,16 +470,11 @@ if (typeof document !== "undefined") {
       hide();
       adoptEmojiDialog({ id: id!, name });
     });
-    const at = img.getBoundingClientRect(),
-      box = card.getBoundingClientRect(),
-      left = Math.max(8, Math.min(innerWidth - box.width - 8, at.left + at.width / 2 - box.width / 2)),
-      top = at.top - box.height - 4 < 8 ? at.bottom + 4 : at.top - box.height - 4;
-    card.style.left = `${left}px`;
-    card.style.top = `${top}px`;
+    place(img.getBoundingClientRect());
   };
   document.addEventListener("mouseover", (e) => {
     const at = e.target as Element | null,
-      img = at?.closest?.<HTMLImageElement>("img.custom-emoji[data-kind]");
+      img = at?.closest?.<HTMLElement>("img.custom-emoji[data-kind], span.emoji");
     // Only where an emoji was used: not where one is being chosen, listed or summarised.
     if (img && !img.closest(".emoji-picker, .emoji-suggest, .emoji-sample, .reply-context, dialog")) show(img);
     else if (card && !card.contains(at)) leave();

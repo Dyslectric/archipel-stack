@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Store, Problem } from "../src/store.js";
-import { emojiParts } from "../src/emojis.js";
+import { emojiNames, emojiParts, markEmoji } from "../src/emojis.js";
 
 export const tinyPng =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
@@ -25,6 +25,17 @@ test("emoji shortcodes support standard aliases, custom images, and lossless unk
     { text: " " },
     { text: ":__proto__:" },
   ]);
+});
+
+test("typed emoji are marked one by one and know their shortcodes", () => {
+  assert.equal(
+    markEmoji("a 👍🏽😄 🇫🇷 👨‍👩‍👧"),
+    'a <span class="emoji">👍🏽</span><span class="emoji">😄</span> <span class="emoji">🇫🇷</span> <span class="emoji">👨‍👩‍👧</span>',
+  );
+  assert.deepEqual(emojiNames("👍🏽"), ["+1", "thumbsup"]);
+  assert.deepEqual(emojiNames("❤"), ["heart"]);
+  assert.deepEqual(emojiNames("🇫🇷"), ["fr"]);
+  assert.deepEqual(emojiNames("x"), []);
 });
 
 test("custom emoji are restricted to instance admins, raster images and unique nonstandard names", () => {

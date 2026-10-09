@@ -716,6 +716,7 @@ dialog.share-dialog li + li { margin-top: 6px; }
   background: var(--card); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow-pop);
   animation: pop-in .12s ease-out; }
 .emoji-card img { width: 64px; height: 64px; object-fit: contain; flex: none; }
+.emoji-card .ec-glyph { font-size: 52px; line-height: 64px; min-width: 64px; text-align: center; flex: none; }
 .emoji-card .ec-keep { padding: 4px; border: 1px solid transparent; border-radius: 10px; background: none; cursor: pointer; flex: none; line-height: 0; }
 .emoji-card .ec-keep:hover, .emoji-card .ec-keep:focus-visible { background: var(--hover); border-color: var(--line); }
 .emoji-card .ec-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; overflow-wrap: anywhere; }
