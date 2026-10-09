@@ -566,7 +566,7 @@ export class Xmpp {
     // A cursor past every event issued here was kept for another database (Prosody's volume
     // outlived this one, or a backup was restored): nothing new would ever reach it, so it starts
     // again from what exists now.
-    const issued = Number(this.store.db.prepare("SELECT seq FROM sqlite_sequence WHERE name='xmpp_events'").get()?.seq ?? 0);
+    const issued = this.store.db.sequence("xmpp_events");
     const from = Math.min(after, issued);
     const events = this.store.db.prepare("SELECT * FROM xmpp_events WHERE seq>? ORDER BY seq LIMIT 100")
       .all(from) as { seq: number; kind: string; object_id: string; sender_id: string | null; recipient: string | null }[];

@@ -1191,3 +1191,30 @@ test("mirrors of topical and threaded channels keep their topics, titles and rep
   const reply = b.store.post(b.bob, threaded.id, { body: "Forked reply", parent_id: at("Root").id });
   assert.equal(reply.parent_id, at("Root").id);
 });
+
+test("an administrator's sending pace replaces the configured one, survives a restart and is bounded", async (t) => {
+  const a = await instance(t, { FEDERATION_SEND_RATE: "2", FEDERATION_PEER_SEND_RATE: "0", FEDERATION_SEND_INTERVAL: "250" });
+  const b = await instance(t);
+  const sent = () =>
+    a.store.db.prepare("SELECT COUNT(*) AS n FROM federation_deliveries WHERE status='sent'").get()!.n;
+  assert.deepEqual(a.fed.sending(), { batch: 2, interval: 250 });
+  for (let n = 0; n < 6; n++)
+    await a.fed.sendDirect(a.bob, `${b.origin}/actors/users/${b.bob.id}`, `Message ${n}`);
+  await a.fed.tick();
+  assert.equal(sent(), 2);
+  let told = 0;
+  a.fed.paceChanged = () => told++;
+  assert.throws(() => a.fed.setSending(a.bob, { batch: 3, interval: 5000 }), /administrator/i);
+  for (const input of [{ batch: 0, interval: 1000 }, { batch: 1001, interval: 1000 }, { batch: 1.5, interval: 1000 },
+    { batch: 3, interval: 99 }, { batch: 3, interval: 600001 }, { batch: "3", interval: 1000 }, { batch: 3 }])
+    assert.throws(() => a.fed.setSending(a.alice, input), /whole number/);
+  assert.equal(told, 0);
+  assert.deepEqual(a.fed.setSending(a.alice, { batch: 3, interval: 5000 }).sending, { batch: 3, interval: 5000 });
+  assert.equal(told, 1);
+  await a.fed.tick();
+  assert.equal(sent(), 5);
+  a.restart();
+  assert.deepEqual(a.fed.sending(), { batch: 3, interval: 5000 });
+  await a.fed.tick();
+  assert.equal(sent(), 6);
+});

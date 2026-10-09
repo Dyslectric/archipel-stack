@@ -5,6 +5,7 @@ import { Store, Problem } from "../src/store.js";
 import { Federation } from "../src/federation.js";
 import { Xmpp } from "../src/xmpp.js";
 import { loadConfig } from "../src/config.js";
+import { sqliteOnly } from "./sqlite-only.js";
 
 const denied = (fn: () => unknown, status = 403) =>
   assert.throws(fn, (e: unknown) => e instanceof Problem && e.status === status);
@@ -86,7 +87,7 @@ test("federation grants follow the role through edits, reassignment, default cha
   denied(() => f.store.setUserRole(f.alice, f.bob.id, "missing"), 404);
 });
 
-test("upgrading turns per-account federation switches into roles without changing anyone's access", t => {
+test("upgrading turns per-account federation switches into roles without changing anyone's access", sqliteOnly, t => {
   const store = new Store(":memory:"); t.after(() => store.close());
   const alice = store.loginIdentity("urn:archipel:development", "alice", "alice", [], true);
   const bob = store.loginIdentity("urn:archipel:development", "bob", "bob", []);

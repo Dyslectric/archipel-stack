@@ -7,6 +7,7 @@ import { Store, Problem } from "../src/store.js";
 import { Xmpp } from "../src/xmpp.js";
 import { Mirrors } from "../src/mirrors.js";
 import { loadConfig } from "../src/config.js";
+import { sqliteOnly } from "./sqlite-only.js";
 
 const config = loadConfig({ DEV_AUTH: "true", XMPP_DOMAIN: "chat.example", XMPP_BRIDGE_SECRET: "s".repeat(43) });
 const address = "lounge@muc.remote.example";
@@ -14,7 +15,7 @@ function fixture() {
   const store = new Store(":memory:"), xmpp = new Xmpp(store, config);
   const alice = store.loginIdentity("urn:archipel:development", "alice", "alice", [], true);
   const bob = store.loginIdentity("urn:archipel:development", "bob", "bob", []);
-  store.db.prepare("INSERT OR REPLACE INTO instance_settings VALUES('federation_enabled','true')").run();
+  store.db.prepare("INSERT INTO instance_settings VALUES('federation_enabled','true') ON CONFLICT(key) DO UPDATE SET value=excluded.value").run();
   store.db.prepare("UPDATE users SET federation_receive=1,federation_subscribe=1,federation_send=1,federation_post=1").run();
   const rooms = xmpp.remoteRooms;
   const subscription = rooms.join(alice, { room: address, nick: "Alice" });
@@ -109,7 +110,7 @@ test("remote room validation, role errors, pagination and native checks follow c
   denied(() => f.xmpp.operation(input), 401);
 });
 
-test("external subscriptions and archives survive a version ten upgrade and restart", t => {
+test("external subscriptions and archives survive a version ten upgrade and restart", sqliteOnly, t => {
   const directory = mkdtempSync(join(tmpdir(), "archipel-external-rooms-"));
   const path = join(directory, "db.sqlite");
   t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -118,7 +119,7 @@ test("external subscriptions and archives survive a version ten upgrade and rest
   store.db.exec("DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; PRAGMA user_version=10");
   store.close(); store = new Store(path);
   let xmpp = new Xmpp(store, config);
-  store.db.prepare("INSERT OR REPLACE INTO instance_settings VALUES('federation_enabled','true')").run();
+  store.db.prepare("INSERT INTO instance_settings VALUES('federation_enabled','true') ON CONFLICT(key) DO UPDATE SET value=excluded.value").run();
   store.db.prepare("UPDATE users SET federation_receive=1,federation_subscribe=1 WHERE id=?").run(alice.id);
   const room = xmpp.remoteRooms.join(alice, { room: address, nick: "alice" });
   const session = xmpp.remoteRooms.sync({}).desired[0].session;
@@ -154,7 +155,7 @@ test("a bridged channel repeats members in the room as themselves and takes in t
   const alice = store.loginIdentity("urn:archipel:development", "alice", "alice", [], true);
   const bob = store.loginIdentity("urn:archipel:development", "bob", "bob", []);
   const carol = store.loginIdentity("urn:archipel:development", "carol", "carol", []);
-  store.db.prepare("INSERT OR REPLACE INTO instance_settings VALUES('federation_enabled','true')").run();
+  store.db.prepare("INSERT INTO instance_settings VALUES('federation_enabled','true') ON CONFLICT(key) DO UPDATE SET value=excluded.value").run();
   store.db.prepare("UPDATE users SET federation_receive=1,federation_subscribe=1,federation_send=1,federation_post=1 WHERE id!=?").run(carol.id);
   const channel = store.createChannel(alice, { name: "lounge", mode: "timeline", visibility: "public", admission: "open" });
   const threads = store.createChannel(alice, { name: "threads", mode: "threaded", visibility: "public", admission: "open" });

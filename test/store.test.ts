@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Store, Problem } from "../src/store.js";
 import { loadConfig } from "../src/config.js";
+import { sqliteOnly } from "./sqlite-only.js";
 
 function fixture() {
   const store = new Store(":memory:");
@@ -508,7 +509,7 @@ test("configured administrators bypass pending admission, including on an existi
   store.close();
 });
 
-test("version-one databases upgrade without losing membership and persist community settings", (t) => {
+test("version-one databases upgrade without losing membership and persist community settings", sqliteOnly, (t) => {
   const directory = mkdtempSync(join(tmpdir(), "archipel-migration-")),
     path = join(directory, "db.sqlite");
   t.after(() => rmSync(directory, { recursive: true }));
@@ -556,7 +557,7 @@ test("version-one databases upgrade without losing membership and persist commun
   store.close();
 });
 
-test("version-two emoji messages keep their image metadata through the federation migration", (t) => {
+test("version-two emoji messages keep their image metadata through the federation migration", sqliteOnly, (t) => {
   const directory = mkdtempSync(join(tmpdir(), "archipel-emoji-upgrade-")),
     path = join(directory, "db.sqlite");
   const legacy = new DatabaseSync(path);
@@ -598,7 +599,7 @@ test("version-two emoji messages keep their image metadata through the federatio
     { id: "asset", name: "island", url: "/api/emojis/asset/image" },
   ]);
   assert.equal(store.user("author").federation_send, 0);
-  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 19);
+  assert.equal(store.db.version(), 19);
 });
 
 test("direct messages reach both members, and only the reader's own are news to them", () => {
@@ -728,7 +729,7 @@ test("personal blocks stop direct messages, redact channel content and preserve 
   store.close();
 });
 
-test("personal blocks persist across restarts and upgrade an existing version 4 database", (t) => {
+test("personal blocks persist across restarts and upgrade an existing version 4 database", sqliteOnly, (t) => {
   const directory = mkdtempSync(join(tmpdir(), "archipel-blocks-"));
   const path = join(directory, "db.sqlite");
   let store = new Store(path);
@@ -779,7 +780,7 @@ test("profile pictures are shared through profiles, messages and DMs and invalid
   store.close();
 });
 
-test("profile picture migration preserves identities and pictures survive restarting", (t) => {
+test("profile picture migration preserves identities and pictures survive restarting", sqliteOnly, (t) => {
   const directory = mkdtempSync(join(tmpdir(), "archipel-avatars-"));
   const path = join(directory, "db.sqlite");
   let store = new Store(path);
@@ -824,7 +825,7 @@ test("a sidebar layout is kept per member and cleaned on the way in", () => {
   store.close();
 });
 
-test("version 9 avatar migration preserves pictures and XMPP cursors and remote caches survive restart", t => {
+test("version 9 avatar migration preserves pictures and XMPP cursors and remote caches survive restart", sqliteOnly, t => {
   const directory = mkdtempSync(join(tmpdir(), "archipel-remote-avatars-"));
   const path = join(directory, "db.sqlite");
   let store = new Store(path);
@@ -834,11 +835,11 @@ test("version 9 avatar migration preserves pictures and XMPP cursors and remote 
   store.db.prepare("INSERT INTO xmpp_events(seq,kind,object_id) VALUES(50,'Direct','old-message')").run();
   store.db.exec("DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; PRAGMA user_version=9");
   store.close(); store = new Store(path);
-  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 19);
+  assert.equal(store.db.version(), 19);
   assert.equal(Buffer.from(store.avatarImage(alice.id).image).toString("base64"), image);
   assert.equal(store.db.prepare("SELECT seq FROM xmpp_events WHERE object_id='old-message'").get()?.seq, 50);
-  const next = store.db.prepare("INSERT INTO xmpp_events(kind,object_id) VALUES('Profile',?)").run(alice.id);
-  assert.ok(Number(next.lastInsertRowid) > 50);
+  store.db.prepare("INSERT INTO xmpp_events(kind,object_id) VALUES('Profile',?)").run(alice.id);
+  assert.ok(store.db.sequence("xmpp_events") > 50);
   const peer = "xmpp:other@remote.test";
   store.cacheRemoteAvatar(peer, image, peer);
   const url = store.peerInfo(peer).avatar_url;

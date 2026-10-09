@@ -1174,7 +1174,7 @@ function updateTopicOptions() {
       .join("");
 }
 
-// ---- keeping up: called every few seconds while the conversation is on screen ----
+// ---- keeping up: called when the server says the conversation on screen changed ----
 export function redrawChat(composer = false, header = false) {
   if (!current) return;
   if (header && document.querySelector("#rows")) renderHeader();

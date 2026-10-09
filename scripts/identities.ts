@@ -1,9 +1,8 @@
-import { DatabaseSync } from "node:sqlite";
+import { PostgresDatabase, SqliteDatabase } from "../src/db.js";
 
-const db = new DatabaseSync(
-  process.env.DATABASE_PATH || "./data/archipel.sqlite",
-  { readOnly: true },
-);
+const db = process.env.DATABASE_URL
+  ? new PostgresDatabase(process.env.DATABASE_URL)
+  : new SqliteDatabase(process.env.DATABASE_PATH || "./data/archipel.sqlite", true);
 console.table(
   db
     .prepare(

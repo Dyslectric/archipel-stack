@@ -1,8 +1,6 @@
 import { decodeEmojiImage, decodeRasterImage, imageMime } from "./emoji-image.js";
 import { standardEmojis, type CustomEmoji } from "./emojis.js";
-import { DatabaseSync } from "node:sqlite";
-import { mkdirSync, readFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { openDatabase, type Database } from "./db.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 export class Problem extends Error {
@@ -156,8 +154,7 @@ const everyone = `
     WHERE r.channel_id=? AND NOT EXISTS (SELECT 1 FROM memberships m WHERE m.channel_id=r.channel_id AND m.user_id=r.user_id)`;
 
 export class Store {
-  db: DatabaseSync;
-  private transactionDepth = 0;
+  db: Database;
   federationHooks?: {
     profile: (user: User) => void;
     // An account's role, or what its role grants, changed.
@@ -185,144 +182,24 @@ export class Store {
     direct: (id: string, sender: User, recipient: User) => void;
     access: (user: User, peer: string) => DirectAccess;
   };
+  /** Opens the database a path or postgres:// address names, or uses one already open. */
   constructor(
-    path: string,
+    database: string | Database,
     readonly baseUrl = "http://127.0.0.1:8788",
   ) {
-    if (path !== ":memory:")
-      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    this.db = new DatabaseSync(path);
-    this.db.exec(
-      "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;",
-    );
-    const version = (
-      this.db.prepare("PRAGMA user_version").get() as { user_version: number }
-    ).user_version;
-    if (version > 19) throw new Error("Database is newer than this application");
-    if (version === 0)
-      this.transaction(() =>
-        this.db.exec(
-          readFileSync(
-            new URL("../migrations/001_initial.sql", import.meta.url),
-            "utf8",
-          ),
-        ),
-      );
-    if (version < 2)
-      this.transaction(() =>
-        this.db.exec(
-          readFileSync(
-            new URL("../migrations/002_community.sql", import.meta.url),
-            "utf8",
-          ),
-        ),
-      );
-    if (version < 3)
-      this.transaction(() =>
-        this.db.exec(
-          readFileSync(
-            new URL("../migrations/003_federation.sql", import.meta.url),
-            "utf8",
-          ),
-        ),
-      );
-    if (version < 4)
-      this.transaction(() =>
-        this.db.exec(
-          readFileSync(
-            new URL("../migrations/004_inbox.sql", import.meta.url),
-            "utf8",
-          ),
-        ),
-      );
-    if (version < 5)
-      this.transaction(() =>
-        this.db.exec(
-          readFileSync(
-            new URL("../migrations/005_user_blocks.sql", import.meta.url),
-            "utf8",
-          ),
-        ),
-      );
-    if (version < 6)
-      this.transaction(() =>
-        this.db.exec(
-          readFileSync(
-            new URL("../migrations/006_user_avatars.sql", import.meta.url),
-            "utf8",
-          ),
-        ),
-      );
-    if (version < 7)
-      this.transaction(() => this.db.exec(readFileSync(
-        new URL("../migrations/007_xmpp.sql", import.meta.url), "utf8",
-      )));
-    if (version < 8)
-      this.transaction(() => this.db.exec(readFileSync(
-        new URL("../migrations/008_contact_names.sql", import.meta.url), "utf8",
-      )));
-    if (version < 9)
-      this.transaction(() => this.db.exec(readFileSync(
-        new URL("../migrations/009_xmpp_stream_ids.sql", import.meta.url), "utf8",
-      )));
-    if (version < 10)
-      this.transaction(() => this.db.exec(readFileSync(
-        new URL("../migrations/010_remote_avatars.sql", import.meta.url), "utf8",
-      )));
-    if (version < 11)
-      this.transaction(() => this.db.exec(readFileSync(
-        new URL("../migrations/011_xmpp_remote_rooms.sql", import.meta.url), "utf8",
-      )));
-    if (version < 12)
-      this.transaction(() => this.db.exec(readFileSync(
-        new URL("../migrations/012_bridges_mirrors.sql", import.meta.url), "utf8",
-      )));
-    if (version < 13)
-      this.transaction(() => this.db.exec(readFileSync(
-        new URL("../migrations/013_roles_attachments.sql", import.meta.url), "utf8",
-      )));
-    if (version < 14)
-      this.transaction(() => this.db.exec(readFileSync(
-        new URL("../migrations/014_prefs_push.sql", import.meta.url), "utf8",
-      )));
-    if (version < 15)
-      this.transaction(() => this.db.exec(readFileSync(
-        new URL("../migrations/015_channel_privacy.sql", import.meta.url), "utf8",
-      )));
-    if (version < 16)
-      this.transaction(() => this.db.exec(readFileSync(
-        new URL("../migrations/016_channel_roster.sql", import.meta.url), "utf8",
-      )));
-    if (version < 17)
-      this.transaction(() => this.db.exec(readFileSync(
-        new URL("../migrations/017_reactions.sql", import.meta.url), "utf8",
-      )));
-    if (version < 18)
-      this.transaction(() => this.db.exec(readFileSync(
-        new URL("../migrations/018_optional_titles.sql", import.meta.url), "utf8",
-      )));
-    if (version < 19)
-      this.transaction(() => this.db.exec(readFileSync(
-        new URL("../migrations/019_closed_conversations.sql", import.meta.url), "utf8",
-      )));
+    this.db = typeof database === "string" ? openDatabase(database) : database;
+    try {
+      this.db.migrate();
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
   }
   close() {
     this.db.close();
   }
   transaction<T>(fn: () => T): T {
-    if (this.transactionDepth) return fn();
-    this.db.exec("BEGIN IMMEDIATE");
-    this.transactionDepth++;
-    try {
-      const value = fn();
-      this.db.exec("COMMIT");
-      return value;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    } finally {
-      this.transactionDepth--;
-    }
+    return this.db.transaction(fn);
   }
   user(id: string): User {
     const user = this.db
@@ -2149,9 +2026,9 @@ export class Store {
     const me = this.active(user.id);
     const peers = this.db
       .prepare(
-        "SELECT peer FROM direct_messages d WHERE user_id=? GROUP BY peer HAVING MAX(seq)>COALESCE((SELECT seq FROM closed_conversations c WHERE c.user_id=d.user_id AND c.peer=d.peer),0) ORDER BY MAX(seq) DESC LIMIT 200",
+        "SELECT peer FROM direct_messages d WHERE user_id=? GROUP BY peer HAVING MAX(seq)>COALESCE((SELECT seq FROM closed_conversations c WHERE c.user_id=? AND c.peer=d.peer),0) ORDER BY MAX(seq) DESC LIMIT 200",
       )
-      .all(me.id) as unknown as { peer: string }[];
+      .all(me.id, me.id) as unknown as { peer: string }[];
     return peers.flatMap(({ peer }) => {
       const access = this.directAccess(me, peer);
       const last = this.db
@@ -2216,7 +2093,7 @@ export class Store {
     return (
       this.db
         .prepare(
-          "SELECT c.peer,MAX(d.created_at) AS last_at FROM closed_conversations c JOIN direct_messages d ON d.user_id=c.user_id AND d.peer=c.peer WHERE c.user_id=? GROUP BY c.peer HAVING MAX(d.seq)<=c.seq ORDER BY MAX(d.seq) DESC",
+          "SELECT c.peer,MAX(d.created_at) AS last_at FROM closed_conversations c JOIN direct_messages d ON d.user_id=c.user_id AND d.peer=c.peer WHERE c.user_id=? GROUP BY c.peer,c.seq HAVING MAX(d.seq)<=c.seq ORDER BY MAX(d.seq) DESC",
         )
         .all(me.id) as { peer: string; last_at: string }[]
     ).map((row) => ({ ...this.peerInfo(row.peer, me), last_at: row.last_at }));
@@ -2420,7 +2297,8 @@ export class Store {
     const set = (target: string, latest: number, upTo?: number) =>
       this.db
         .prepare(
-          "INSERT INTO read_marks VALUES(?,?,?) ON CONFLICT(user_id,target) DO UPDATE SET seq=MAX(seq,excluded.seq)",
+          // A mark only moves forward; one that stays where it was changes nothing.
+          "INSERT INTO read_marks VALUES(?,?,?) ON CONFLICT(user_id,target) DO UPDATE SET seq=excluded.seq WHERE excluded.seq>read_marks.seq",
         )
         .run(me.id, target, Math.min(upTo ?? latest, latest));
     const latestIn = (channelId: string) =>

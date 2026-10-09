@@ -9,6 +9,7 @@ import { Federation } from "../src/federation.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { sqliteOnly } from "./sqlite-only.js";
 
 const secret = "s".repeat(43);
 function fixture() {
@@ -133,7 +134,7 @@ test("direct messages share browser history and XMPP identities retain independe
   f.store.setUserBlock(f.bob, `${f.store.baseUrl}/actors/users/${f.alice.id}`, true);
   denied(() => f.xmpp.operation({ ...f.input(), operation: "direct", to: f.b.jid, body: "blocked", id: "dm-2" }));
   denied(() => f.xmpp.sendDirect(f.alice, "other@remote.example", "No federation"));
-  f.store.db.prepare("INSERT OR REPLACE INTO instance_settings VALUES('federation_enabled','true')").run();
+  f.store.db.prepare("INSERT INTO instance_settings VALUES('federation_enabled','true') ON CONFLICT(key) DO UPDATE SET value=excluded.value").run();
   f.store.db.prepare("UPDATE users SET federation_send=1,federation_receive=1 WHERE id=?").run(f.alice.id);
   f.xmpp.sendDirect(f.alice, "other@remote.example", "Remote native DM");
   f.xmpp.operation({ operation: "direct", from: "other@remote.example/device", to: f.a.jid, body: "Remote reply", id: "remote-1" });
@@ -233,7 +234,7 @@ test("removing an edited message projects a distinct stable tombstone ID", () =>
   f.store.close();
 });
 
-test("version 8 migration preserves native IDs and archive correction references", t => {
+test("version 8 migration preserves native IDs and archive correction references", sqliteOnly, t => {
   const directory = mkdtempSync(join(tmpdir(), "archipel-xmpp-scope-migration-"));
   const path = join(directory, "archive.sqlite");
   let store = new Store(path);
@@ -247,7 +248,7 @@ test("version 8 migration preserves native IDs and archive correction references
   store.db.exec("DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP INDEX xmpp_message_ids_sender; ALTER TABLE xmpp_message_ids DROP COLUMN scope; CREATE UNIQUE INDEX legacy_stanza_ids ON xmpp_message_ids(sender,stanza_id); PRAGMA user_version=8");
   store.close(); store = new Store(path); xmpp = new Xmpp(store, config);
   t.after(() => { store.close(); rmSync(directory, { recursive: true, force: true }); });
-  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 19);
+  assert.equal(store.db.version(), 19);
   assert.equal(xmpp.archive(alice, { room: input.to }).messages[0].stanza_id, "old-id");
   xmpp.operation({ ...input, stream: "new-stream", id: "new-id", replace: "old-id", body: "Migrated correction" });
   assert.equal(store.message(result.id).body, "Migrated correction");
@@ -265,7 +266,7 @@ test("XMPP avatar reads, writes, cache responses and queued requests obey curren
   assert.match(card.avatar!.hash, /^[0-9a-f]{40}$/);
   denied(() => f.xmpp.vcard({ from: "other@remote.example/phone", to: f.a.jid }));
   f.store.db.prepare("UPDATE instance_settings SET value='true' WHERE key='federation_enabled'").run();
-  f.store.db.prepare("INSERT OR REPLACE INTO instance_settings VALUES('federation_enabled','true')").run();
+  f.store.db.prepare("INSERT INTO instance_settings VALUES('federation_enabled','true') ON CONFLICT(key) DO UPDATE SET value=excluded.value").run();
   f.store.db.prepare("UPDATE users SET federation_send=1,federation_receive=1 WHERE id=?").run(f.alice.id);
   assert.equal(f.xmpp.vcard({ from: "other@remote.example/phone", to: f.a.jid }).avatar?.image, image);
   const peer = "xmpp:other@remote.example";

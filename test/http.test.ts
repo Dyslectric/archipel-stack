@@ -12,7 +12,7 @@ test("remote avatar endpoints require membership and current federation and bloc
   const f = await application(t, { xmppDomain: "chat.example", xmppBridgeSecret: "s".repeat(43) });
   const alice = browser(f.origin), bob = browser(f.origin);
   await alice.login("alice"); const member = await bob.login("bob");
-  f.store.db.prepare("INSERT OR REPLACE INTO instance_settings VALUES('federation_enabled','true')").run();
+  f.store.db.prepare("INSERT INTO instance_settings VALUES('federation_enabled','true') ON CONFLICT(key) DO UPDATE SET value=excluded.value").run();
   f.store.db.prepare("UPDATE users SET federation_receive=1,federation_send=1 WHERE id=?").run(member.id);
   const image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC1lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
   const peers = ["xmpp:other@remote.example", "https://remote.example/actors/users/other"];
@@ -125,7 +125,7 @@ test("external room HTTP APIs require session, CSRF, ownership and private adapt
   const f = await application(t, { xmppDomain: "chat.example", xmppBridgeSecret: "s".repeat(43) });
   const alice = browser(f.origin), bob = browser(f.origin), anonymous = browser(f.origin);
   const user = await alice.login("alice"); await bob.login("bob");
-  f.store.db.prepare("INSERT OR REPLACE INTO instance_settings VALUES('federation_enabled','true')").run();
+  f.store.db.prepare("INSERT INTO instance_settings VALUES('federation_enabled','true') ON CONFLICT(key) DO UPDATE SET value=excluded.value").run();
   f.store.db.prepare("UPDATE users SET federation_subscribe=1,federation_receive=1,federation_send=1,federation_post=1 WHERE id=?").run(user.id);
   const data = { room: "test@muc.remote.example", nick: "alice" };
   assert.equal((await anonymous.request("/api/xmpp/rooms", "POST", data)).status, 401);
@@ -1220,4 +1220,111 @@ test("request limits follow the configured per-minute rates", async (t) => {
   };
   assert.deepEqual((await statuses("/federation/emojis", 3)).map((s) => s === 429), [false, false, true]);
   assert.deepEqual((await statuses("/api/session", 4)).map((s) => s === 429), [false, false, false, true]);
+});
+
+// Reads a browser's event stream: every notice it is sent, in order.
+async function events(t: TestContext, origin: string, who: ReturnType<typeof browser>) {
+  const abort = new AbortController();
+  t.after(() => abort.abort());
+  const response = await fetch(`${origin}/api/events`, {
+    signal: abort.signal,
+    headers: { Cookie: [...who.cookies].map(([key, value]) => `${key}=${value}`).join("; ") },
+  });
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type")!, /^text\/event-stream/);
+  const notices: Record<string, unknown>[] = [],
+    state = { ended: false };
+  void (async () => {
+    let text = "";
+    const decoder = new TextDecoder();
+    try {
+      for (const reader = response.body!.getReader(); ; ) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        text += decoder.decode(value, { stream: true });
+        for (let end; (end = text.indexOf("\n\n")) >= 0; text = text.slice(end + 2)) {
+          const data = /^data: (.*)$/m.exec(text.slice(0, end));
+          if (data) notices.push(JSON.parse(data[1]));
+        }
+      }
+    } catch {
+      /* The test hung up. */
+    }
+    state.ended = true;
+  })();
+  return {
+    state,
+    // What arrived since the last look, once the instance has had time to tell.
+    async take() {
+      await new Promise((done) => setTimeout(done, 200));
+      return notices.splice(0);
+    },
+  };
+}
+
+test("open browsers are told what changed for them: their channels, their own messages, and nothing kept from them", async (t) => {
+  const f = await application(t);
+  const alice = browser(f.origin), bob = browser(f.origin), charlie = browser(f.origin);
+  await alice.login("alice");
+  const bobUser = await bob.login("bob");
+  await charlie.login("charlie");
+  assert.equal((await fetch(`${f.origin}/api/events`)).status, 401);
+  const channel = async (name: string, visibility: string) =>
+    (await (await bob.request("/api/channels", "POST", { name, description: "A place", mode: "timeline", visibility, admission: "open" })).json()).id as string;
+  const quiet = await channel("quiet", "members"), open = await channel("open", "public");
+  const admin = await events(t, f.origin, alice), member = await events(t, f.origin, bob), outsider = await events(t, f.origin, charlie);
+  const hub = f.app.locals.events as { listeners: number };
+  assert.equal(hub.listeners, 3);
+
+  // A channel kept to its members is news to them and to administrators, and to nobody else.
+  assert.equal((await bob.request(`/api/channels/${quiet}/messages`, "POST", { body: "Among members" })).status, 201);
+  assert.deepEqual(await member.take(), [{ channels: [quiet] }]);
+  assert.deepEqual(await admin.take(), [{ channels: [quiet] }]);
+  assert.deepEqual(await outsider.take(), []);
+  // A public one is news to everyone; several changes at once are told of once.
+  f.store.transaction(() => {
+    for (const body of ["One", "Two", "Three"]) f.store.post(f.store.user(bobUser.id), open, { body });
+  });
+  for (const stream of [member, admin, outsider]) assert.deepEqual(await stream.take(), [{ channels: [open] }]);
+  // What was undone is not announced.
+  assert.throws(() => f.store.transaction(() => {
+    f.store.post(f.store.user(bobUser.id), open, { body: "Never said" });
+    throw new Error("Undone");
+  }), /Undone/);
+  assert.deepEqual(await outsider.take(), []);
+  // A direct message concerns the two who share it; reading concerns the reader.
+  assert.equal((await bob.request("/api/dms", "POST", { to: "charlie", body: "Between us" })).status, 201);
+  assert.deepEqual(await member.take(), [{ me: true }]);
+  assert.deepEqual(await outsider.take(), [{ me: true }]);
+  assert.deepEqual(await admin.take(), []);
+  const last = (await (await bob.request(`/api/channels/${open}/messages`)).json()).messages.at(-1).seq;
+  assert.equal((await bob.request("/api/read", "POST", { target: open, seq: last })).status, 200);
+  assert.deepEqual(await member.take(), [{ me: true }]);
+  // Reading no further than before changes nothing, and what only fetches is silent.
+  assert.equal((await bob.request("/api/read", "POST", { target: open, seq: last })).status, 200);
+  for (const path of ["/api/session", "/api/overview", "/api/channels", "/api/emojis", "/api/inbox", `/api/channels/${open}`, `/api/channels/${open}/messages`])
+    assert.equal((await bob.request(path)).status, 200);
+  for (const stream of [member, admin, outsider]) assert.deepEqual(await stream.take(), []);
+  // What changes the instance for everyone asks everyone to look again.
+  assert.equal((await charlie.request(`/api/channels/${open}/join`, "POST", {})).status, 200);
+  for (const stream of [member, admin, outsider]) assert.deepEqual(await stream.take(), [{ all: true }]);
+  // A stream lasts as long as its session.
+  assert.equal((await charlie.request("/api/logout", "POST", {})).status, 200);
+  await outsider.take();
+  assert.equal(outsider.state.ended, true);
+  assert.equal(member.state.ended, false);
+  assert.equal(hub.listeners, 2);
+});
+
+test("the sending pace is the administrator's to set through the API", async (t) => {
+  const f = await application(t);
+  const alice = browser(f.origin), bob = browser(f.origin);
+  await alice.login("alice"); await bob.login("bob");
+  assert.equal((await bob.request("/api/admin/federation/sending", "PATCH", { batch: 5, interval: 2000 })).status, 403);
+  assert.equal((await alice.request("/api/admin/federation/sending", "PATCH", { batch: 5, interval: 50 })).status, 400);
+  assert.deepEqual((await (await alice.request("/api/admin/federation")).json()).sending, { batch: 20, interval: 1000 });
+  const saved = await alice.request("/api/admin/federation/sending", "PATCH", { batch: 5, interval: 2000 });
+  assert.equal(saved.status, 200);
+  assert.deepEqual((await saved.json()).sending, { batch: 5, interval: 2000 });
+  assert.deepEqual((await (await alice.request("/api/admin/federation")).json()).sending, { batch: 5, interval: 2000 });
 });

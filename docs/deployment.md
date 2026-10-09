@@ -51,6 +51,71 @@ only when using the loopback overlay. The database lives in the named
 `archipel-data` volume at `/app/data/archipel.sqlite`. Keep this volume across
 rebuilds and updates.
 
+## PostgreSQL
+
+SQLite is the default and needs nothing else. To keep the instance in PostgreSQL
+instead, answer `postgres` when setup asks for the database (or run it with
+`DATABASE=postgres`). Setup adds `compose.postgres.yaml`, which runs PostgreSQL 17
+beside the application on a private network with its data in the
+`archipel-postgres` volume, and writes a generated password to `.env.postgres`.
+The application waits for the database to be ready, and creates its tables the
+first time it starts.
+
+```sh
+DATABASE=postgres python3 scripts/setup.py --non-interactive
+docker compose up --build -d
+```
+
+To use a PostgreSQL server you already run, leave `compose.postgres.yaml` out and
+set `DATABASE_URL=postgres://user:password@host:5432/database` for the
+application (the password can instead be given as `PGPASSWORD`; add
+`?sslmode=require` for TLS). The database must be empty and its user able to
+create tables and the `citext` extension, which Archipel uses for names that
+match whatever their case. When `DATABASE_URL` is set, `DATABASE_PATH` is ignored.
+
+### Moving an instance from SQLite
+
+Reconfigure with `postgres`, then, with the application stopped, copy the
+instance across before starting it again:
+
+```sh
+docker compose down
+DATABASE=postgres python3 scripts/setup.py --non-interactive
+docker compose build
+docker compose run --rm archipel node scripts/migrate-postgres.js
+docker compose up -d
+```
+
+The command reads the SQLite file in the data volume and writes every table,
+attachment and counter into PostgreSQL in one transaction: either all of it
+arrives, and is counted again to be sure, or PostgreSQL is left empty. It
+refuses a database that already holds an instance. The SQLite file is not
+removed; once you are satisfied, keep it as a backup or delete it. Outside
+Docker the same command is
+`npm run migrate:postgres -- --from ./data/archipel.sqlite --to postgres://…`.
+
+Attachments, avatars and emoji stay in the database either way, so `pg_dump`
+of the one database is a complete backup:
+
+```sh
+docker compose exec postgres pg_dump -U archipel -Fc archipel > archipel.dump
+```
+
+Archipel holds one connection and runs one statement at a time on it, as it does
+with SQLite, so a small PostgreSQL is enough. Run a single application process
+per database.
+
+## Live updates behind a proxy
+
+Open browsers hold one long-lived request to `/api/events` (server-sent events)
+and are told through it when to look again. Traefik passes it through as it is.
+Other proxies must not buffer or compress that response; nginx needs
+`proxy_buffering off` for it (the response also asks for this with
+`X-Accel-Buffering: no`). A comment line every 25 seconds keeps idle timeouts,
+including Cloudflare's, from closing a quiet stream. Without HTTP/2 a browser
+allows only six connections to one host; Archipel keeps a stream only for tabs
+that are in view, so many open tabs do not use them up.
+
 ## External proxy network and trusted proxy
 
 For a Traefik deployment, setup asks for:
@@ -160,6 +225,7 @@ Node setup are read as prompt defaults, and `.env.container` credentials are
 retained when reconfiguring an existing container deployment.
 For a previous native installation, transfer its SQLite database to the named
 Docker volume before startup if you need to retain its accounts and history.
+To move it into PostgreSQL instead, see [PostgreSQL](#postgresql).
 
 The image builds the browser and compiles the server to JavaScript, installs
 production dependencies, and runs as the unprivileged `node` user. Compose uses
@@ -184,7 +250,7 @@ sign in pending, identify their subject with the identities command above, add
 it to configuration, and restart. Their existing session then gains admin access.
 
 Custom emoji images, admission decisions, and message edits are part of the
-SQLite database and use the existing persistent volume and backup procedure.
+database and use its persistent volume and backup procedure.
 
 ## Diagnose sign-in failures
 

@@ -5,6 +5,8 @@ export interface Config {
   host: string;
   baseUrl: string;
   databasePath: string;
+  /** A postgres:// address; when set, PostgreSQL is used instead of the SQLite file. */
+  databaseUrl: string;
   devAuth: boolean;
   oidcIssuer: string;
   oidcClientId: string;
@@ -22,8 +24,13 @@ export interface Config {
   rateLimitAuth: number;
   rateLimitMedia: number;
   rateLimitFederation: number;
-  /** Outbound federation deliveries per second, across all peers. */
+  /**
+   * Outbound federation deliveries: how many go out at a time across all peers, and how many
+   * milliseconds pass between one round and the next. Both are the defaults of the instance
+   * settings an administrator can change while the instance runs.
+   */
   federationSendRate: number;
+  federationSendInterval: number;
   /** Outbound federation deliveries per minute to one peer host; 0 is unlimited. */
   federationPeerSendRate: number;
 }
@@ -56,6 +63,9 @@ export function loadConfig(env = process.env): Config {
       throw new Error(`${key} must be an integer between ${min} and ${max}`);
     return Number(value);
   };
+  const databaseUrl = env.DATABASE_URL || "";
+  if (databaseUrl && !/^postgres(ql)?:\/\/./.test(databaseUrl))
+    throw new Error("DATABASE_URL must be a postgres:// address");
   const registrationMode = env.REGISTRATION_MODE || "open";
   if (!["open", "invite_only"].includes(registrationMode))
     throw new Error("REGISTRATION_MODE must be open or invite_only");
@@ -115,6 +125,7 @@ export function loadConfig(env = process.env): Config {
     host,
     baseUrl: base.origin,
     databasePath: env.DATABASE_PATH || "./data/archipel.sqlite",
+    databaseUrl,
     devAuth,
     oidcIssuer,
     oidcClientId,
@@ -131,6 +142,7 @@ export function loadConfig(env = process.env): Config {
     rateLimitMedia: rate("RATE_LIMIT_MEDIA", 600),
     rateLimitFederation: rate("RATE_LIMIT_FEDERATION", 120),
     federationSendRate: rate("FEDERATION_SEND_RATE", 20, 1, 1000),
+    federationSendInterval: rate("FEDERATION_SEND_INTERVAL", 1000, 100, 600000),
     federationPeerSendRate: rate("FEDERATION_PEER_SEND_RATE", 100, 0),
     adminSubjects: (env.ADMIN_SUBJECTS || "")
       .split(",")

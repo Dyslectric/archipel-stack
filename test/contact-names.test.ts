@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store, Problem } from "../src/store.js";
+import { sqliteOnly } from "./sqlite-only.js";
 
 test("remote contact names are personal and cover DM history, sidebar and inbox without changing addresses", t => {
   const store = new Store(":memory:");
@@ -71,7 +72,7 @@ test("contact names validate input, preserve existing names on errors and reject
   assert.throws(() => store.setContactName(alice, peer, "Changed"), e => e instanceof Problem && e.status === 403);
 });
 
-test("upgrading version seven preserves the archive and contact names survive restart", t => {
+test("upgrading version seven preserves the archive and contact names survive restart", sqliteOnly, t => {
   const directory = mkdtempSync(join(tmpdir(), "archipel-contact-names-")), path = join(directory, "db.sqlite");
   t.after(() => rmSync(directory, {recursive:true,force:true}));
   let store = new Store(path);
@@ -81,7 +82,7 @@ test("upgrading version seven preserves the archive and contact names survive re
     .run("saved", alice.id, peer, new Date().toISOString());
   store.db.exec("DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; PRAGMA user_version=7"); store.close();
   store = new Store(path);
-  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 19);
+  assert.equal(store.db.version(), 19);
   store.setContactName(alice, peer, "Saved name"); store.close();
   store = new Store(path);
   try {

@@ -15,6 +15,7 @@ import { logSignInFailure } from "./auth-log.js";
 import { Xmpp } from "./xmpp.js";
 import { Mirrors } from "./mirrors.js";
 import { Push } from "./push.js";
+import { Events } from "./events.js";
 
 function cookie(req: Request, name: string) {
   const value = (req.headers.cookie || "")
@@ -35,7 +36,9 @@ export function createApp(config: Config, store: Store) {
   const xmpp = new Xmpp(store, config);
   const mirrors = new Mirrors(store, xmpp);
   const push = new Push(store, config);
+  const events = new Events(store);
   const app = express();
+  app.locals.events = events;
   app.locals.mirrors = mirrors;
   app.locals.push = push;
   app.locals.federation = federation;
@@ -393,6 +396,11 @@ export function createApp(config: Config, store: Store) {
       );
     next();
   });
+  // What changed is pushed to open browsers. An account still waiting for approval listens
+  // too: being let in is news to it.
+  app.get("/api/events", (req, res) => {
+    events.open(req, res, cookie(req, authCookie));
+  });
   const user = (res: Response) => res.locals.user as User;
   // Unapproved identities can inspect their session and sign out, but cannot
   // access members, messages, actor/object endpoints, or management APIs.
@@ -502,6 +510,9 @@ export function createApp(config: Config, store: Store) {
     res.json(
       store.setUserRole(user(res), String(req.params.id), req.body?.role_id),
     ),
+  );
+  app.patch("/api/admin/federation/sending", (req, res) =>
+    res.json(federation.setSending(user(res), req.body || {})),
   );
   app.post("/api/admin/federation/blocks", (req, res) =>
     res.json(federation.block(user(res), req.body || {})),

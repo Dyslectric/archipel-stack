@@ -22,7 +22,7 @@ docker compose up --build -d
 Configure your OIDC issuer/client during setup, then open
 **http://127.0.0.1:8788** and sign in. Use separate browser profiles or a private
 window to try two users. Create a channel, join it from the other session, and send messages.
-New messages and permission changes appear within about 2.5 seconds.
+New messages and permission changes are pushed to open browsers as they happen.
 
 For containers, external proxy networks, trusted proxy addresses, and Traefik
 routing, see [setup and deployment](docs/deployment.md). Start with
@@ -35,7 +35,11 @@ usernames match. New instances start without fabricated channels or conversation
 
 ## Available now
 
-- Persistent users, channels, memberships, sessions, messages, and custom emoji in SQLite.
+- Persistent users, channels, memberships, sessions, messages, and custom emoji in SQLite,
+  or in PostgreSQL when `DATABASE_URL` names one; an existing instance moves over with
+  one command. See [setup and deployment](docs/deployment.md#postgresql).
+- Live updates over a server-sent event stream: an open browser is told when something
+  it shows has changed, and only then asks for it.
 - Standard :emoji: shortcodes, a searchable picker, admin-managed instance images,
   and personal uploads or locally saved emoji adopted from other instances.
 - Author-only message editing, edited markers, and conflict checks.
@@ -79,7 +83,8 @@ The server is Express/TypeScript; the browser uses TypeScript and Vite. Runtime
 files live in the persistent Docker volume at `/app/data`. Preserve the database and `BASE_URL` across restarts: they
 hold identity and object continuity. To back up a running instance, use SQLite's
 backup facilities; to copy files directly, stop the server first and copy the
-whole data directory. Do not copy only a live WAL database's main file.
+whole data directory. Do not copy only a live WAL database's main file. With
+PostgreSQL, use `pg_dump`.
 
 For XMPP, supply an account domain during setup. Setup can obtain certificates
 for it and `channels.<domain>` through ACME or an existing Traefik resolver, and
@@ -249,6 +254,8 @@ for the permission matrix, deployment requirements, and current limits.
 python3 -m unittest discover -s test -p 'test_*.py' -v
 docker build --target build -t archipel-checks .
 docker run --rm archipel-checks npm test
+# The same suite against PostgreSQL: every database a test opens becomes a schema there.
+ARCHIPEL_TEST_POSTGRES=postgres://user:password@127.0.0.1:5432/archipel_test npm test
 docker build --target browser-tests -t archipel-browser-tests .
 docker run --rm --init --shm-size=1g archipel-browser-tests
 ```
@@ -265,4 +272,4 @@ with Python only; Compose integration checks also run when Compose is installed.
 
 The current federation profile connects Archipel instances. Lemmy/PieFed adapters,
 mirrors/rehoming, service-worker push, attachments, and Jitsi calls remain future
-work. Live browser updates currently use polling; see [milestones](docs/milestones.md).
+work. See [milestones](docs/milestones.md).

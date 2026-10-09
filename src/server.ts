@@ -3,14 +3,22 @@ import { Store } from "./store.js";
 import { createApp } from "./app.js";
 
 const config = loadConfig();
-const store = new Store(config.databasePath, config.baseUrl);
+const store = new Store(config.databaseUrl || config.databasePath, config.baseUrl);
 const app = createApp(config, store);
-const federationTimer = setInterval(() => {
-  void app.locals.federation
-    .tick()
-    .catch(() => console.error("Federation worker failed."));
-}, 1000);
-federationTimer.unref();
+// Queued deliveries go out in rounds, as far apart as the instance's settings say.
+let federationTimer: NodeJS.Timeout;
+const federate = () => {
+  clearTimeout(federationTimer);
+  federationTimer = setTimeout(() => {
+    void app.locals.federation
+      .tick()
+      .catch(() => console.error("Federation worker failed."))
+      .finally(federate);
+  }, app.locals.federation.sending().interval);
+  federationTimer.unref();
+};
+app.locals.federation.paceChanged = federate;
+federate();
 const pushTimer = setInterval(() => {
   void app.locals.push
     .tick()
@@ -19,6 +27,7 @@ const pushTimer = setInterval(() => {
 pushTimer.unref();
 const server = app.listen(config.port, config.host, () => {
   console.log(`Archipel is running at ${config.baseUrl}`);
+  console.log(`Database: ${store.db.dialect === "postgres" ? "PostgreSQL" : "SQLite"}.`);
   console.log(
     config.devAuth
       ? "Local development accounts: alice (admin), bob, charlie."
@@ -26,14 +35,16 @@ const server = app.listen(config.port, config.host, () => {
   );
 });
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
-  process.on(signal, () =>
+  process.on(signal, () => {
+    // Event streams never finish by themselves, and the server waits for what is open.
+    app.locals.events.close();
     server.close(() => {
-      clearInterval(federationTimer);
+      clearTimeout(federationTimer);
       clearInterval(pushTimer);
       store.close();
       process.exit(0);
-    }),
-  );
+    });
+  });
 }
 server.on("error", (error) => {
   console.error(error.message);

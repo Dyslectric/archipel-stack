@@ -14,6 +14,7 @@ import {
   go,
   hooks,
   icon,
+  refreshTimes,
   state,
   themeSeg,
   toast,
@@ -22,7 +23,13 @@ import {
   type Overview,
   type Session,
 } from "./shared.js";
-import { redrawChat, refreshCurrent, resetChat, showChat } from "./chat.js";
+import {
+  chatChannel,
+  redrawChat,
+  refreshCurrent,
+  resetChat,
+  showChat,
+} from "./chat.js";
 import { adoptLayout, renderSidebar, toggleSidebar } from "./sidebar.js";
 import { adoptPrefs } from "./prefs.js";
 import { disablePush, syncPush } from "./notify.js";
@@ -289,6 +296,7 @@ document.addEventListener("click", (event) => {
 });
 
 async function boot() {
+  hangUp();
   state.session = await api<Session>("/session");
   resetChat();
   state.channels = [];
@@ -301,6 +309,9 @@ async function boot() {
   state.userBlocks = [];
   state.prefs = {};
   if (!state.session.user) return renderLogin();
+  // What was just loaded is fresh; the stream's opening look can wait its turn.
+  refreshedAt = Date.now();
+  listen();
   if (state.session.user.admission_status !== "approved")
     return renderAdmission();
   [state.channels, state.emojis] = await Promise.all([
@@ -346,68 +357,164 @@ function connection(up: boolean) {
     ? `Connected to ${state.session.instance}`
     : "Connection interrupted. Retrying…";
 }
-setInterval(() => {
+// ---- keeping up: the server says when something on screen may have changed, and the page
+// looks again at what the notice names ----
+type Notice = { all?: true; me?: true; admin?: true; channels?: string[] };
+const GAP = 1500; // a busy conversation is looked at again this often at most
+let stream: EventSource | null = null,
+  news: Notice | null = null,
+  refreshTimer = 0,
+  refreshedAt = 0,
+  retryTimer = 0;
+async function refresh(notice: Notice) {
   const session = state.session;
-  if (!session?.user || refreshBusy || document.hidden) return;
-  refreshBusy = true;
-  void (async () => {
-    try {
-      const latest = await api<Session>("/session");
-      if (session.user!.admission_status !== "approved") {
-        if (!latest.user || latest.user.admission_status === "approved")
-          await boot();
-        else if (JSON.stringify(latest.user) !== JSON.stringify(session.user)) {
-          state.session = latest;
-          renderAdmission();
-        }
-        return;
-      }
-      if (!latest.user || latest.user.admission_status !== "approved") {
-        await boot();
-        return;
-      }
-      const policyChanged =
-        federationPolicy(latest) !== federationPolicy(session);
-      const profileChanged = latest.user.avatar_url !== session.user!.avatar_url ||
-        latest.user.display_name !== session.user!.display_name;
-      state.session = latest;
-      if (profileChanged) renderAccount();
-      const emojis = await api<CustomEmoji[]>("/emojis"),
-        emojisChanged = JSON.stringify(emojis) !== JSON.stringify(state.emojis);
-      state.emojis = emojis;
-      if (policyChanged || emojisChanged) redrawChat(policyChanged);
-      [state.channels] = await Promise.all([
-        api<Channel[]>("/channels"),
-        loadOverview(),
-      ]);
-      renderSidebar();
+  if (!session?.user) return;
+  try {
+    // A notice about conversations alone leaves the account, channel list and emoji as they are.
+    if (!notice.all && !notice.me && session.user.admission_status === "approved") {
       const view = document.querySelector<HTMLElement>(".app")?.dataset.view;
-      if (view === "chat") {
-        await refreshCurrent();
-        await tickInbox();
+      if (notice.channels) {
+        await loadOverview();
+        renderSidebar();
+        if (view === "chat") {
+          const open = chatChannel()?.id;
+          if (open && notice.channels.includes(open)) await refreshCurrent();
+          await tickInbox();
+        }
       }
-      else if (view === "channels") tickChannels();
-      else if (view === "xmpp") await tickXmppRooms();
-      else await tickSettings();
+      if (notice.admin && view === "settings") await tickSettings();
       connection(true);
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 401) {
-        document.querySelector<HTMLDialogElement>("dialog")?.close();
-        await boot();
-        toast("Your session ended. Sign in again.");
-      } else if (error instanceof ApiError && [403, 404].includes(error.status)) {
-        // Access to what's on screen was taken away, or it was deleted.
-        document.querySelector<HTMLDialogElement>("dialog")?.close();
-        resetChat();
-        localStorage.removeItem("archipel-channel");
-        toast(error.message, true);
-        go("#/channels");
-      } else connection(false);
-    } finally {
-      refreshBusy = false;
+      return;
     }
-  })();
-}, 2500);
+    const latest = await api<Session>("/session");
+    if (session.user.admission_status !== "approved") {
+      if (!latest.user || latest.user.admission_status === "approved")
+        await boot();
+      else if (JSON.stringify(latest.user) !== JSON.stringify(session.user)) {
+        state.session = latest;
+        renderAdmission();
+      }
+      return;
+    }
+    if (!latest.user || latest.user.admission_status !== "approved") {
+      await boot();
+      return;
+    }
+    const policyChanged =
+      federationPolicy(latest) !== federationPolicy(session);
+    const profileChanged = latest.user.avatar_url !== session.user.avatar_url ||
+      latest.user.display_name !== session.user.display_name;
+    state.session = latest;
+    if (profileChanged) renderAccount();
+    const emojis = await api<CustomEmoji[]>("/emojis"),
+      emojisChanged = JSON.stringify(emojis) !== JSON.stringify(state.emojis);
+    state.emojis = emojis;
+    if (policyChanged || emojisChanged) redrawChat(policyChanged);
+    [state.channels] = await Promise.all([
+      api<Channel[]>("/channels"),
+      loadOverview(),
+    ]);
+    renderSidebar();
+    const view = document.querySelector<HTMLElement>(".app")?.dataset.view;
+    if (view === "chat") {
+      await refreshCurrent();
+      await tickInbox();
+    }
+    else if (view === "channels") tickChannels();
+    else if (view === "xmpp") await tickXmppRooms();
+    else await tickSettings();
+    connection(true);
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      document.querySelector<HTMLDialogElement>("dialog")?.close();
+      await boot();
+      toast("Your session ended. Sign in again.");
+    } else if (error instanceof ApiError && [403, 404].includes(error.status)) {
+      // Access to what's on screen was taken away, or it was deleted.
+      document.querySelector<HTMLDialogElement>("dialog")?.close();
+      resetChat();
+      localStorage.removeItem("archipel-channel");
+      toast(error.message, true);
+      go("#/channels");
+    } else {
+      connection(false);
+      // Nothing was learned; the stream coming back, or the next notice, asks again.
+      throw error;
+    }
+  }
+}
+// Notices that arrive while the page is busy, hidden or was only just refreshed are kept
+// together, and looked at in one go.
+function changed(notice: Notice) {
+  news = {
+    ...news,
+    ...notice,
+    ...(news?.channels || notice.channels
+      ? { channels: [...new Set([...(news?.channels || []), ...(notice.channels || [])])] }
+      : {}),
+  };
+  if (refreshTimer || refreshBusy || document.hidden) return;
+  refreshTimer = window.setTimeout(
+    () => {
+      refreshTimer = 0;
+      const notice = news;
+      news = null;
+      if (!notice) return;
+      refreshBusy = true;
+      refreshedAt = Date.now();
+      let failed = false;
+      void refresh(notice)
+        .catch(() => {
+          // Tried again with the next notice, or when the stream is back: never in a loop.
+          failed = true;
+          news = { ...news, all: true };
+        })
+        .finally(() => {
+          refreshBusy = false;
+          if (news && !failed) changed({});
+        });
+    },
+    Math.max(0, refreshedAt + GAP - Date.now()),
+  );
+}
+function hangUp() {
+  clearTimeout(retryTimer);
+  retryTimer = 0;
+  stream?.close();
+  stream = null;
+}
+// One stream while the page is in view. Whenever it opens, or opens again after a break,
+// everything is looked at once: whatever happened meanwhile was not announced.
+function listen() {
+  if (stream || retryTimer || document.hidden || !state.session?.user) return;
+  const source = (stream = new EventSource("/api/events"));
+  source.onopen = () => {
+    connection(true);
+    changed({ all: true });
+  };
+  source.onmessage = (event) => changed(JSON.parse(event.data));
+  source.onerror = () => {
+    connection(false);
+    // The browser reconnects by itself after a dropped connection. Refused outright, the
+    // session may be over: asking for it again finds out, and signs the page out if so.
+    if (source.readyState !== EventSource.CLOSED || stream !== source) return;
+    stream = null;
+    changed({ all: true });
+    retryTimer = window.setTimeout(() => {
+      retryTimer = 0;
+      listen();
+    }, 4000);
+  };
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) hangUp();
+  else listen();
+});
+addEventListener("online", listen);
+// Times such as "5 minutes ago" age without anything having changed.
+setInterval(() => {
+  if (!document.hidden) refreshTimes();
+}, 30000);
 void boot().catch((error) => {
   app.innerHTML = `<main class="page"><div class="card narrow"><h1>Could not reach Archipel</h1><p class="muted">${esc(error.message)}</p><button type="button" id="retry">Try again</button></div></main>`;
   $("#retry").addEventListener("click", () => location.reload());

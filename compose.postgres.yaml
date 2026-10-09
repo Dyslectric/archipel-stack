@@ -1,0 +1,60 @@
+# PostgreSQL instead of the SQLite file: a database beside the application, on a network of
+# its own. python3 scripts/setup.py adds this file and generates the password; by hand, add
+# this file to COMPOSE_FILE and write .env.postgres with the same password under two names:
+#   POSTGRES_PASSWORD=...
+#   PGPASSWORD=...
+# An instance already running on SQLite is moved over once, while it is stopped:
+#   docker compose run --rm archipel node scripts/migrate-postgres.js
+services:
+  archipel:
+    env_file:
+      - path: .env.postgres
+        format: raw
+    environment:
+      # The password is not part of the address: the client reads PGPASSWORD.
+      DATABASE_URL: postgres://archipel@postgres:5432/archipel
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - default
+      - database
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    env_file:
+      - path: .env.postgres
+        format: raw
+    environment:
+      POSTGRES_USER: archipel
+      POSTGRES_DB: archipel
+      # Text compares byte by byte in Archipel's tables either way; this keeps the rest plain.
+      POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C
+    volumes:
+      - archipel-postgres:/var/lib/postgresql/data
+    networks:
+      - database
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U archipel -d archipel"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+
+networks:
+  database:
+    internal: true
+
+volumes:
+  archipel-postgres:

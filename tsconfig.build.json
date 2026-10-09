@@ -6,5 +6,5 @@
     "rootDir": ".",
     "sourceMap": true
   },
-  "include": ["src/**/*.ts", "scripts/identities.ts"]
+  "include": ["src/**/*.ts", "scripts/identities.ts", "scripts/migrate-postgres.ts"]
 }

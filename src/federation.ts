@@ -68,6 +68,8 @@ export class Federation {
   private busy = false;
   private peerSends = new Map<string, number[]>();
   private rosterAsked = new Map<string, number>();
+  /** Called when an administrator changes how often deliveries go out. */
+  paceChanged?: () => void;
   constructor(
     readonly store: Store,
     readonly config: Config,
@@ -399,6 +401,7 @@ export class Federation {
   status() {
     return {
       enabled: this.enabled(),
+      sending: this.sending(),
       blocks: this.store.db
         .prepare("SELECT * FROM federation_blocks ORDER BY target")
         .all(),
@@ -413,6 +416,46 @@ export class Federation {
         )
         .all(),
     };
+  }
+  private setting(key: string) {
+    return this.store.db
+      .prepare("SELECT value FROM instance_settings WHERE key=?")
+      .get(key)?.value as string | undefined;
+  }
+  // How queued deliveries are paced: how many go out in one round across all peers, and how
+  // long until the next round. The environment gives the defaults; an administrator's choice
+  // is kept with the instance and applies without a restart.
+  sending() {
+    return {
+      batch: Number(this.setting("federation_send_batch") ?? this.config.federationSendRate),
+      interval: Number(
+        this.setting("federation_send_interval") ?? this.config.federationSendInterval,
+      ),
+    };
+  }
+  setSending(admin: User, input: Record<string, unknown>) {
+    this.store.requireAdmin(admin);
+    const whole = (value: unknown, label: string, min: number, max: number) => {
+      if (!Number.isInteger(value) || (value as number) < min || (value as number) > max)
+        throw new Problem(400, `${label} must be a whole number from ${min} to ${max}.`);
+      return value as number;
+    };
+    const batch = whole(input.batch, "Deliveries per round", 1, 1000),
+      interval = whole(input.interval, "Milliseconds between rounds", 100, 600000);
+    this.store.transaction(() => {
+      for (const [key, value] of [
+        ["federation_send_batch", batch],
+        ["federation_send_interval", interval],
+      ] as const)
+        this.store.db
+          .prepare(
+            "INSERT INTO instance_settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+          )
+          .run(key, String(value));
+      this.store.audit(admin.id, "federation.sending", JSON.stringify({ batch, interval }));
+    });
+    this.paceChanged?.();
+    return this.status();
   }
   setEnabled(admin: User, value: unknown) {
     this.store.requireAdmin(admin);
@@ -457,7 +500,7 @@ export class Federation {
     this.store.transaction(() => {
       if (input.blocked)
         this.store.db
-          .prepare("INSERT OR REPLACE INTO federation_blocks VALUES(?,?)")
+          .prepare("INSERT INTO federation_blocks VALUES(?,?) ON CONFLICT(target) DO UPDATE SET kind=excluded.kind")
           .run(target, input.kind);
       else
         this.store.db
@@ -596,8 +639,9 @@ export class Federation {
       .prepare("SELECT id FROM users WHERE remote_actor=?")
       .get(actor.id) as { id: string } | undefined;
     if (existing) {
-      if (actor.type === "Person") this.store.db.prepare("UPDATE users SET display_name=? WHERE id=?")
-        .run(String(actor.name || actor.preferredUsername || "Remote member").slice(0, 80), existing.id);
+      const name = String(actor.name || actor.preferredUsername || "Remote member").slice(0, 80);
+      if (actor.type === "Person") this.store.db.prepare("UPDATE users SET display_name=? WHERE id=? AND display_name!=?")
+        .run(name, existing.id, name);
       return this.store.user(existing.id);
     }
     const id = randomUUID(),
@@ -2393,7 +2437,7 @@ export class Federation {
     if (this.busy) return;
     this.busy = true;
     try {
-      for (let step = 0; step < this.config.federationSendRate; step++) {
+      for (let step = 0, batch = this.sending().batch; step < batch; step++) {
         // Preserve recipient order without allowing an offline or rate-limited peer to hold other peers.
         let delivery:
           | (Outgoing & {

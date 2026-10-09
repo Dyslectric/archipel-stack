@@ -554,11 +554,19 @@ const sections: Section[] = [
     icon: "shield",
     admin: true,
     async draw(el) {
-      const status = await api<{ enabled: boolean }>("/admin/federation");
+      const status = await api<{
+        enabled: boolean;
+        sending: { batch: number; interval: number };
+      }>("/admin/federation");
       el.innerHTML =
         card(
           "Federation",
           `<form class="stack" id="federation-enable"><label class="check"><input type="checkbox" name="enabled" ${status.enabled ? "checked" : ""}> Enable federation for this instance</label>${error}<button>Save federation setting</button></form>`,
+        ) +
+        card(
+          "Sending to other instances",
+          `<form class="stack narrow-form" id="federation-sending"><label>Send every (seconds)<input name="interval" type="number" min="0.1" max="600" step="0.1" required value="${status.sending.interval / 1000}"></label><label>Messages each time<input name="batch" type="number" min="1" max="1000" step="1" required value="${status.sending.batch}"></label>${error}<button>Save sending pace</button></form>`,
+          "What members write in federated channels, and everything else meant for another instance, waits in a queue. Each time, up to this many are sent, across all instances; one that could not be delivered is tried again later.",
         ) +
         card(
           "Who may federate",
@@ -570,6 +578,13 @@ const sections: Section[] = [
         });
         state.session = await api<Session>("/session");
         toast("Federation setting saved.");
+      });
+      onSubmit($("#federation-sending", el), async (data) => {
+        await api("/admin/federation/sending", "PATCH", {
+          interval: Math.round(Number(data.get("interval")) * 1000),
+          batch: Number(data.get("batch")),
+        });
+        toast("Sending pace saved.");
       });
     },
   },

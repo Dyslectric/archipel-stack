@@ -335,6 +335,35 @@ class SetupTests(unittest.TestCase):
         settings = setup.collect_setup({"REGISTRATION_MODE": "invite_only"}, defaults)
         self.assertEqual(settings["REGISTRATION_MODE"], "invite_only")
 
+    def test_postgres_adds_its_overlay_and_keeps_a_stable_private_password(self):
+        plain = setup.collect_setup({}, defaults)
+        self.assertEqual(plain["DATABASE"], "sqlite")
+        self.assertNotIn("compose.postgres.yaml", plain["COMPOSE_FILE"])
+        self.assertEqual(plain["POSTGRES_PASSWORD"], "")
+        settings = setup.collect_setup({"DATABASE": "postgres"}, defaults)
+        self.assertIn("compose.postgres.yaml", settings["COMPOSE_FILE"].split(os.pathsep))
+        self.assertRegex(settings["POSTGRES_PASSWORD"], r"^[A-Za-z0-9_-]{43}$")
+        with tempfile.TemporaryDirectory() as directory:
+            setup.write_setup(directory, settings)
+            public = setup.parse_env((Path(directory) / ".env").read_text())
+            raw = setup.parse_raw_env((Path(directory) / ".env.postgres").read_text())
+            self.assertEqual(public["POSTGRES_PASSWORD"], "")
+            self.assertEqual(public["DATABASE"], "postgres")
+            # The database and the client each read the password under their own name.
+            self.assertEqual(raw, {"POSTGRES_PASSWORD": settings["POSTGRES_PASSWORD"], "PGPASSWORD": settings["POSTGRES_PASSWORD"]})
+            self.assertNotIn(settings["POSTGRES_PASSWORD"], (Path(directory) / ".env.container").read_text())
+            restored = setup.collect_setup({**public, "POSTGRES_PASSWORD": raw["POSTGRES_PASSWORD"]}, defaults)
+            self.assertEqual(restored["POSTGRES_PASSWORD"], settings["POSTGRES_PASSWORD"])
+        with tempfile.TemporaryDirectory() as directory:
+            setup.write_setup(directory, plain)
+            self.assertFalse((Path(directory) / ".env.postgres").exists())
+        with self.assertRaisesRegex(ValueError, "sqlite or postgres"):
+            setup.collect_setup({"DATABASE": "mysql"}, defaults)
+        with self.assertRaisesRegex(ValueError, "POSTGRES_PASSWORD"):
+            setup.collect_setup({"DATABASE": "postgres", "POSTGRES_PASSWORD": "short and spaced"}, defaults)
+        with self.assertRaisesRegex(ValueError, "FEDERATION_SEND_INTERVAL"):
+            setup.collect_setup({"FEDERATION_SEND_INTERVAL": "50"}, defaults)
+
 
 class ComposeTests(unittest.TestCase):
     # Keep this optional: Python-only setup tests do not require Docker installed.
@@ -375,6 +404,20 @@ class ComposeTests(unittest.TestCase):
                         self.assertEqual(labels["traefik.http.routers.archipel2.service"], "archipel2")
                         self.assertEqual(labels["traefik.http.services.archipel2.loadbalancer.server.port"], "8788")
                         self.assertFalse([key for key in labels if ".archipel." in key])
+            with self.subTest(database="postgres"):
+                settings = setup.collect_setup({"DATABASE": "postgres"}, defaults, "container")
+                setup.write_setup(directory, settings)
+                env = {key: value for key, value in os.environ.items() if key not in (*settings, "COMPOSE_FILE", "COMPOSE_PROJECT_NAME", "PGPASSWORD")}
+                result = subprocess.run([*command, "config", "--format", "json"], cwd=directory, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                services = json.loads(result.stdout)["services"]
+                self.assertEqual(services["archipel"]["environment"]["DATABASE_URL"], "postgres://archipel@postgres:5432/archipel")
+                self.assertEqual(services["archipel"]["environment"]["PGPASSWORD"], settings["POSTGRES_PASSWORD"])
+                self.assertEqual(services["postgres"]["environment"]["POSTGRES_PASSWORD"], settings["POSTGRES_PASSWORD"])
+                self.assertEqual(services["archipel"]["depends_on"]["postgres"]["condition"], "service_healthy")
+                # Nothing but the application can reach the database.
+                self.assertNotIn("ports", services["postgres"])
+                self.assertEqual(list(services["postgres"]["networks"]), ["database"])
             settings = setup.collect_setup({"XMPP_DOMAIN": "chat.example.org", "XMPP_CLIENT_PORT": "55222", "XMPP_SERVER_PORT": "55269"}, defaults)
             setup.write_setup(directory, settings)
             env = {key: value for key, value in os.environ.items() if key not in (*settings, "COMPOSE_FILE", "COMPOSE_PROJECT_NAME")}

@@ -204,8 +204,9 @@ boundaries, account binding, deployment model, and acceptance criteria.
 
 The initial implementation uses Node 24, TypeScript, Express, built-in SQLite,
 and a Vite browser client. OIDC uses the same openid-client library family as
-FedIdP. Browser updates poll authorized endpoints; a durable delivery worker
-runs in the server process. A live event transport remains future work.
+FedIdP. PostgreSQL can hold the instance instead of SQLite. Open browsers are
+told of changes over a server-sent event stream and fetch what changed from
+authorized endpoints; a durable delivery worker runs in the server process.
 
 Resolve these product choices before their implementation milestone:
 

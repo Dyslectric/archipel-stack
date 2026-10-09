@@ -21,7 +21,7 @@ supported yet. Local mirrors are described at the end of this document.
    an approval and open the channel.
 
 All switches and grants start disabled, including for admins. They are persisted
-in SQLite and do not require a restart. Browser controls refresh through polling.
+in the database and do not require a restart. Open browsers are told of a change as it happens.
 Admins can block an entire instance origin or a specific remote actor URL and
 inspect recent delivery results in the same panel. Changes are audited.
 
@@ -109,8 +109,15 @@ the selected public address is pinned to the connection. Public HTTPS is require
 in production. Local two-instance testing permits loopback HTTP only when
 development authentication is enabled on a loopback listener and base URL.
 
-The single server process runs the worker every second. Each run sends at most
-`FEDERATION_SEND_RATE` deliveries (default 20) across all peers, and no more
+The single server process sends queued deliveries in rounds. An administrator
+sets the pace under **Settings → Federation → Instance federation → Sending to
+other instances**: how often a round runs (0.1 to 600 seconds) and how many
+deliveries a round sends across all peers (1 to 1000). The change applies at
+once, is audited, and is kept with the instance. Until it is set there, the pace
+comes from `FEDERATION_SEND_INTERVAL` (milliseconds between rounds, default
+1000) and `FEDERATION_SEND_RATE` (deliveries per round, default 20). A slower
+or smaller pace is gentler on small peers; a faster or larger one makes posts in
+federated channels arrive sooner. Whatever the pace, no more
 than `FEDERATION_PEER_SEND_RATE` deliveries per minute (default 100; 0 removes
 the cap) go to any one peer host. A peer at its cap keeps its queue in order
 while other peers continue. Incoming `/federation` requests are limited to
