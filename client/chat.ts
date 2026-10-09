@@ -23,6 +23,7 @@ import {
   promptDialog,
   refreshTimes,
   richHtml,
+  emojiOnly,
   roleLabel,
   sameDay,
   shareDialog,
@@ -458,7 +459,8 @@ const queuedClass = (m: Message) =>
 function bodyHtml(m: Message, cls = "") {
   if (editing === m.id && !m.deleted_at)
     return `<form class="stack inline-form picker-host" data-edit-form="${m.id}">${m.title !== null ? `<input name="title" maxlength="160" value="${esc(m.title)}" aria-label="Thread title" required>` : ""}<textarea name="body" rows="3" maxlength="8000" aria-label="Edited message" required>${esc(m.body)}</textarea><p class="form-error" role="alert"></p><div class="row"><button class="small">Save changes</button><button type="button" class="small secondary" data-cancel-edit>Cancel</button><button type="button" class="icon-button" data-emoji-for aria-label="Choose emoji" title="Emoji">${icon("smile")}</button>${attachButton("data-attach-for")}</div></form>`;
-  return `<div class="message-body${cls ? ` ${cls}` : ""}${m.deleted_at ? " faded" : " markdown"}">${m.deleted_at ? "This message was removed." : richHtml(m.body, m.emojis || [])}</div>`;
+  const big = !m.deleted_at && emojiOnly(m.body, m.emojis || []);
+  return `<div class="message-body${cls ? ` ${cls}` : ""}${m.deleted_at ? " faded" : " markdown"}${big ? " emoji-only" : ""}">${m.deleted_at ? "This message was removed." : richHtml(m.body, m.emojis || [])}</div>`;
 }
 // Direct messages stay as they were sent.
 const mine = (m: Message) =>

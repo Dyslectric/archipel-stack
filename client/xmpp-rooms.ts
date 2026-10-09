@@ -1,4 +1,4 @@
-import { $, action, api, avatar, clock, dayLabel, esc, full, go, icon, nameButton, richHtml, onSubmit, sameDay, shareDialog, state, type XmppRoom } from "./shared.js";
+import { $, action, api, avatar, clock, dayLabel, esc, full, go, icon, nameButton, richHtml, emojiOnly, onSubmit, sameDay, shareDialog, state, type XmppRoom } from "./shared.js";
 import { attachButton, pickFiles, quoteInto } from "./attach.js";
 import { chatFrame, resetChat } from "./chat.js";
 import { renderSidebar } from "./sidebar.js";
@@ -88,7 +88,7 @@ function paint(room: XmppRoom) {
     const name = own ? `<span class="author" title="${esc(m.sender)}">${esc(nick)}</span>`
       : `${nameButton(who, `xmpp:${m.sender_jid || m.sender}`)}${m.sender_jid ? ` <span class="handle">${esc(m.sender_jid)}</span>` : ""}`;
     html += `<article class="message xmpp-message${cont ? " cont" : ""}${status ? ` queued${m.status === "failed" ? " failed" : ""}` : ""}"><div class="msg-gutter">${cont ? time : avatar(who)}</div>
-      <div class="message-content">${cont ? "" : `<div class="message-meta">${name}${time}${note}</div>`}<div class="message-body${m.blocked ? " faded" : " markdown"}">${m.blocked ? esc(m.body) : richHtml(m.body)}</div>${cont ? note : ""}</div>${
+      <div class="message-content">${cont ? "" : `<div class="message-meta">${name}${time}${note}</div>`}<div class="message-body${m.blocked ? " faded" : " markdown"}${!m.blocked && emojiOnly(m.body) ? " emoji-only" : ""}">${m.blocked ? esc(m.body) : richHtml(m.body)}</div>${cont ? note : ""}</div>${
         room.can_post && !m.blocked ? `<div class="message-actions"><button type="button" class="icon-button quote-button" data-quote="${esc(m.id)}" aria-label="Quote ${esc(nick)}" title="Quote">${icon("quote")}</button></div>` : ""}</article>`;
     prev = m;
   }

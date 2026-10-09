@@ -390,6 +390,20 @@ export function emojiHtml(body: string, emojis = state.emojis) {
 // A message as it is shown: Markdown, with emoji.
 export const richHtml = (body: string, emojis = state.emojis) =>
   markdownHtml(body, emojis);
+// A message made of nothing but a few emoji (typed, shortcode or custom) is shown larger.
+const bareEmoji =
+  /^(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|[‍️\u{1f3fb}-\u{1f3ff}⃣]|\s)+$/u;
+export function emojiOnly(body: string, emojis = state.emojis) {
+  let count = 0;
+  for (const part of emojiParts(body, emojis)) {
+    if ("text" in part) {
+      if (!part.text.trim()) continue;
+      if (!bareEmoji.test(part.text)) return false;
+      count += [...part.text.replace(/[\s‍️]/gu, "")].length;
+    } else count++;
+  }
+  return count > 0 && count <= 10;
+}
 export function action(fn: () => Promise<void>) {
   void fn().catch((error) =>
     toast(error.message || "Could not connect. Please try again.", true),

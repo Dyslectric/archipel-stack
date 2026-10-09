@@ -407,6 +407,8 @@ a.attachment > img { object-fit: contain; }
 .spoiler { border-radius: 4px; background: var(--text); color: transparent; cursor: pointer; }
 .spoiler:not(.shown) * { visibility: hidden; }
 .spoiler.shown { background: var(--hover); color: inherit; cursor: auto; }
+.message-body.emoji-only { font-size: 2.4rem; line-height: 1.2; }
+.message-body.emoji-only .custom-emoji { width: 1em; height: 1em; vertical-align: -0.15em; }
 .message-body.faded { color: var(--muted); font-style: italic; }
 /* Sent from here but not yet taken by the other instance. */
 .message.queued, .direct-message.queued { background: color-mix(in srgb, var(--hover) 55%, var(--card)); }
