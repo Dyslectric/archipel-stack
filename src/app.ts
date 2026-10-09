@@ -583,6 +583,13 @@ export function createApp(config: Config, store: Store) {
     );
     res.status(202).json({ peer: sent.peer, queued: true });
   });
+  // Conversations the reader closed: out of their sidebar until reopened or written in again.
+  app.get("/api/dms/closed", (_req, res) =>
+    res.json(store.closedConversations(user(res))),
+  );
+  app.post("/api/dms/close", (req, res) =>
+    res.json(store.setDirectClosed(user(res), req.body?.peer, req.body?.closed)),
+  );
   app.get("/api/overview", (_req, res) => res.json({ ...store.overview(user(res)), xmpp_enabled: !!config.xmppDomain, xmpp_rooms: xmpp.remoteRooms.list(user(res)) }));
   app.post("/api/user-blocks", (req, res) =>
     res.json(store.setUserBlock(user(res), req.body?.peer, req.body?.blocked)),

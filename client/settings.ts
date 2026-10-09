@@ -26,12 +26,14 @@ import {
   refreshTimes,
   roleLabel,
   type Channel,
+  type Conversation,
   type CustomEmoji,
+  type Overview,
   type Session,
   type User,
 } from "./shared.js";
 import { chatChannel, resetChat } from "./chat.js";
-import { sidebarFrame } from "./sidebar.js";
+import { renderSidebar, sidebarFrame } from "./sidebar.js";
 import { mirrorDialog } from "./mirrors.js";
 import {
   disablePush,
@@ -323,6 +325,32 @@ const sections: Section[] = [
           hidden: false,
           notify: null,
         });
+        await ctx.refresh();
+      });
+    },
+  },
+  {
+    group: "personal",
+    key: "closed",
+    label: "Closed conversations",
+    about: "Direct conversations you closed, and how to get them back.",
+    icon: "chat",
+    async draw(el, ctx) {
+      const closed =
+        await api<(Conversation & { last_at: string })[]>("/dms/closed");
+      el.innerHTML = card(
+        "Closed conversations",
+        `<ul class="plain member-list">${closed.length ? closed.map((c) => `<li class="member-row">${avatar(c)}<div class="grow"><strong>${esc(c.display_name)}</strong> <span class="muted">@${esc(c.username)}</span><div class="muted small">Last message ${when(c.last_at)}</div></div><button type="button" class="secondary small" data-reopen="${esc(c.peer)}">Reopen</button></li>`).join("") : '<li class="muted">You have no closed conversations.</li>'}</ul>`,
+        "Close a conversation from its menu in the sidebar. Its messages are kept, and it comes back by itself when either of you writes in it again.",
+      );
+      onClick(el, "[data-reopen]", async (button) => {
+        await api("/dms/close", "POST", {
+          peer: button.dataset.reopen,
+          closed: false,
+        });
+        state.dms = (await api<Overview>("/overview")).dms;
+        renderSidebar();
+        toast("Conversation reopened.");
         await ctx.refresh();
       });
     },

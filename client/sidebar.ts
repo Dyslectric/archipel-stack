@@ -6,6 +6,7 @@ import {
   channelIcon,
   dmHref,
   esc,
+  go,
   icon,
   modeLabel,
   popup,
@@ -19,7 +20,13 @@ import {
   type SideSection,
   type XmppRoom,
 } from "./shared.js";
-import { chatChannel, chatTopic, redrawChat, sortedTopics } from "./chat.js";
+import {
+  chatChannel,
+  chatTopic,
+  redrawChat,
+  resetChat,
+  sortedTopics,
+} from "./chat.js";
 import { isHidden, pickPref, prefItems } from "./prefs.js";
 
 // The sidebar: direct messages, channels, then XMPP rooms. Each section folds away, and its conversations can be
@@ -168,6 +175,23 @@ async function newGroup(kind: SideKind, firstItem?: string) {
   save(kind, section);
   if (firstItem) moveItem(firstItem, group.id, null);
 }
+// A closed conversation leaves the sidebar until something new is said in it, or it is reopened
+// from the settings. One only just opened has nothing to close yet: leaving it is enough.
+function closeConversation(id: string) {
+  const peer = id.slice(3);
+  action(async () => {
+    if (state.dms.some((c) => c.peer === peer))
+      await api("/dms/close", "POST", { peer, closed: true });
+    state.dms = state.dms.filter((c) => c.peer !== peer);
+    delete state.unread[id];
+    if (chatChannel()?.id === id) {
+      resetChat();
+      localStorage.removeItem("archipel-channel");
+      go("#/inbox");
+    }
+    renderSidebar();
+  });
+}
 
 // ---- the markup ----
 const silenced = (id: string) =>
@@ -304,7 +328,7 @@ function itemMenu(button: HTMLElement) {
   const panel = popup(
     button,
     `<div class="menu-section" role="menu">${item("up", "Move up", "arrow-up")}${item("down", "Move down", "arrow-down")}</div>
-    <div class="menu-section" role="menu"><div class="menu-label">Group</div>${section.groups.map((g) => item(`to:${g.id}`, g.name, "folder", g === inGroup)).join("")}${inGroup ? item("to:", "No group", "x") : ""}${item("new", "New group…", "folder-plus")}</div>${kind === "xmpp" ? "" : prefItems(kind === "dms" ? "dm" : "channel", id)}`,
+    <div class="menu-section" role="menu"><div class="menu-label">Group</div>${section.groups.map((g) => item(`to:${g.id}`, g.name, "folder", g === inGroup)).join("")}${inGroup ? item("to:", "No group", "x") : ""}${item("new", "New group…", "folder-plus")}</div>${kind === "xmpp" ? "" : prefItems(kind === "dms" ? "dm" : "channel", id)}${kind === "dms" ? `<div class="menu-section" role="menu">${item("close", "Close conversation", "x")}</div>` : ""}`,
   );
   panel?.addEventListener("click", (e) => {
     pickPref(e, id, () => {
@@ -316,6 +340,7 @@ function itemMenu(button: HTMLElement) {
     if (name === "up") stepItem(id, -1);
     else if (name === "down") stepItem(id, 1);
     else if (name === "new") void newGroup(kind, id);
+    else if (name === "close") closeConversation(id);
     else if (name?.startsWith("to:")) moveItem(id, name.slice(3), null);
   });
 }

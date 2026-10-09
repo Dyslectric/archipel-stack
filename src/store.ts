@@ -198,7 +198,7 @@ export class Store {
     const version = (
       this.db.prepare("PRAGMA user_version").get() as { user_version: number }
     ).user_version;
-    if (version > 18) throw new Error("Database is newer than this application");
+    if (version > 19) throw new Error("Database is newer than this application");
     if (version === 0)
       this.transaction(() =>
         this.db.exec(
@@ -300,6 +300,10 @@ export class Store {
     if (version < 18)
       this.transaction(() => this.db.exec(readFileSync(
         new URL("../migrations/018_optional_titles.sql", import.meta.url), "utf8",
+      )));
+    if (version < 19)
+      this.transaction(() => this.db.exec(readFileSync(
+        new URL("../migrations/019_closed_conversations.sql", import.meta.url), "utf8",
       )));
   }
   close() {
@@ -2145,7 +2149,7 @@ export class Store {
     const me = this.active(user.id);
     const peers = this.db
       .prepare(
-        "SELECT peer FROM direct_messages WHERE user_id=? GROUP BY peer ORDER BY MAX(seq) DESC LIMIT 200",
+        "SELECT peer FROM direct_messages d WHERE user_id=? GROUP BY peer HAVING MAX(seq)>COALESCE((SELECT seq FROM closed_conversations c WHERE c.user_id=d.user_id AND c.peer=d.peer),0) ORDER BY MAX(seq) DESC LIMIT 200",
       )
       .all(me.id) as unknown as { peer: string }[];
     return peers.flatMap(({ peer }) => {
@@ -2178,6 +2182,44 @@ export class Store {
         },
       ];
     });
+  }
+  // A closed conversation is left out of the reader's list, inbox and counts until something
+  // new is said in it, or they reopen it. Nothing is deleted, and the other side isn't told.
+  setDirectClosed(user: User, peerValue: unknown, closed: unknown) {
+    const me = this.active(user.id),
+      peer = this.peerInfo(text(peerValue, "Recipient", 2048)).peer;
+    if (typeof closed !== "boolean")
+      throw new Problem(400, "Choose whether the conversation is closed.");
+    if (closed) {
+      const latest = Number(
+        this.db
+          .prepare(
+            "SELECT COALESCE(MAX(seq),0) AS n FROM direct_messages WHERE user_id=? AND peer=?",
+          )
+          .get(me.id, peer)?.n,
+      );
+      if (!latest) throw new Problem(404, "You have no conversation with this user.");
+      this.db
+        .prepare(
+          "INSERT INTO closed_conversations VALUES(?,?,?) ON CONFLICT(user_id,peer) DO UPDATE SET seq=excluded.seq",
+        )
+        .run(me.id, peer, latest);
+    } else
+      this.db
+        .prepare("DELETE FROM closed_conversations WHERE user_id=? AND peer=?")
+        .run(me.id, peer);
+    return { peer, closed };
+  }
+  // The ones still closed, latest first, for the settings page that reopens them.
+  closedConversations(user: User) {
+    const me = this.active(user.id);
+    return (
+      this.db
+        .prepare(
+          "SELECT c.peer,MAX(d.created_at) AS last_at FROM closed_conversations c JOIN direct_messages d ON d.user_id=c.user_id AND d.peer=c.peer WHERE c.user_id=? GROUP BY c.peer HAVING MAX(d.seq)<=c.seq ORDER BY MAX(d.seq) DESC",
+        )
+        .all(me.id) as { peer: string; last_at: string }[]
+    ).map((row) => ({ ...this.peerInfo(row.peer, me), last_at: row.last_at }));
   }
   // Shaped like channel messages, so the same conversation view shows both.
   private directInfo(

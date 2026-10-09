@@ -91,7 +91,7 @@ test("upgrading turns per-account federation switches into roles without changin
   const alice = store.loginIdentity("urn:archipel:development", "alice", "alice", [], true);
   const bob = store.loginIdentity("urn:archipel:development", "bob", "bob", []);
   const carol = store.loginIdentity("urn:archipel:development", "charlie", "charlie", []);
-  store.db.exec("ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; ALTER TABLE xmpp_remote_rooms DROP COLUMN attempts; ALTER TABLE xmpp_remote_rooms DROP COLUMN retry_at; PRAGMA user_version=12");
+  store.db.exec("DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; ALTER TABLE xmpp_remote_rooms DROP COLUMN attempts; ALTER TABLE xmpp_remote_rooms DROP COLUMN retry_at; PRAGMA user_version=12");
   store.db.prepare("UPDATE users SET federation_send=1,federation_receive=1,federation_subscribe=1,federation_post=1 WHERE id=?").run(bob.id);
   store.db.prepare("UPDATE users SET federation_receive=1,federation_subscribe=1 WHERE id=?").run(carol.id);
   store.db.exec(readFileSync(new URL("../migrations/013_roles_attachments.sql", import.meta.url), "utf8"));

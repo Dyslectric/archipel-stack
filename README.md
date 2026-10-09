@@ -143,6 +143,11 @@ history is preserved. Choose **Unblock user** from the same menu to restore
 contact and channel content. Personal blocks persist across sign-ins and restarts
 and apply to local and remote users without changing anyone else's channel access.
 
+Open the menu on a direct conversation in the sidebar and choose **Close
+conversation** to take it out of your sidebar and inbox. Its messages are kept
+and the other person isn't told. It comes back when either of you writes in it
+again, or when you reopen it under **Settings → Closed conversations**.
+
 Type `:smile:`, `:heart:`, `:+1:`, or another standard shortcode in a message.
 The Emoji button searches standard and custom emoji and inserts a shortcode.
 An instance administrator can open their profile → **Instance administration** →
