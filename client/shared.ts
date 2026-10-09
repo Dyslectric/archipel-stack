@@ -394,24 +394,49 @@ export function emojiHtml(body: string, emojis = state.emojis) {
     )
     .join("");
 }
-// Hovering over a custom emoji enlarges it and says whose it is and where it comes from.
+// A custom emoji that is not in the reader's own set yet (someone's personal one, or one from
+// another server) can be kept: its id, if so.
+export function adoptable(img: Element) {
+  const id = /^\/api\/emojis\/([^/]+)\/image$/.exec(img.getAttribute("src") || "")?.[1];
+  return id && !state.emojis.some((e) => e.id === id) ? id : null;
+}
+// Hovering over a custom emoji enlarges it and says whose it is and where it comes from. The
+// pointer can move onto the card, where clicking the picture keeps an emoji that can be kept.
 if (typeof document !== "undefined") {
-  let card: HTMLElement | null = null;
+  let card: HTMLElement | null = null,
+    shown: Element | null = null,
+    leaving = 0;
   const hide = () => {
+    clearTimeout(leaving);
     card?.remove();
-    card = null;
+    card = shown = null;
+  };
+  // Long enough to cross the gap between the emoji and its card.
+  const leave = () => {
+    clearTimeout(leaving);
+    leaving = window.setTimeout(hide, 220);
   };
   const show = (img: HTMLImageElement) => {
+    clearTimeout(leaving);
+    if (shown === img && card) return;
     hide();
+    shown = img;
     const { kind, origin, owner } = img.dataset,
       name = (img.getAttribute("alt") || "").replaceAll(":", ""),
       what = kind === "personal" ? "Personal emoji" : "Instance emoji",
-      where = origin ? ` on ${esc(origin)}` : "";
+      where = origin ? ` on ${esc(origin)}` : "",
+      id = adoptable(img),
+      picture = `<img src="${esc(img.getAttribute("src") || "")}" alt="">`;
     card = document.createElement("div");
     card.className = "emoji-card";
-    card.setAttribute("role", "tooltip");
-    card.innerHTML = `<img src="${esc(img.getAttribute("src") || "")}" alt=""><div class="ec-text"><strong>:${esc(name)}:</strong><span class="ec-kind">${what}</span><span class="ec-kind">${kind === "personal" && owner ? `From ${esc(owner)}${where}` : `From ${esc(origin || "this instance")}`}</span>${img.hasAttribute("data-remote") ? '<span class="ec-hint">Click to keep it</span>' : ""}</div>`;
+    card.innerHTML = `${id ? `<button type="button" class="ec-keep" aria-label="Keep :${esc(name)}:" title="Keep this emoji">${picture}</button>` : picture}<div class="ec-text"><strong>:${esc(name)}:</strong><span class="ec-kind">${what}</span><span class="ec-kind">${kind === "personal" && owner ? `From ${esc(owner)}${where}` : `From ${esc(origin || "this instance")}`}</span>${id ? '<span class="ec-hint">Click the picture to keep it</span>' : ""}</div>`;
     document.body.append(card);
+    card.addEventListener("mouseenter", () => clearTimeout(leaving));
+    card.addEventListener("mouseleave", leave);
+    card.querySelector(".ec-keep")?.addEventListener("click", () => {
+      hide();
+      adoptEmojiDialog({ id: id!, name });
+    });
     const at = img.getBoundingClientRect(),
       box = card.getBoundingClientRect(),
       left = Math.max(8, Math.min(innerWidth - box.width - 8, at.left + at.width / 2 - box.width / 2)),
@@ -419,15 +444,13 @@ if (typeof document !== "undefined") {
     card.style.left = `${left}px`;
     card.style.top = `${top}px`;
   };
-  const emoji = (e: Event) =>
-    (e.target as Element | null)?.closest?.<HTMLImageElement>("img.custom-emoji[data-kind]") ?? null;
   document.addEventListener("mouseover", (e) => {
-    const img = emoji(e);
+    const at = e.target as Element | null,
+      img = at?.closest?.<HTMLImageElement>("img.custom-emoji[data-kind]");
     if (img) show(img);
+    else if (card && !card.contains(at)) leave();
   });
-  document.addEventListener("mouseout", (e) => {
-    if (emoji(e)) hide();
-  });
+  document.addEventListener("mouseleave", leave);
   document.addEventListener("scroll", hide, true);
   document.addEventListener("keydown", (e) => e.key === "Escape" && hide());
 }
@@ -559,7 +582,7 @@ export function promptDialog(
     $<HTMLInputElement>("input", dialog).select();
   });
 }
-// An emoji from another server, found in a message: keep a copy as your own shortcode, or
+// Someone else's emoji, found in a message: keep a copy as your own shortcode, or
 // (as an administrator) for everyone on this instance.
 export function adoptEmojiDialog(emoji: { id: string; name: string }) {
   const admin = !!state.session.user?.admin,
@@ -568,7 +591,7 @@ export function adoptEmojiDialog(emoji: { id: string; name: string }) {
   for (let n = 2; taken.has(name); n++) name = `${emoji.name}_${n}`;
   const dialog = document.createElement("dialog");
   dialog.className = "card dialog";
-  dialog.innerHTML = `<h2>Keep this emoji</h2><p class="muted row"><img class="custom-emoji big" src="/api/emojis/${esc(emoji.id)}/image" alt=""><span>From another server, as <code>:${esc(emoji.name)}:</code>.</span></p>
+  dialog.innerHTML = `<h2>Keep this emoji</h2><p class="muted row"><img class="custom-emoji big" src="/api/emojis/${esc(emoji.id)}/image" alt=""><span>Shown in the message as <code>:${esc(emoji.name)}:</code>.</span></p>
     <form class="stack"><label>Shortcode<input name="name" value="${esc(name)}" required maxlength="64" pattern="[a-z0-9][a-z0-9_\-]*" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
     ${admin ? `<fieldset class="stack"><legend>Keep it</legend><label class="check"><input type="radio" name="scope" value="personal" checked> For me only</label><label class="check"><input type="radio" name="scope" value="instance"> For everyone on this instance</label></fieldset>` : ""}
     <p class="form-error" role="alert"></p><div class="row end"><button type="button" class="secondary" data-cancel>Cancel</button><button>Keep emoji</button></div></form>`;

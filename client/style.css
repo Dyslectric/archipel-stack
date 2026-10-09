@@ -697,9 +697,11 @@ dialog.share-dialog li + li { margin-top: 6px; }
 .reaction.mine { background: color-mix(in srgb, var(--accent) 18%, transparent); border-color: var(--accent); }
 .reaction:disabled { cursor: default; }
 .emoji-card { position: fixed; z-index: 60; display: flex; gap: 12px; align-items: center; max-width: 280px; padding: 10px 14px;
-  background: var(--card); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow-pop); pointer-events: none;
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow-pop);
   animation: pop-in .12s ease-out; }
 .emoji-card img { width: 64px; height: 64px; object-fit: contain; flex: none; }
+.emoji-card .ec-keep { padding: 4px; border: 1px solid transparent; border-radius: 10px; background: none; cursor: pointer; flex: none; line-height: 0; }
+.emoji-card .ec-keep:hover, .emoji-card .ec-keep:focus-visible { background: var(--hover); border-color: var(--line); }
 .emoji-card .ec-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; overflow-wrap: anywhere; }
 .emoji-card .ec-kind { font-size: .85rem; color: var(--muted); }
 .emoji-card .ec-hint { font-size: .8rem; color: var(--muted); font-style: italic; }

@@ -2,6 +2,7 @@ import {
   $,
   $$,
   action,
+  adoptable,
   adoptEmojiDialog,
   api,
   avatar,
@@ -484,7 +485,15 @@ function react(id: string, emoji: string, on: boolean) {
     const reactions = await api<Reaction[]>(`/messages/${id}/reactions`, "PUT", { emoji, on });
     if (token !== generation) return;
     const m = messages.find((m) => m.id === id);
-    if (m) m.reactions = reactions;
+    if (m && current?.remote_actor) {
+      const list = (m.reactions || []).map((r) => ({ ...r })),
+        had = list.find((r) => r.emoji === emoji);
+      if (had && had.mine !== on) {
+        had.count += on ? 1 : -1;
+        had.mine = on;
+      } else if (!had && on) list.push({ emoji, count: 1, mine: true });
+      m.reactions = list.filter((r) => r.count > 0);
+    } else if (m) m.reactions = reactions;
     render();
   });
 }
@@ -943,9 +952,9 @@ function wireFeed() {
       renderComposer();
       $("#message-body").focus();
     } else if ((hit = on<HTMLImageElement>(".message-body img.custom-emoji"))) {
-      // An emoji that came with a message from another server can be kept.
-      const id = /^\/api\/emojis\/([^/]+)\/image$/.exec(hit.getAttribute("src") || "")?.[1];
-      if (id && !state.emojis.some((e) => e.id === id))
+      // An emoji that is someone else's (theirs alone, or another server's) can be kept.
+      const id = adoptable(hit);
+      if (id)
         adoptEmojiDialog({ id, name: (hit.getAttribute("alt") || "emoji").replaceAll(":", "") });
     } else if ((hit = on("[data-react]"))) {
       react(hit.dataset.react!, hit.dataset.emoji!, hit.getAttribute("aria-pressed") !== "true");

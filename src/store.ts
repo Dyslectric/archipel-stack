@@ -895,13 +895,20 @@ export class Store {
     });
     return this.emojis().find((e) => e.name === next);
   }
-  // Keeps a copy of an emoji from another server's message, for the reader alone or for the instance.
+  // Keeps a copy of someone else's emoji seen in a message, for the reader alone or for the instance.
   adoptCachedEmoji(user: User, id: string, input: Record<string, unknown>) {
     this.active(user.id);
+    // One that came with a message from another server, or another member's own.
     const cached = this.db
-      .prepare("SELECT source_url,mime,image FROM remote_emoji_cache WHERE id=?")
-      .get(id) as { source_url: string; mime: string; image: Uint8Array } | undefined;
-    if (!cached) throw new Problem(404, "That emoji is not from another server.");
+      .prepare(
+        "SELECT source_url,mime,image,NULL AS user_id FROM remote_emoji_cache WHERE id=? UNION ALL SELECT source_url,mime,image,user_id FROM personal_emojis WHERE id=?",
+      )
+      .get(id, id) as
+      | { source_url: string; mime: string; image: Uint8Array; user_id: string | null }
+      | undefined;
+    if (!cached) throw new Problem(404, "That emoji cannot be kept.");
+    if (cached.user_id === user.id && input.scope === "personal")
+      throw new Problem(409, "That emoji is already yours.");
     if (input.scope === "instance") {
       this.requireAdmin(user);
       return this.insertEmoji(user, this.instanceEmojiName(input.name), cached.image, cached.mime);
@@ -940,16 +947,10 @@ export class Store {
     const origin = new URL(this.baseUrl).host;
     return [
       ...this.emojis().map((e) => ({ ...e, kind: "instance" as const, origin })),
-      ...this.personalEmojis(user).map(({ source_url, ...e }) => ({
+      ...this.personalEmojis(user).map(({ source_url: _, ...e }) => ({
         ...e,
         kind: "personal" as const,
-        origin: (() => {
-          try {
-            return source_url ? new URL(source_url).host : origin;
-          } catch {
-            return origin;
-          }
-        })(),
+        origin,
         owner: user.username,
       })),
     ];
@@ -1665,7 +1666,7 @@ export class Store {
             {
               ...e,
               kind: found.kind,
-              origin: found.source ? host(found.source) : here,
+              origin: found.kind === "remote" && found.source ? host(found.source) : here,
               ...(found.owner ? { owner: found.owner } : {}),
             },
           ]

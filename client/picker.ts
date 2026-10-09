@@ -204,9 +204,9 @@ export function togglePicker(
   opener.setAttribute("aria-expanded", "true");
   closeOpen = close;
   document.addEventListener("pointerdown", outside, true);
-  // Beside an inline form or reactions the panel opens below; it opens above when the room below
+  // Beside an inline form the panel opens below; it opens above when the room below
   // is short, so the timeline does not have to scroll to make space.
-  const below = host.matches(".inline-form, .reactions");
+  const below = host.matches(".inline-form");
   panel.classList.toggle("below", below);
   const box = host.getBoundingClientRect(),
     room = { above: box.top - 8, below: innerHeight - box.bottom - 8 },

@@ -1025,5 +1025,9 @@ test("instance emoji can be renamed by admins; emoji cached from another server 
   assert.equal(store.adoptCachedEmoji(bob, "remote1", { name: "farway", scope: "personal" })?.name, "farway");
   assert.deepEqual(store.emojiCatalog(bob).map((e) => e.name).sort(), ["farway", "greeting", "occupied"]);
   assert.equal(store.adoptCachedEmoji(alice, "remote1", { name: "farway", scope: "instance" })?.name, "farway");
+  // Another member's own emoji on this instance can be kept too; one's own cannot be kept twice.
+  const bobs = store.personalEmojis(bob).find((e) => e.name === "farway")!;
+  denied(() => store.adoptCachedEmoji(bob, bobs.id, { name: "again", scope: "personal" }), 409);
+  assert.equal(store.adoptCachedEmoji(alice, bobs.id, { name: "from_bob", scope: "personal" })?.name, "from_bob");
   store.close();
 });

@@ -996,6 +996,14 @@ export class Federation {
     if (message.deleted_at) throw new Problem(409, "Removed messages cannot be reacted to.");
     if (typeof input.emoji !== "string" || typeof input.on !== "boolean" || !/^[a-z0-9_+-]{1,64}$/i.test(input.emoji))
       throw new Problem(400, "Choose an emoji.");
+    if (
+      input.on &&
+      !standardEmojis.has(input.emoji) &&
+      !this.store.db
+        .prepare("SELECT 1 FROM message_reactions WHERE message_id=? AND emoji=?")
+        .get(id, input.emoji)
+    )
+      throw new Problem(400, "Only standard emoji can be added in a channel hosted on another instance.");
     this.queue(
       "React",
       this.userActor(user),
@@ -2170,14 +2178,14 @@ export class Federation {
           target = this.messageAt(channel.id, reaction.target);
         if (
           reaction.channel !== sender.id ||
-          !target ||
           typeof reaction.emoji !== "string" ||
           !/^[a-z0-9_+-]{1,64}$/i.test(reaction.emoji) ||
           typeof reaction.on !== "boolean"
         )
           throw new Problem(400, "Invalid reaction.");
-        const author = this.remoteUser(reactor!);
-        this.store.applyReaction(author.id, target.id, reaction.emoji, reaction.on);
+        // A message from before this instance followed the channel may not be here.
+        if (target)
+          this.store.applyReaction(this.remoteUser(reactor!).id, target.id, reaction.emoji, reaction.on);
       } else if (activity.type === "Announce") {
         const channel = this.store.db
           .prepare("SELECT * FROM channels WHERE remote_actor=?")
