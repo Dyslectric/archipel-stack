@@ -5,6 +5,7 @@ import {
   verify,
   createPublicKey,
 } from "node:crypto";
+import { standardEmojis } from "./emojis.js";
 import type { Request } from "express";
 import type { Config } from "./config.js";
 import {
@@ -103,6 +104,7 @@ export class Federation {
           this.relay(message, type, user);
       },
       channel: (channel, change) => this.channelChanged(channel, change),
+      reaction: (user, message, emoji, on) => this.relayReaction(user, message, emoji, on),
       direct: (user, peer) => {
         let reachable = true;
         try {
@@ -231,6 +233,7 @@ export class Federation {
         admission: channel.admission,
         showMembers: !!channel.show_members,
         hideHandles: !!channel.hide_handles,
+        reactions: !!channel.reactions,
       };
     }
     return {
@@ -322,8 +325,8 @@ export class Federation {
   // A followed channel shows its members here what its home shows them there.
   private keepPrivacy(channelId: string, actor: Doc) {
     this.store.db
-      .prepare("UPDATE channels SET show_members=?,hide_handles=? WHERE id=?")
-      .run(Number(actor.showMembers !== false), Number(actor.hideHandles === true), channelId);
+      .prepare("UPDATE channels SET show_members=?,hide_handles=?,reactions=? WHERE id=?")
+      .run(Number(actor.showMembers !== false), Number(actor.hideHandles === true), Number(actor.reactions !== false), channelId);
   }
   private channelChanged(channel: Channel, change: "rename" | "privacy" | "delete") {
     const actor = this.channelActor(channel),
@@ -892,6 +895,7 @@ export class Federation {
           name: e.name,
           id: e.id,
           url: `${this.config.baseUrl}/federation/emojis/${e.id}/image`,
+          ...this.store.emojiOwner(e.id),
         })),
       },
       this.userActor(user),
@@ -936,6 +940,73 @@ export class Federation {
       channel.id,
     );
   }
+  // The message of a channel that an object address stands for, here or on its home.
+  private messageAt(channelId: string, object: unknown) {
+    const local = `${this.config.baseUrl}/objects/messages/`;
+    return this.store.db
+      .prepare(
+        "SELECT id FROM messages WHERE channel_id=? AND (remote_object=? OR (? LIKE ? AND id=?))",
+      )
+      .get(channelId, String(object), String(object), `${local}%`, String(object).slice(local.length)) as
+      | { id: string }
+      | undefined;
+  }
+  private reactionObject(channel: Channel, message: Message, emoji: string, on: boolean) {
+    return {
+      type: "Reaction",
+      id: `${this.config.baseUrl}/federation/objects/${randomUUID()}`,
+      target: message.remote_object || `${this.config.baseUrl}/objects/messages/${message.id}`,
+      channel: this.channelActor(channel),
+      emoji,
+      on,
+    };
+  }
+  // Tells the channel's followers about a reaction its home accepted.
+  private relayReaction(user: User, message: Message, emoji: string, on: boolean) {
+    const channel = this.store.channel(message.channel_id);
+    if (this.importing || channel.remote_actor || !channel.federation_enabled) return;
+    if (user.remote_actor?.startsWith("xmpp:")) return;
+    const recipients = (
+      this.store.db
+        .prepare("SELECT actor FROM federation_follows WHERE channel_id=? AND status='accepted'")
+        .all(channel.id) as unknown as { actor: string }[]
+    ).map((f) => f.actor);
+    if (!recipients.length) return;
+    this.queue(
+      "Announce",
+      this.channelActor(channel),
+      this.activity("React", this.userActor(user), this.reactionObject(channel, message, emoji, on)),
+      recipients,
+      "relay",
+      user.id,
+      channel.id,
+    );
+  }
+  // A reaction on a followed channel goes to its home, which sends it back to everyone, us included.
+  remoteReact(user: User, id: string, input: Doc) {
+    this.require(user, "federation_send");
+    this.require(user, "federation_post");
+    this.require(user, "federation_subscribe");
+    const message = this.store.message(id),
+      channel = this.store.channel(message.channel_id);
+    this.store.requireRead(user, channel);
+    if (!channel.remote_actor || !this.store.role(channel.id, user.id))
+      throw new Problem(403, "Subscribe and wait for channel admission before reacting.");
+    if (!channel.reactions) throw new Problem(403, "Reactions are turned off in this channel.");
+    if (message.deleted_at) throw new Problem(409, "Removed messages cannot be reacted to.");
+    if (typeof input.emoji !== "string" || typeof input.on !== "boolean" || !/^[a-z0-9_+-]{1,64}$/i.test(input.emoji))
+      throw new Problem(400, "Choose an emoji.");
+    this.queue(
+      "React",
+      this.userActor(user),
+      this.reactionObject(channel, message, input.emoji, input.on),
+      [channel.remote_actor],
+      "post",
+      user.id,
+      channel.id,
+    );
+    return this.store.reactionsOf(user, id);
+  }
   async sendDirect(user: User, value: unknown, bodyValue: unknown) {
     this.store.requirePermission(user, "direct_messages");
     this.require(user, "federation_send");
@@ -961,6 +1032,7 @@ export class Federation {
         emoji: emojis.slice(0, 8).map((e) => ({
           ...e,
           url: `${this.config.baseUrl}/federation/emojis/${e.id}/image`,
+          ...this.store.emojiOwner(e.id),
         })),
       },
       this.userActor(user),
@@ -1086,6 +1158,7 @@ export class Federation {
         emoji: emojis.slice(0, 8).map((e) => ({
           ...e,
           url: `${this.config.baseUrl}/federation/emojis/${e.id}/image`,
+          ...this.store.emojiOwner(e.id),
         })),
       },
       this.userActor(user),
@@ -1534,7 +1607,7 @@ export class Federation {
         (typeof note.name !== "string" || note.name.length > 160))
     )
       throw new Problem(400, "Invalid remote message.");
-    const emojis: { id: string; name: string; url: string }[] = [];
+    const emojis: { id: string; name: string; url: string; personal?: boolean; owner?: string }[] = [];
     if (
       note.emoji !== undefined &&
       (!Array.isArray(note.emoji) || note.emoji.length > 8)
@@ -1562,6 +1635,11 @@ export class Federation {
         id: cached.id,
         name: emoji.name,
         url: `/api/emojis/${cached.id}/image`,
+        ...(emoji.personal === true &&
+        typeof emoji.owner === "string" &&
+        /^[a-zA-Z0-9._-]{1,64}$/.test(emoji.owner)
+          ? { personal: true, owner: emoji.owner }
+          : {}),
       });
     }
     return { note, actor, emojis };
@@ -1864,6 +1942,7 @@ export class Federation {
     const profileRelay = activity.type === "Announce" && sender.type === "Group" && object?.type === "Update" && object.object?.type === "Person";
     const channelUpdate = activity.type === "Update" && object?.type === "Group";
     let renamed: Doc | undefined;
+    let reactor: Doc | undefined;
     if (channelUpdate) {
       if (sender.type !== "Group" || object.id !== sender.id)
         throw new Problem(403, "Channel update must belong to its signing actor.");
@@ -1881,6 +1960,13 @@ export class Federation {
       const recipients = this.store.db.prepare("SELECT 1 FROM federation_subscriptions s JOIN users u ON u.id=s.user_id WHERE s.channel_id=? AND s.status='accepted' AND u.banned=0 AND u.admission_status='approved' AND u.federation_receive=1 AND u.federation_subscribe=1").get(channel.id);
       if (!recipients) throw new Problem(403, "No permitted profile recipients.");
       await this.actor(object.actor, true);
+    } else if (activity.type === "React") {
+      if (sender.type !== "Person" || object?.type !== "Reaction")
+        throw new Problem(403, "Only a person can react.");
+    } else if (activity.type === "Announce" && object?.type === "React") {
+      if (sender.type !== "Group" || typeof object.actor !== "string" || object.object?.type !== "Reaction")
+        throw new Problem(400, "Invalid channel distribution activity.");
+      reactor = await this.actor(object.actor);
     } else if (["Create", "Update"].includes(activity.type)) {
       if (object?.attributedTo !== sender.id || sender.type !== "Person")
         throw new Problem(
@@ -2049,6 +2135,49 @@ export class Federation {
             "UPDATE federation_subscriptions SET status=? WHERE follow_id=?",
           )
           .run(accepted ? "accepted" : "rejected", object.id);
+      } else if (activity.type === "React") {
+        const home = `${this.config.baseUrl}/actors/channels/`;
+        if (typeof object.channel !== "string" || !object.channel.startsWith(home))
+          throw new Problem(400, "Reaction is not addressed to a home channel.");
+        const channel = this.store.channel(object.channel.slice(home.length));
+        const remote = this.remoteUser(sender);
+        if (
+          !channel.federation_enabled ||
+          channel.remote_actor ||
+          !this.acceptedFollower(channel.id, sender.id) ||
+          this.store.rule(channel.id, remote.id) === "block"
+        )
+          throw new Problem(403, "Channel subscription or reaction permission denied.");
+        this.store.active(remote.id);
+        const target = this.messageAt(channel.id, object.target);
+        if (!channel.reactions || !target || this.store.message(target.id).deleted_at)
+          throw new Problem(409, "That message cannot be reacted to.");
+        if (
+          typeof object.emoji !== "string" ||
+          typeof object.on !== "boolean" ||
+          (!standardEmojis.has(object.emoji) &&
+            !this.store.db.prepare("SELECT 1 FROM custom_emojis WHERE name=?").get(object.emoji))
+        )
+          throw new Problem(400, "That emoji is not available here.");
+        this.store.applyReaction(remote.id, target.id, object.emoji, object.on);
+        this.relayReaction(remote, this.store.message(target.id), object.emoji, object.on);
+      } else if (activity.type === "Announce" && object?.type === "React") {
+        const channel = this.store.db
+          .prepare("SELECT * FROM channels WHERE remote_actor=?")
+          .get(sender.id) as unknown as Channel | undefined;
+        if (!channel) throw new Problem(403, "Unknown remote channel.");
+        const reaction = object.object,
+          target = this.messageAt(channel.id, reaction.target);
+        if (
+          reaction.channel !== sender.id ||
+          !target ||
+          typeof reaction.emoji !== "string" ||
+          !/^[a-z0-9_+-]{1,64}$/i.test(reaction.emoji) ||
+          typeof reaction.on !== "boolean"
+        )
+          throw new Problem(400, "Invalid reaction.");
+        const author = this.remoteUser(reactor!);
+        this.store.applyReaction(author.id, target.id, reaction.emoji, reaction.on);
       } else if (activity.type === "Announce") {
         const channel = this.store.db
           .prepare("SELECT * FROM channels WHERE remote_actor=?")

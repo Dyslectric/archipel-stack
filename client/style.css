@@ -695,7 +695,15 @@ dialog.share-dialog li + li { margin-top: 6px; }
   border: 1px solid var(--line); border-radius: 999px; background: transparent; color: inherit; cursor: pointer; }
 .reaction.mine { background: color-mix(in srgb, var(--accent) 18%, transparent); border-color: var(--accent); }
 .reaction:disabled { cursor: default; }
-.reaction.add { padding: 1px 6px; opacity: .6; }
-.reactions.empty { opacity: 0; }
-article:hover .reactions.empty, article:focus-within .reactions.empty, .reactions.empty:focus-within { opacity: 1; }
-@media (hover: none) { .reactions.empty { opacity: 1; } }
+.emoji-card { position: fixed; z-index: 60; display: flex; gap: 12px; align-items: center; max-width: 280px; padding: 10px 14px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow-pop); pointer-events: none;
+  animation: pop-in .12s ease-out; }
+.emoji-card img { width: 64px; height: 64px; object-fit: contain; flex: none; }
+.emoji-card .ec-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; overflow-wrap: anywhere; }
+.emoji-card .ec-kind { font-size: .85rem; color: var(--muted); }
+.emoji-card .ec-hint { font-size: .8rem; color: var(--muted); font-style: italic; }
+.emoji-edit { display: block; }
+.emoji-edit form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; width: 100%; }
+.emoji-edit form label { flex: 1 1 12rem; }
+.emoji-edit form .form-error { flex-basis: 100%; margin: 0; }
+.emoji-edit > p { margin: 6px 0 0; }

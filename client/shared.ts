@@ -1,4 +1,4 @@
-import { emojiParts, emojiTitle, type CustomEmoji } from "../src/emojis.js";
+import { emojiParts, emojiData, type CustomEmoji } from "../src/emojis.js";
 import { markdownHtml } from "./markdown.js";
 
 export type { CustomEmoji };
@@ -390,9 +390,46 @@ export function emojiHtml(body: string, emojis = state.emojis) {
         ? esc(part.text)
         : "emoji" in part
           ? `<span title=":${esc(part.name)}:">${esc(part.emoji)}</span>`
-          : `<img class="custom-emoji" src="${esc(part.url)}" alt=":${esc(part.name)}:" title="${esc(emojiTitle(part))}">`,
+          : `<img class="custom-emoji" src="${esc(part.url)}" alt=":${esc(part.name)}:"${part.kind ? emojiData(part, esc) : ` title=":${esc(part.name)}:"`}>`,
     )
     .join("");
+}
+// Hovering over a custom emoji enlarges it and says whose it is and where it comes from.
+if (typeof document !== "undefined") {
+  let card: HTMLElement | null = null;
+  const hide = () => {
+    card?.remove();
+    card = null;
+  };
+  const show = (img: HTMLImageElement) => {
+    hide();
+    const { kind, origin, owner } = img.dataset,
+      name = (img.getAttribute("alt") || "").replaceAll(":", ""),
+      what = kind === "personal" ? "Personal emoji" : "Instance emoji",
+      where = origin ? ` on ${esc(origin)}` : "";
+    card = document.createElement("div");
+    card.className = "emoji-card";
+    card.setAttribute("role", "tooltip");
+    card.innerHTML = `<img src="${esc(img.getAttribute("src") || "")}" alt=""><div class="ec-text"><strong>:${esc(name)}:</strong><span class="ec-kind">${what}</span><span class="ec-kind">${kind === "personal" && owner ? `From ${esc(owner)}${where}` : `From ${esc(origin || "this instance")}`}</span>${img.hasAttribute("data-remote") ? '<span class="ec-hint">Click to keep it</span>' : ""}</div>`;
+    document.body.append(card);
+    const at = img.getBoundingClientRect(),
+      box = card.getBoundingClientRect(),
+      left = Math.max(8, Math.min(innerWidth - box.width - 8, at.left + at.width / 2 - box.width / 2)),
+      top = at.top - box.height - 8 < 8 ? at.bottom + 8 : at.top - box.height - 8;
+    card.style.left = `${left}px`;
+    card.style.top = `${top}px`;
+  };
+  const emoji = (e: Event) =>
+    (e.target as Element | null)?.closest?.<HTMLImageElement>("img.custom-emoji[data-kind]") ?? null;
+  document.addEventListener("mouseover", (e) => {
+    const img = emoji(e);
+    if (img) show(img);
+  });
+  document.addEventListener("mouseout", (e) => {
+    if (emoji(e)) hide();
+  });
+  document.addEventListener("scroll", hide, true);
+  document.addEventListener("keydown", (e) => e.key === "Escape" && hide());
 }
 // A message as it is shown: Markdown, with emoji.
 export const richHtml = (body: string, emojis = state.emojis) =>

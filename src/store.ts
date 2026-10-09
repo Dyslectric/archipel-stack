@@ -160,6 +160,8 @@ export class Store {
       actor: User,
     ) => void;
     read: (user: User, channel: Channel) => void;
+    // A reaction was put on, or taken off, a message of a channel hosted here.
+    reaction: (user: User, message: Message, emoji: string, on: boolean) => void;
     // Runs inside the change's transaction, while the channel's rows still exist.
     channel: (channel: Channel, change: "rename" | "privacy" | "delete") => void;
     direct: (user: User, peer: string) => DirectAccess;
@@ -923,8 +925,34 @@ export class Store {
         .all(user.id) as unknown as (CustomEmoji & { source_url: string })[]
     ).map((e) => ({ ...e, url: `/api/emojis/${e.id}/image` }));
   }
+  // Sent with a personal emoji so the far side can say whose it is.
+  emojiOwner(id: string) {
+    const row = this.db
+      .prepare("SELECT u.username FROM personal_emojis p JOIN users u ON u.id=p.user_id WHERE p.id=?")
+      .get(id) as { username: string } | undefined;
+    return row ? { personal: true, owner: row.username } : {};
+  }
   emojiCatalog(user: User) {
     return [...this.emojis(), ...this.personalEmojis(user)];
+  }
+  // The same, saying which are the instance's and which are the reader's own.
+  labelledEmojis(user: User): CustomEmoji[] {
+    const origin = new URL(this.baseUrl).host;
+    return [
+      ...this.emojis().map((e) => ({ ...e, kind: "instance" as const, origin })),
+      ...this.personalEmojis(user).map(({ source_url, ...e }) => ({
+        ...e,
+        kind: "personal" as const,
+        origin: (() => {
+          try {
+            return source_url ? new URL(source_url).host : origin;
+          } catch {
+            return origin;
+          }
+        })(),
+        owner: user.username,
+      })),
+    ];
   }
   emojiName(user: User, value: unknown, exceptId = "") {
     const name = text(value, "Emoji name", 64);
@@ -1627,13 +1655,20 @@ export class Store {
     return (JSON.parse(tags) as CustomEmoji[]).flatMap((e) => {
       const found = this.db
         .prepare(
-          "SELECT 'instance' AS kind,'' AS source FROM custom_emojis WHERE id=? UNION ALL SELECT 'personal',source_url FROM personal_emojis WHERE id=? UNION ALL SELECT 'remote',source_url FROM remote_emoji_cache WHERE id=?",
+          "SELECT 'instance' AS kind,'' AS source,'' AS owner FROM custom_emojis WHERE id=? UNION ALL SELECT 'personal',source_url,(SELECT username FROM users WHERE id=p.user_id) FROM personal_emojis p WHERE id=? UNION ALL SELECT 'remote',source_url,'' FROM remote_emoji_cache WHERE id=?",
         )
         .get(e.id, e.id, e.id) as
-        | { kind: "instance" | "personal" | "remote"; source: string }
+        | { kind: "instance" | "personal" | "remote"; source: string; owner: string }
         | undefined;
       return found
-        ? [{ ...e, kind: found.kind, origin: found.source ? host(found.source) : here }]
+        ? [
+            {
+              ...e,
+              kind: found.kind,
+              origin: found.source ? host(found.source) : here,
+              ...(found.owner ? { owner: found.owner } : {}),
+            },
+          ]
         : [];
     });
   }
@@ -1695,7 +1730,30 @@ export class Store {
         "channel.reactions",
         JSON.stringify({ channel: id, reactions: enabled }),
       );
+      this.federationHooks?.channel(this.channel(id), "privacy");
       return this.channelInfo(user, this.channel(id));
+    });
+  }
+  // Records (or removes) one person's reaction; the callers have checked who may react.
+  applyReaction(userId: string, messageId: string, emoji: string, on: boolean) {
+    this.transaction(() => {
+      if (!on)
+        this.db
+          .prepare("DELETE FROM message_reactions WHERE message_id=? AND user_id=? AND emoji=?")
+          .run(messageId, userId, emoji);
+      else {
+        const total = this.db
+          .prepare("SELECT COUNT(DISTINCT emoji) AS n FROM message_reactions WHERE message_id=?")
+          .get(messageId) as { n: number };
+        const used = this.db
+          .prepare("SELECT 1 FROM message_reactions WHERE message_id=? AND emoji=?")
+          .get(messageId, emoji);
+        if (!used && Number(total.n) >= 20)
+          throw new Problem(409, "A message has up to 20 different reactions.");
+        this.db
+          .prepare("INSERT OR IGNORE INTO message_reactions VALUES(?,?,?,?)")
+          .run(messageId, userId, emoji, now());
+      }
     });
   }
   // Puts the reader's reaction on a message, or takes it off.
@@ -1703,8 +1761,6 @@ export class Store {
     const message = this.message(messageId),
       channel = this.channel(message.channel_id);
     this.requirePost(user, channel);
-    if (channel.remote_actor)
-      throw new Problem(403, "Reactions stay on the instance that hosts the channel.");
     if (!channel.reactions)
       throw new Problem(403, "Reactions are turned off in this channel.");
     if (message.deleted_at)
@@ -1717,25 +1773,11 @@ export class Store {
       !this.db.prepare("SELECT 1 FROM custom_emojis WHERE name=?").get(emoji)
     )
       throw new Problem(400, "That emoji is not available here.");
-    this.transaction(() => {
-      if (!input.on)
-        this.db
-          .prepare("DELETE FROM message_reactions WHERE message_id=? AND user_id=? AND emoji=?")
-          .run(messageId, user.id, emoji);
-      else {
-        const total = this.db
-          .prepare("SELECT COUNT(DISTINCT emoji) AS n FROM message_reactions WHERE message_id=?")
-          .get(messageId) as { n: number };
-        const used = this.db
-          .prepare("SELECT 1 FROM message_reactions WHERE message_id=? AND emoji=?")
-          .get(messageId, emoji);
-        if (!used && Number(total.n) >= 20)
-          throw new Problem(409, "A message has up to 20 different reactions.");
-        this.db
-          .prepare("INSERT OR IGNORE INTO message_reactions VALUES(?,?,?,?)")
-          .run(messageId, user.id, emoji, now());
-      }
-    });
+    this.applyReaction(user.id, messageId, emoji, input.on);
+    this.federationHooks?.reaction(user, message, emoji, input.on);
+    return this.reactionsOf(user, messageId);
+  }
+  reactionsOf(user: User, messageId: string) {
     const page = [this.message(messageId)] as (Message & { reactions?: unknown })[];
     this.withReactions(user, page);
     return page[0].reactions;

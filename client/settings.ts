@@ -411,7 +411,8 @@ const sections: Section[] = [
         button.addEventListener("click", () => {
           const emoji = saved.find((e) => e.id === button.dataset.renameEmoji)!,
             row = button.closest("li")!;
-          row.innerHTML = `<form class="row grow"><span class="emoji-sample">${emojiHtml(`:${emoji.name}:`, [emoji])}</span><label class="grow">New shortcode<input name="name" value="${esc(emoji.name)}" ${shortcode}></label><button class="small">Save shortcode</button><button type="button" class="small secondary" data-cancel>Cancel</button>${error}</form><p class="muted small">Older messages keep their original emoji.</p>`;
+          row.className = "emoji-edit";
+          row.innerHTML = `<form><span class="emoji-sample">${emojiHtml(`:${emoji.name}:`, [emoji])}</span><label class="grow">New shortcode<input name="name" value="${esc(emoji.name)}" ${shortcode}></label><button class="small">Save shortcode</button><button type="button" class="small secondary" data-cancel>Cancel</button>${error}</form><p class="muted small">Older messages keep their original emoji.</p>`;
           $("[data-cancel]", row).addEventListener("click", ctx.refresh);
           $<HTMLInputElement>("input", row).select();
           onSubmit($("form", row), async (data) => {
@@ -1182,7 +1183,8 @@ const sections: Section[] = [
         button.addEventListener("click", () => {
           const emoji = emojis.find((e) => e.name === button.dataset.renameInstanceEmoji)!,
             row = button.closest("li")!;
-          row.innerHTML = `<form class="row grow"><span class="emoji-sample">${emojiHtml(`:${emoji.name}:`, [emoji])}</span><label class="grow">New shortcode<input name="name" value="${esc(emoji.name)}" ${shortcode}></label><button class="small">Save shortcode</button><button type="button" class="small secondary" data-cancel>Cancel</button>${error}</form><p class="muted small">Older messages keep showing the emoji under its original shortcode.</p>`;
+          row.className = "emoji-edit";
+          row.innerHTML = `<form><span class="emoji-sample">${emojiHtml(`:${emoji.name}:`, [emoji])}</span><label class="grow">New shortcode<input name="name" value="${esc(emoji.name)}" ${shortcode}></label><button class="small">Save shortcode</button><button type="button" class="small secondary" data-cancel>Cancel</button>${error}</form><p class="muted small">Older messages keep showing the emoji under its original shortcode.</p>`;
           $("[data-cancel]", row).addEventListener("click", ctx.refresh);
           $<HTMLInputElement>("input", row).select();
           onSubmit($("form", row), async (data) => {

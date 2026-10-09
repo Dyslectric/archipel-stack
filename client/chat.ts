@@ -460,9 +460,15 @@ const edited = (m: Message) =>
 const queuedClass = (m: Message) =>
   m.queued ? ` queued${m.failed ? " failed" : ""}` : "";
 // Emoji reactions under a message: the ones given, and a button to add yours.
+const reactable = (m: Message) =>
+  !!current?.reactions && !current.dm && !m.deleted_at && !m.queued;
+// The button that opens the emoji picker for a reaction, in a message's action panel.
+const reactButton = (m: Message, cls: string) =>
+  reactable(m) && canPost()
+    ? `<button type="button" class="${cls}" data-react-add="${m.id}" aria-label="Add reaction" aria-haspopup="dialog" title="Add reaction">${icon("smile")}${cls === "act" ? "<span>React</span>" : ""}</button>`
+    : "";
 function reactionsHtml(m: Message) {
-  if (!current?.reactions || current.dm || current.remote_actor || m.deleted_at || m.queued)
-    return "";
+  if (!reactable(m)) return "";
   const can = canPost(),
     chips = (m.reactions || [])
       .map(
@@ -470,8 +476,7 @@ function reactionsHtml(m: Message) {
           `<button type="button" class="reaction${r.mine ? " mine" : ""}" data-react="${m.id}" data-emoji="${esc(r.emoji)}" aria-pressed="${r.mine}" aria-label="${esc(r.emoji)}, ${r.count}" title=":${esc(r.emoji)}:"${can ? "" : " disabled"}>${emojiHtml(`:${r.emoji}:`)}<span>${r.count}</span></button>`,
       )
       .join("");
-  if (!chips && !can) return "";
-  return `<div class="reactions picker-host${chips ? "" : " empty"}">${chips}${can ? `<button type="button" class="reaction add" data-react-add="${m.id}" aria-label="Add reaction" aria-haspopup="dialog" title="Add reaction">${icon("smile")}</button>` : ""}</div>`;
+  return chips ? `<div class="reactions">${chips}</div>` : "";
 }
 function react(id: string, emoji: string, on: boolean) {
   action(async () => {
@@ -546,6 +551,7 @@ function chatMessage(m: Message, cont: boolean) {
       : "";
   const time = `<time datetime="${esc(m.created_at)}" title="${esc(full(m.created_at))}">${esc(clock(m.created_at))}</time>`;
   const tools = m.queued ? "" : [
+    reactButton(m, "act react-button"),
     repliable(m)
       ? `<button type="button" class="act reply-button" data-reply="${m.id}" aria-label="Reply to ${esc(m.display_name)}" title="Reply">${icon("reply")}<span>Reply</span></button>`
       : "",
@@ -554,7 +560,7 @@ function chatMessage(m: Message, cont: boolean) {
       : "",
     !m.deleted_at ? `<button type="button" class="icon-button" data-message-menu="${m.id}" aria-label="More message actions" aria-haspopup="menu" title="More">${icon("more")}</button>` : "",
   ].join("");
-  return `<article class="message${cont ? " cont" : ""}${m.deleted_at ? " deleted" : ""}${queuedClass(m)}" id="m-${m.id}"><div class="msg-gutter">${cont ? time : avatar(m)}</div>
+  return `<article class="message picker-host${cont ? " cont" : ""}${m.deleted_at ? " deleted" : ""}${queuedClass(m)}" id="m-${m.id}"><div class="msg-gutter">${cont ? time : avatar(m)}</div>
     <div class="message-content">${cont ? "" : `<div class="message-meta">${author(m)}${handleTag(m.username)}${time}${edited(m)}</div>`}${context}${bodyHtml(m)}${cont ? edited(m) : ""}</div>${tools ? `<div class="message-actions">${tools}</div>` : ""}</article>`;
 }
 // Consecutive messages from one person within ten minutes share a header, as in Zulip.
@@ -602,6 +608,7 @@ function chatNodes(list: Message[]): Node[] {
 function threadActions(m: Message) {
   if (m.queued) return "";
   const parts = [
+    reactButton(m, "link react-button"),
     canPost() && !m.deleted_at
       ? `<details class="reply-box"><summary aria-label="Reply to ${esc(m.display_name)}">${icon("reply")} Reply</summary><form class="stack inline-form picker-host" data-reply-form="${m.id}"><textarea name="body" rows="3" maxlength="8000" required aria-label="Reply" placeholder="Reply to ${esc(m.display_name)}"></textarea><p class="form-error" role="alert"></p><div class="row"><button class="small">Reply</button><button type="button" class="icon-button" data-emoji-for aria-label="Choose emoji" title="Emoji">${icon("smile")}</button>${attachButton("data-attach-for")}<span class="muted">Ctrl + Enter to send</span></div></form></details>`
       : "",
@@ -612,7 +619,7 @@ function threadActions(m: Message) {
       ? `<button type="button" class="link bad-text delete-button" data-delete="${m.id}" aria-label="Remove message">Remove</button>`
       : "",
   ].join("");
-  return parts ? `<div class="obj-actions small">${parts}</div>` : "";
+  return parts ? `<div class="obj-actions small picker-host">${parts}</div>` : "";
 }
 const byline = (m: Message) =>
   `${author(m)} ${handleTag(m.username)} ·${when(m.created_at)}${edited(m) ? ` · ${edited(m)}` : ""}`;

@@ -947,6 +947,30 @@ test("a followed channel keeps from its readers what its home keeps from its mem
   assert.equal(a.store.messages(a.alice, home.id).at(-1)?.parent_id, first.id);
   assert.equal(b.store.messages(b.bob, sub.channel.id).at(-1)?.parent_id, question.id);
 });
+test("reactions cross instances in both directions and follow the home channel's setting", async (t) => {
+  const a = await instance(t),
+    b = await instance(t);
+  const home = channel(a),
+    host = new URL(a.origin).host;
+  const sub = await b.fed.subscribe(b.bob, `#general@${host}`);
+  await drain(a, b);
+  const first = a.store.post(a.alice, home.id, { body: "React to me" });
+  await drain(a, b);
+  const copy = () => b.store.messages(b.bob, sub.channel.id)[0] as unknown as { id: string; reactions: unknown };
+  b.fed.remoteReact(b.bob, copy().id, { emoji: "tada", on: true });
+  await drain(a, b);
+  assert.deepEqual((a.store.messages(a.alice, home.id)[0] as unknown as { reactions: unknown }).reactions, [{ emoji: "tada", count: 1, mine: false }]);
+  assert.deepEqual(copy().reactions, [{ emoji: "tada", count: 1, mine: true }]);
+  a.store.react(a.alice, first.id, { emoji: "tada", on: true });
+  await drain(a, b);
+  assert.deepEqual(copy().reactions, [{ emoji: "tada", count: 2, mine: true }]);
+  b.fed.remoteReact(b.bob, copy().id, { emoji: "tada", on: false });
+  await drain(a, b);
+  assert.deepEqual(copy().reactions, [{ emoji: "tada", count: 1, mine: false }]);
+  a.store.setReactions(a.alice, home.id, false);
+  await drain(a, b);
+  assert.throws(() => b.fed.remoteReact(b.bob, copy().id, { emoji: "tada", on: true }), /turned off/);
+});
 test("a federated channel lists its members on every instance, unless its home keeps the list", async (t) => {
   const a = await instance(t),
     b = await instance(t),

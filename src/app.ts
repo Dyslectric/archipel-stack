@@ -407,7 +407,7 @@ export function createApp(config: Config, store: Store) {
     next();
   });
   app.get("/api/emojis", (_req, res) =>
-    res.json(store.emojiCatalog(user(res))),
+    res.json(store.labelledEmojis(user(res))),
   );
   // The file itself is the request body; its name travels beside it.
   app.post(
@@ -735,7 +735,11 @@ export function createApp(config: Config, store: Store) {
     ),
   );
   app.put("/api/messages/:id/reactions", (req, res) =>
-    res.json(store.react(user(res), String(req.params.id), req.body || {})),
+    res.json(
+      store.channel(store.message(String(req.params.id)).channel_id).remote_actor
+        ? federation.remoteReact(user(res), String(req.params.id), req.body || {})
+        : store.react(user(res), String(req.params.id), req.body || {}),
+    ),
   );
   app.delete("/api/channels/:id", (req, res) => {
     store.deleteChannel(user(res), String(req.params.id));

@@ -1,4 +1,4 @@
-import { emojiParts, emojiTitle, type CustomEmoji } from "../src/emojis.js";
+import { emojiParts, emojiData, type CustomEmoji } from "../src/emojis.js";
 
 // Messages are stored as written and formatted when shown: Markdown's everyday subset, with
 // :emoji: shortcodes. Everything is escaped on the way out, and nothing but http(s), mailto and
@@ -24,7 +24,7 @@ function emoji(text: string, ctx: Context) {
         ? esc(part.text)
         : "emoji" in part
           ? `<span title=":${esc(part.name)}:">${esc(part.emoji)}</span>`
-          : `<img class="custom-emoji" src="${esc(part.url)}" alt=":${esc(part.name)}:" title="${esc(emojiTitle(part))}">`,
+          : `<img class="custom-emoji" src="${esc(part.url)}" alt=":${esc(part.name)}:"${part.kind ? emojiData(part, esc) : ` title=":${esc(part.name)}:"`}>`,
     )
     .join("");
 }
