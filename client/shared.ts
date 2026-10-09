@@ -522,6 +522,33 @@ export function promptDialog(
     $<HTMLInputElement>("input", dialog).select();
   });
 }
+// An emoji from another server, found in a message: keep a copy as your own shortcode, or
+// (as an administrator) for everyone on this instance.
+export function adoptEmojiDialog(emoji: { id: string; name: string }) {
+  const admin = !!state.session.user?.admin,
+    taken = new Set(state.emojis.map((e) => e.name));
+  let name = emoji.name;
+  for (let n = 2; taken.has(name); n++) name = `${emoji.name}_${n}`;
+  const dialog = document.createElement("dialog");
+  dialog.className = "card dialog";
+  dialog.innerHTML = `<h2>Keep this emoji</h2><p class="muted row"><img class="custom-emoji big" src="/api/emojis/${esc(emoji.id)}/image" alt=""><span>From another server, as <code>:${esc(emoji.name)}:</code>.</span></p>
+    <form class="stack"><label>Shortcode<input name="name" value="${esc(name)}" required maxlength="64" pattern="[a-z0-9][a-z0-9_\-]*" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+    ${admin ? `<fieldset class="stack"><legend>Keep it</legend><label class="check"><input type="radio" name="scope" value="personal" checked> For me only</label><label class="check"><input type="radio" name="scope" value="instance"> For everyone on this instance</label></fieldset>` : ""}
+    <p class="form-error" role="alert"></p><div class="row end"><button type="button" class="secondary" data-cancel>Cancel</button><button>Keep emoji</button></div></form>`;
+  document.body.append(dialog);
+  const form = $<HTMLFormElement>("form", dialog);
+  $("[data-cancel]", dialog).addEventListener("click", () => dialog.close());
+  dialog.addEventListener("close", () => dialog.remove());
+  onSubmit(form, async (data) => {
+    const scope = (data.get("scope") as string) || "personal";
+    await api(`/emojis/${emoji.id}/adopt`, "POST", { name: data.get("name"), scope });
+    state.emojis = await api<CustomEmoji[]>("/emojis");
+    dialog.close();
+    toast(scope === "instance" ? "Emoji added to the instance." : "Emoji saved to your set.");
+  });
+  dialog.showModal();
+  $<HTMLInputElement>("input", dialog).select();
+}
 // A small panel floating by the thing that opened it; one at a time, gone on a click elsewhere or Escape.
 let closePopup: (() => void) | null = null;
 export const roleLabel = (role: string | null | undefined) =>

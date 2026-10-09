@@ -529,7 +529,9 @@ details.reply-box form { font-size: 1rem; }
 .emoji-picker { position: absolute; left: 0; bottom: calc(100% + 8px); z-index: 30; width: min(392px, 100%); height: min(420px, 60dvh);
   display: flex; flex-direction: column; background: var(--card); border: 1px solid var(--line); border-radius: 12px;
   box-shadow: var(--shadow-pop); overflow: hidden; animation: pop-in .14s ease-out; }
-.inline-form > .emoji-picker { bottom: auto; top: calc(100% + 6px); }
+.custom-emoji.big { width: 40px; height: 40px; }
+.message-body img.custom-emoji { cursor: pointer; }
+.emoji-picker.below { bottom: auto; top: calc(100% + 6px); }
 .ep-search { margin: 8px 8px 6px; }
 .ep-tabs { display: flex; gap: 1px; padding: 0 6px 4px; border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
 .ep-tabs button, .ep-emoji { background: none; border: none; color: inherit; padding: 0; border-radius: 6px; font-weight: 400; }
@@ -697,4 +699,3 @@ dialog.share-dialog li + li { margin-top: 6px; }
 .reactions.empty { opacity: 0; }
 article:hover .reactions.empty, article:focus-within .reactions.empty, .reactions.empty:focus-within { opacity: 1; }
 @media (hover: none) { .reactions.empty { opacity: 1; } }
-.reactions .emoji-picker { top: 100%; }

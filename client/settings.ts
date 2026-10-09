@@ -1164,7 +1164,7 @@ const sections: Section[] = [
         ) +
         card(
           "Instance emoji",
-          `<ul class="plain admin-emojis">${emojis.length ? emojis.map((e) => `<li class="row"><span class="emoji-sample">${emojiHtml(`:${e.name}:`, [e])}</span><code class="grow">:${esc(e.name)}:</code><button type="button" class="small secondary bad-text" data-remove-emoji="${esc(e.name)}">Remove</button></li>`).join("") : '<li class="muted">No custom emoji yet.</li>'}</ul>`,
+          `<ul class="plain admin-emojis">${emojis.length ? emojis.map((e) => `<li class="row"><span class="emoji-sample">${emojiHtml(`:${e.name}:`, [e])}</span><code class="grow">:${esc(e.name)}:</code><button type="button" class="small secondary" data-rename-instance-emoji="${esc(e.name)}">Rename</button><button type="button" class="small secondary bad-text" data-remove-emoji="${esc(e.name)}">Remove</button></li>`).join("") : '<li class="muted">No custom emoji yet.</li>'}</ul>`,
         );
       const changed = async () => {
         state.emojis = await api<CustomEmoji[]>("/emojis");
@@ -1177,6 +1177,21 @@ const sections: Section[] = [
         });
         await changed();
       });
+      // Renaming happens in the row itself.
+      for (const button of $$("[data-rename-instance-emoji]", el))
+        button.addEventListener("click", () => {
+          const emoji = emojis.find((e) => e.name === button.dataset.renameInstanceEmoji)!,
+            row = button.closest("li")!;
+          row.innerHTML = `<form class="row grow"><span class="emoji-sample">${emojiHtml(`:${emoji.name}:`, [emoji])}</span><label class="grow">New shortcode<input name="name" value="${esc(emoji.name)}" ${shortcode}></label><button class="small">Save shortcode</button><button type="button" class="small secondary" data-cancel>Cancel</button>${error}</form><p class="muted small">Older messages keep showing the emoji under its original shortcode.</p>`;
+          $("[data-cancel]", row).addEventListener("click", ctx.refresh);
+          $<HTMLInputElement>("input", row).select();
+          onSubmit($("form", row), async (data) => {
+            await api(`/admin/emojis/${encodeURIComponent(emoji.name)}`, "PATCH", {
+              name: data.get("name"),
+            });
+            await changed();
+          });
+        });
       onClick(el, "[data-remove-emoji]", async (button) => {
         await api(`/admin/emojis/${button.dataset.removeEmoji}`, "DELETE");
         await changed();

@@ -641,6 +641,16 @@ export function createApp(config: Config, store: Store) {
   app.post("/api/admin/emojis", (req, res) =>
     res.status(201).json(store.addEmoji(user(res), req.body || {})),
   );
+  app.patch("/api/admin/emojis/:name", (req, res) =>
+    res.json(
+      store.renameEmoji(user(res), String(req.params.name), req.body?.name),
+    ),
+  );
+  app.post("/api/emojis/:id/adopt", (req, res) =>
+    res
+      .status(201)
+      .json(store.adoptCachedEmoji(user(res), String(req.params.id), req.body || {})),
+  );
   app.delete("/api/admin/emojis/:name", (req, res) => {
     store.removeEmoji(user(res), String(req.params.name));
     res.json({ ok: true });

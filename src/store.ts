@@ -848,15 +848,22 @@ export class Store {
     if (!result) throw new Problem(404, "Emoji not found.");
     return result;
   }
-  addEmoji(user: User, input: Record<string, unknown>) {
-    this.requireAdmin(user);
-    const name = text(input.name, "Emoji name", 64);
+  private instanceEmojiName(value: unknown) {
+    const name = text(value, "Emoji name", 64);
     if (!/^[a-z0-9][a-z0-9_-]*$/.test(name) || standardEmojis.has(name))
       throw new Problem(
         400,
         "Choose a unique lowercase shortcode using letters, numbers, underscores or hyphens; standard names are reserved.",
       );
+    return name;
+  }
+  addEmoji(user: User, input: Record<string, unknown>) {
+    this.requireAdmin(user);
+    const name = this.instanceEmojiName(input.name);
     const { image, mime } = decodeEmojiImage(input.image);
+    return this.insertEmoji(user, name, image, mime);
+  }
+  private insertEmoji(user: User, name: string, image: Uint8Array, mime: string) {
     this.transaction(() => {
       if (this.db.prepare("SELECT 1 FROM custom_emojis WHERE name=?").get(name))
         throw new Problem(409, "That emoji name already exists.");
@@ -872,6 +879,39 @@ export class Store {
       this.audit(user.id, "emoji.create", name);
     });
     return this.emojis().find((e) => e.name === name);
+  }
+  // Messages already sent keep showing the emoji under its old shortcode.
+  renameEmoji(user: User, name: string, input: unknown) {
+    this.requireAdmin(user);
+    const next = this.instanceEmojiName(input);
+    this.transaction(() => {
+      if (next !== name && this.db.prepare("SELECT 1 FROM custom_emojis WHERE name=?").get(next))
+        throw new Problem(409, "That emoji name already exists.");
+      if (!this.db.prepare("UPDATE custom_emojis SET name=? WHERE name=?").run(next, name).changes)
+        throw new Problem(404, "Emoji not found.");
+      this.audit(user.id, "emoji.rename", JSON.stringify({ from: name, to: next }));
+    });
+    return this.emojis().find((e) => e.name === next);
+  }
+  // Keeps a copy of an emoji from another server's message, for the reader alone or for the instance.
+  adoptCachedEmoji(user: User, id: string, input: Record<string, unknown>) {
+    this.active(user.id);
+    const cached = this.db
+      .prepare("SELECT source_url,mime,image FROM remote_emoji_cache WHERE id=?")
+      .get(id) as { source_url: string; mime: string; image: Uint8Array } | undefined;
+    if (!cached) throw new Problem(404, "That emoji is not from another server.");
+    if (input.scope === "instance") {
+      this.requireAdmin(user);
+      return this.insertEmoji(user, this.instanceEmojiName(input.name), cached.image, cached.mime);
+    }
+    if (input.scope !== "personal")
+      throw new Problem(400, "Choose whether to keep the emoji for yourself or for the instance.");
+    return this.adoptEmoji(
+      user,
+      input.name,
+      Buffer.from(cached.image).toString("base64"),
+      cached.source_url,
+    );
   }
   personalEmojis(user: User): (CustomEmoji & { source_url: string })[] {
     this.active(user.id);

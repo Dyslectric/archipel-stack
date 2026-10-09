@@ -204,6 +204,18 @@ export function togglePicker(
   opener.setAttribute("aria-expanded", "true");
   closeOpen = close;
   document.addEventListener("pointerdown", outside, true);
-  panel.scrollIntoView({ block: "nearest" });
+  // Beside an inline form or reactions the panel opens below; it opens above when the room below
+  // is short, so the timeline does not have to scroll to make space.
+  const below = host.matches(".inline-form, .reactions");
+  panel.classList.toggle("below", below);
+  const box = host.getBoundingClientRect(),
+    room = { above: box.top - 8, below: innerHeight - box.bottom - 8 },
+    need = panel.offsetHeight,
+    side = below ? "below" : "above",
+    other = below ? "above" : "below";
+  if (room[side] < need && room[other] > room[side])
+    panel.classList.toggle("below", other === "below");
+  if (room.above < need && room.below < need)
+    panel.scrollIntoView({ block: "nearest" });
   search.focus({ preventScroll: true });
 }

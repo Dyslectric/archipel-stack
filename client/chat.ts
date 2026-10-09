@@ -2,6 +2,7 @@ import {
   $,
   $$,
   action,
+  adoptEmojiDialog,
   api,
   avatar,
   canModerate,
@@ -934,6 +935,11 @@ function wireFeed() {
       reply = messages.find((m) => m.id === hit!.dataset.reply) || null;
       renderComposer();
       $("#message-body").focus();
+    } else if ((hit = on<HTMLImageElement>(".message-body img.custom-emoji"))) {
+      // An emoji that came with a message from another server can be kept.
+      const id = /^\/api\/emojis\/([^/]+)\/image$/.exec(hit.getAttribute("src") || "")?.[1];
+      if (id && !state.emojis.some((e) => e.id === id))
+        adoptEmojiDialog({ id, name: (hit.getAttribute("alt") || "emoji").replaceAll(":", "") });
     } else if ((hit = on("[data-react]"))) {
       react(hit.dataset.react!, hit.dataset.emoji!, hit.getAttribute("aria-pressed") !== "true");
     } else if ((hit = on("[data-react-add]"))) {

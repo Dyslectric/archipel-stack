@@ -1007,3 +1007,23 @@ test("members react to messages; moderators turn reactions off and on", () => {
   store.deleteChannel(alice, c.id);
   store.close();
 });
+test("instance emoji can be renamed by admins; emoji cached from another server can be kept personally or for the instance", () => {
+  const { store, bob } = fixture();
+  const alice = store.loginIdentity("https://id.example", "boss", "boss", [], true);
+  const image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
+  store.addEmoji(alice, { name: "ripple", image });
+  store.addEmoji(alice, { name: "occupied", image });
+  denied(() => store.renameEmoji(bob, "ripple", "greeting"));
+  denied(() => store.renameEmoji(alice, "ripple", "occupied"), 409);
+  denied(() => store.renameEmoji(alice, "ripple", "tada"), 400);
+  denied(() => store.renameEmoji(alice, "missing", "missing_two"), 404);
+  assert.equal(store.renameEmoji(alice, "ripple", "greeting")?.name, "greeting");
+  assert.ok(!store.emojis().some((e) => e.name === "ripple"));
+  store.db.prepare("INSERT INTO remote_emoji_cache VALUES('remote1','https://far.example/e.png','image/png',?)").run(Buffer.from(image, "base64"));
+  denied(() => store.adoptCachedEmoji(bob, "nope", { name: "x", scope: "personal" }), 404);
+  denied(() => store.adoptCachedEmoji(bob, "remote1", { name: "farway", scope: "instance" }));
+  assert.equal(store.adoptCachedEmoji(bob, "remote1", { name: "farway", scope: "personal" })?.name, "farway");
+  assert.deepEqual(store.emojiCatalog(bob).map((e) => e.name).sort(), ["farway", "greeting", "occupied"]);
+  assert.equal(store.adoptCachedEmoji(alice, "remote1", { name: "farway", scope: "instance" })?.name, "farway");
+  store.close();
+});
