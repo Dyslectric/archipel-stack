@@ -102,6 +102,130 @@ document.addEventListener("keydown", (event) => {
     menu.open = false;
   document.querySelector("#sidebar")?.classList.remove("mobile-open");
 });
+// Two things follow a thumb dragged sideways. On a phone the channel drawer: to the right it
+// comes in, to the left it goes away, and let go it settles whichever way it was headed. And a
+// message that can be replied to: pulled to the left far enough, letting go starts the reply.
+// A drag over something that scrolls sideways itself, such as a code block, is its own.
+const drawer = matchMedia("(max-width: 720px)");
+const scrollsSideways = (at: Element | null) => {
+  for (let el = at; el && el !== document.body; el = el.parentElement)
+    if (
+      el.scrollWidth > el.clientWidth &&
+      /auto|scroll/.test(getComputedStyle(el).overflowX)
+    )
+      return true;
+  return false;
+};
+const REPLY_AT = 56, // how far a message is pulled before letting go replies to it
+  REPLY_MAX = 84;
+let swipe: {
+  side: HTMLElement | null;
+  open: boolean;
+  width: number;
+  message: HTMLElement | null;
+  x: number;
+  y: number;
+  dragging: "drawer" | "reply" | null;
+  offset: number; // drawer: how far it sits from fully shown, from -width to 0; reply: the pull
+  lastX: number;
+  lastAt: number;
+  speed: number; // px/ms, to the right
+} | null = null;
+document.addEventListener(
+  "touchstart",
+  (event) => {
+    const at = event.target as Element,
+      side = drawer.matches ? document.querySelector<HTMLElement>("#sidebar") : null,
+      open = !!side?.classList.contains("mobile-open"),
+      message = open ? null : at.closest?.<HTMLElement>("article.message:has([data-reply])") || null,
+      { clientX: x, clientY: y } = event.touches[0];
+    if (swipe?.dragging) return settle(false);
+    swipe =
+      (side || message) &&
+      event.touches.length === 1 &&
+      !document.querySelector("dialog[open]") &&
+      !at.closest?.("input, textarea, select, [contenteditable]") &&
+      !scrollsSideways(at)
+        ? { side, open, width: side?.offsetWidth || 0, message, x, y, dragging: null, offset: 0,
+            lastX: x, lastAt: event.timeStamp, speed: 0 }
+        : null;
+  },
+  { passive: true },
+);
+document.addEventListener(
+  "touchmove",
+  (event) => {
+    const s = swipe;
+    if (!s) return;
+    const { clientX: x, clientY: y } = event.touches[0],
+      dx = x - s.x,
+      dy = y - s.y;
+    if (!s.dragging) {
+      if (Math.max(Math.abs(dx), Math.abs(dy)) < 8) return;
+      // Up and down is scrolling. Sideways, the drawer moves if it has somewhere to go that
+      // way, and otherwise a pull to the left is at the message under the thumb.
+      const sideways = Math.abs(dx) > Math.abs(dy) && getSelection()?.isCollapsed;
+      if (sideways && s.side && dx > 0 !== s.open) {
+        s.dragging = "drawer";
+        s.side.classList.add("dragging");
+      } else if (sideways && s.message && dx < 0) {
+        s.dragging = "reply";
+        s.message.classList.add("swiping");
+        s.message.insertAdjacentHTML("beforeend", `<span class="swipe-reply" aria-hidden="true">${icon("reply")}</span>`);
+      } else {
+        swipe = null;
+        return;
+      }
+    }
+    if (event.cancelable) event.preventDefault();
+    if (event.timeStamp > s.lastAt)
+      s.speed = 0.6 * ((x - s.lastX) / (event.timeStamp - s.lastAt)) + 0.4 * s.speed;
+    s.lastX = x;
+    s.lastAt = event.timeStamp;
+    if (s.dragging === "drawer") {
+      s.offset = Math.min(0, Math.max(-s.width, (s.open ? 0 : -s.width) + dx));
+      s.side!.style.transform = `translateX(${s.offset}px)`;
+      return;
+    }
+    // Past the point where it would reply the message drags, so that the point can be felt.
+    const pull = Math.max(0, -dx);
+    s.offset = Math.min(REPLY_MAX, pull <= REPLY_AT ? pull : REPLY_AT + (pull - REPLY_AT) * 0.3);
+    const m = s.message!,
+      mark = m.querySelector<HTMLElement>(".swipe-reply");
+    m.style.transition = "none";
+    m.style.transform = `translateX(${-s.offset}px)`;
+    m.classList.toggle("swipe-armed", pull >= REPLY_AT);
+    if (mark) mark.style.opacity = String(Math.min(1, pull / REPLY_AT));
+  },
+  { passive: false },
+);
+// Let go, the drawer slides the rest of the way: after a flick the way it was flicked,
+// otherwise to whichever side it is nearer. A message slides back to where it was.
+function settle(finished: boolean) {
+  const s = swipe;
+  swipe = null;
+  if (s?.dragging === "drawer") {
+    const open = !finished
+      ? s.open
+      : Math.abs(s.speed) > 0.3
+        ? s.speed > 0
+        : s.offset > -s.width / 2;
+    s.side!.classList.remove("dragging");
+    s.side!.style.transform = "";
+    s.side!.classList.toggle("mobile-open", open);
+  } else if (s?.dragging === "reply") {
+    const m = s.message!,
+      armed = finished && m.classList.contains("swipe-armed");
+    m.style.transition = m.style.transform = "";
+    setTimeout(() => {
+      m.classList.remove("swiping", "swipe-armed");
+      m.querySelector(".swipe-reply")?.remove();
+    }, 200);
+    if (armed) m.querySelector<HTMLElement>("[data-reply]")?.click();
+  }
+}
+document.addEventListener("touchend", () => settle(true));
+document.addEventListener("touchcancel", () => settle(false));
 
 // ---- where you are is in the address: #/inbox, #/c/<channel>[/t/<topic>], #/dm/<person>,
 // #/channels, #/settings/... ----

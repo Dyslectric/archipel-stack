@@ -353,7 +353,9 @@ ul.plain.people-list > li { padding: 0; border: none; }
 #channel-heading h1 { display: flex; align-items: center; gap: 5px; margin: 0; font-size: 1.08rem; letter-spacing: -0.01em;
   white-space: nowrap; min-width: 0; }
 #channel-heading h1 > .i:first-child { color: var(--muted); }
-#channel-heading .topic-name { overflow: hidden; text-overflow: ellipsis; }
+#channel-heading h1 > strong, #channel-heading .topic-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* A long handle gives way before the name beside it does. */
+#channel-heading .handle { flex: 0 10000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #channel-heading .desc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 8px;
   border-left: 1px solid var(--line); }
 .sep { color: var(--muted); width: 1em; height: 1em; }
@@ -396,6 +398,7 @@ ul.plain.people-list > li { padding: 0; border: none; }
 .group-body .message-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 8px; }
 .group-body > article .message-meta .author { font-weight: 700; }
 .group-body > article .message-meta .handle, .group-body > article .message-meta time { font-size: 0.85em; color: var(--muted); }
+.group-body > article .message-meta .handle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .edited { font-size: 0.85em; color: var(--muted); }
 .message-body { white-space: pre-wrap; overflow-wrap: anywhere; }
 /* Formatted messages: Markdown's blocks sit as close together as lines of chat do. */
@@ -445,6 +448,14 @@ button.reply-context:hover { background: none; color: var(--text); }
 .touch .group-body > article .message-actions { display: none; }
 .touch .group-body > article.show-actions .message-actions { display: flex; position: static; grid-column: 2;
   justify-self: start; margin: 4px 0 6px; box-shadow: none; }
+/* A message pulled to the left by a thumb brings a reply mark in behind it, which lights up
+   once letting go would reply; let go, the message slides back. */
+.group-body:has(> article.swiping) { overflow: clip; }
+.group-body > article.swiping { transition: transform .18s ease-out; }
+.swipe-reply { position: absolute; left: 100%; top: 50%; width: 56px; height: 32px; margin-top: -16px; display: grid;
+  place-items: center; color: var(--muted); transition: color .12s, scale .12s; }
+.swipe-reply .i { width: 20px; height: 20px; }
+.swipe-armed > .swipe-reply { color: var(--accent); scale: 1.2; }
 .message-actions .icon-button { width: 30px; height: 28px; }
 .message-actions .act { font-size: .85em; min-height: 28px; }
 .group-body > article:first-child .message-actions { top: 2px; }
@@ -637,8 +648,11 @@ dialog.share-dialog li + li { margin-top: 6px; }
     box-shadow: var(--shadow-pop); }
   .conversation { height: 100%; }
   .sidebar { position: fixed; left: 0; top: var(--header-h); bottom: 0; width: min(290px, 86vw); z-index: 15;
-    transform: translateX(-100%); visibility: hidden; box-shadow: var(--shadow-pop); }
-  .sidebar.mobile-open { transform: none; visibility: visible; animation: drawer-in .18s ease-out; }
+    transform: translateX(-100%); visibility: hidden; box-shadow: var(--shadow-pop);
+    transition: transform .18s ease-out, visibility 0s .18s; }
+  .sidebar.mobile-open { transform: none; visibility: visible; transition: transform .18s ease-out; }
+  /* Under a thumb the drawer goes where the thumb does, at once. */
+  .sidebar.dragging { visibility: visible; transition: none; }
   .channel-header { padding: 6px 6px 6px 12px; }
   #members span { display: none; }
   .feed-inner { padding: 0 8px 12px; }
@@ -681,7 +695,6 @@ dialog.share-dialog li + li { margin-top: 6px; }
 .hidden-topics > summary::-webkit-details-marker { display: none; }
 .hidden-topics > a { opacity: 0.75; }
 .channel-link .mode-tag .i { width: 1em; height: 1em; }
-@keyframes drawer-in { from { transform: translateX(-100%); } }
 /* Touch controls keep their full target even in the denser message and topic rows. */
 @media (max-width: 720px), (pointer: coarse) {
   .icon-button, .side-head .icon-button, .message-actions .icon-button,
