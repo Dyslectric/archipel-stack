@@ -414,7 +414,7 @@ if (typeof document !== "undefined") {
   // Long enough to cross the gap between the emoji and its card.
   const leave = () => {
     clearTimeout(leaving);
-    leaving = window.setTimeout(hide, 220);
+    leaving = window.setTimeout(hide, 35);
   };
   const show = (img: HTMLImageElement) => {
     clearTimeout(leaving);
@@ -440,7 +440,7 @@ if (typeof document !== "undefined") {
     const at = img.getBoundingClientRect(),
       box = card.getBoundingClientRect(),
       left = Math.max(8, Math.min(innerWidth - box.width - 8, at.left + at.width / 2 - box.width / 2)),
-      top = at.top - box.height - 8 < 8 ? at.bottom + 8 : at.top - box.height - 8;
+      top = at.top - box.height - 4 < 8 ? at.bottom + 4 : at.top - box.height - 4;
     card.style.left = `${left}px`;
     card.style.top = `${top}px`;
   };
