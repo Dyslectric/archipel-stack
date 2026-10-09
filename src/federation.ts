@@ -13,6 +13,7 @@ import {
   Problem,
   hash,
   text,
+  threadTitle,
   type User,
   type Channel,
   type Message,
@@ -38,6 +39,7 @@ const context = [
     visibility: "archipel:visibility",
     showMembers: "archipel:showMembers",
     hideHandles: "archipel:hideHandles",
+    optionalTitles: "archipel:optionalTitles",
     topic: "archipel:topic",
     topics: "archipel:topics",
     proof: "archipel:proof",
@@ -234,6 +236,7 @@ export class Federation {
         showMembers: !!channel.show_members,
         hideHandles: !!channel.hide_handles,
         reactions: !!channel.reactions,
+        optionalTitles: !!channel.optional_titles,
       };
     }
     return {
@@ -325,8 +328,8 @@ export class Federation {
   // A followed channel shows its members here what its home shows them there.
   private keepPrivacy(channelId: string, actor: Doc) {
     this.store.db
-      .prepare("UPDATE channels SET show_members=?,hide_handles=?,reactions=? WHERE id=?")
-      .run(Number(actor.showMembers !== false), Number(actor.hideHandles === true), Number(actor.reactions !== false), channelId);
+      .prepare("UPDATE channels SET show_members=?,hide_handles=?,reactions=?,optional_titles=? WHERE id=?")
+      .run(Number(actor.showMembers !== false), Number(actor.hideHandles === true), Number(actor.reactions !== false), Number(actor.optionalTitles === true), channelId);
   }
   private channelChanged(channel: Channel, change: "rename" | "privacy" | "delete") {
     const actor = this.channelActor(channel),
@@ -1119,8 +1122,7 @@ export class Federation {
         "Subscribe and wait for channel admission before posting.",
       );
     const body = text(input.body, "Message", 8000),
-      title =
-        input.title == null ? null : text(input.title, "Thread title", 160);
+      title = threadTitle(input.title);
     const parent = input.parent_id
       ? this.store.message(String(input.parent_id))
       : null;
@@ -1136,7 +1138,9 @@ export class Federation {
     if (
       (channel.mode === "timeline" && (title || input.topic_id)) ||
       (channel.mode === "threaded" &&
-        ((!parent && !title) || (parent && title) || input.topic_id)) ||
+        ((!parent && !title && !channel.optional_titles) ||
+          (parent && title) ||
+          input.topic_id)) ||
       (channel.mode === "topical" &&
         (!topic || title || (parent && parent.topic_id !== topic.id)))
     )
@@ -1308,7 +1312,11 @@ export class Federation {
     if (input.title !== undefined) {
       if (channel.mode !== "threaded" || message.parent_id)
         throw new Problem(400, "Only thread roots have titles.");
-      note.name = text(input.title, "Thread title", 160);
+      const title = threadTitle(input.title);
+      if (!title && message.title && !channel.optional_titles)
+        throw new Problem(400, "Threads in this channel need a title.");
+      if (title) note.name = title;
+      else delete note.name;
     }
     note.updated = new Date(
       Math.max(
@@ -1811,10 +1819,18 @@ export class Federation {
           .prepare("UPDATE messages SET topic_id=? WHERE id=?")
           .run(topicId, parentId);
     }
+    // A followed channel's home has already decided whether a thread may go untitled; here the
+    // channel's own setting does, and a thread that had no title may stay without one.
+    const untitled =
+      !!channel.remote_actor ||
+      !!channel.optional_titles ||
+      (!!found && this.store.message(found.id).title === null);
     if (
       (channel.mode === "timeline" && (topicId || note.name)) ||
       (channel.mode === "threaded" &&
-        ((!parentId && !note.name) || (parentId && note.name) || topicId)) ||
+        ((!parentId && !note.name && !untitled) ||
+          (parentId && note.name) ||
+          topicId)) ||
       (channel.mode === "topical" &&
         (!topicId ||
           note.name ||

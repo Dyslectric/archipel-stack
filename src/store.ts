@@ -43,6 +43,7 @@ export interface Channel {
   show_members: number; // members see who else is in the channel
   hide_handles: number; // members see names without the handles behind them
   reactions: number; // members may react to messages with emoji
+  optional_titles: number; // threads may start without a title
   created_at: string;
 }
 const notifyChoice = (n: number | null) =>
@@ -128,6 +129,14 @@ export function text(value: unknown, label: string, max: number): string {
     throw new Problem(400, `${label} must be 1–${max} characters.`);
   return value.trim();
 }
+// A thread's title, or null where it was left out.
+export function threadTitle(value: unknown) {
+  return value === undefined ||
+    value === null ||
+    (typeof value === "string" && !value.trim())
+    ? null
+    : text(value, "Thread title", 160);
+}
 function choice<T extends string>(
   value: unknown,
   allowed: T[],
@@ -189,7 +198,7 @@ export class Store {
     const version = (
       this.db.prepare("PRAGMA user_version").get() as { user_version: number }
     ).user_version;
-    if (version > 17) throw new Error("Database is newer than this application");
+    if (version > 18) throw new Error("Database is newer than this application");
     if (version === 0)
       this.transaction(() =>
         this.db.exec(
@@ -287,6 +296,10 @@ export class Store {
     if (version < 17)
       this.transaction(() => this.db.exec(readFileSync(
         new URL("../migrations/017_reactions.sql", import.meta.url), "utf8",
+      )));
+    if (version < 18)
+      this.transaction(() => this.db.exec(readFileSync(
+        new URL("../migrations/018_optional_titles.sql", import.meta.url), "utf8",
       )));
   }
   close() {
@@ -1259,13 +1272,17 @@ export class Store {
         throw new Problem(400, "Choose what the channel shows its members.");
     const showMembers = input.show_members !== false,
       hideHandles = input.hide_handles === true;
+    // Whether threads need titles; moderators can change it later.
+    if (input.optional_titles !== undefined && typeof input.optional_titles !== "boolean")
+      throw new Problem(400, "Choose whether thread titles are optional.");
+    const optionalTitles = mode === "threaded" && input.optional_titles === true;
     return this.transaction(() => {
       if (this.db.prepare("SELECT 1 FROM channels WHERE name=?").get(name))
         throw new Problem(409, "That channel name is already taken.");
       const id = randomUUID();
       this.db
         .prepare(
-          "INSERT INTO channels(id,name,description,mode,visibility,admission,owner_id,created_at,show_members,hide_handles) VALUES(?,?,?,?,?,?,?,?,?,?)",
+          "INSERT INTO channels(id,name,description,mode,visibility,admission,owner_id,created_at,show_members,hide_handles,optional_titles) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         )
         .run(
           id,
@@ -1278,6 +1295,7 @@ export class Store {
           now(),
           Number(showMembers),
           Number(hideHandles),
+          Number(optionalTitles),
         );
       this.db
         .prepare("INSERT INTO memberships VALUES(?,?,?)")
@@ -1564,10 +1582,7 @@ export class Store {
       input.topic_id === undefined || input.topic_id === null
         ? null
         : text(input.topic_id, "Topic ID", 100);
-    const title =
-      input.title === undefined || input.title === null
-        ? null
-        : text(input.title, "Thread title", 160);
+    const title = threadTitle(input.title);
     if (channel.mode === "timeline" && (topicId || title))
       throw new Problem(400, "Timeline messages cannot have a topic or title.");
     if (channel.mode !== "topical" && topicId)
@@ -1583,7 +1598,12 @@ export class Store {
       if (title)
         throw new Problem(400, "Topic messages do not have thread titles.");
     }
-    if (channel.mode === "threaded" && !parentId && !title)
+    if (
+      channel.mode === "threaded" &&
+      !parentId &&
+      !title &&
+      !channel.optional_titles
+    )
       throw new Problem(400, "A new thread needs a title.");
     if (parentId) {
       const parent = this.db
@@ -1735,6 +1755,27 @@ export class Store {
       return this.channelInfo(user, this.channel(id));
     });
   }
+  // Moderators (and the owner) decide whether threads in a threaded channel need titles.
+  setOptionalTitles(user: User, id: string, optional: unknown) {
+    const channel = this.channel(id);
+    this.requireManage(user, channel);
+    if (channel.mode !== "threaded")
+      throw new Problem(400, "Only threaded channels have thread titles.");
+    if (typeof optional !== "boolean")
+      throw new Problem(400, "Choose whether thread titles are optional.");
+    return this.transaction(() => {
+      this.db
+        .prepare("UPDATE channels SET optional_titles=? WHERE id=?")
+        .run(Number(optional), id);
+      this.audit(
+        user.id,
+        "channel.titles",
+        JSON.stringify({ channel: id, optional_titles: optional }),
+      );
+      this.federationHooks?.channel(this.channel(id), "privacy");
+      return this.channelInfo(user, this.channel(id));
+    });
+  }
   // Records (or removes) one person's reaction; the callers have checked who may react.
   applyReaction(userId: string, messageId: string, emoji: string, on: boolean) {
     this.transaction(() => {
@@ -1828,14 +1869,15 @@ export class Store {
       );
     const body = text(input.body, "Message", 8000);
     const title =
-      input.title === undefined
-        ? message.title
-        : text(input.title, "Thread title", 160);
+      input.title === undefined ? message.title : threadTitle(input.title);
     if (
       input.title !== undefined &&
       (channel.mode !== "threaded" || message.parent_id)
     )
       throw new Problem(400, "Only thread roots have editable titles.");
+    // A thread that has a title keeps one unless the channel lets threads go without.
+    if (!title && message.title && !channel.optional_titles)
+      throw new Problem(400, "Threads in this channel need a title.");
     this.transaction(() => {
       this.db
         .prepare("UPDATE messages SET body=?,title=?,edited_at=? WHERE id=?")

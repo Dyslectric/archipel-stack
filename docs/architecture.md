@@ -63,7 +63,8 @@ The three modes have explicit invariants:
 - **Topical:** every message belongs to a topic in the same channel; replies
   stay within that topic.
 - **Threaded:** titled root posts with nested replies. Parent references stay
-  within the channel. Preserve the tree independently of comment sorting.
+  within the channel. A channel setting (`optional_titles`, federated as
+  `optionalTitles`) lets roots go untitled; moderators can change it at any time. Preserve the tree independently of comment sorting.
 
 Implemented: keep channel mode fixed during the first milestone. A later conversion
 requires a defined treatment of existing topics and replies.

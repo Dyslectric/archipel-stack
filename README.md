@@ -50,6 +50,8 @@ usernames match. New instances start without fabricated channels or conversation
 - Invite-only instance registration with a private admin approval queue for provider identities and verified socials.
 - Timeline channels, topics, and titled threads with nested replies. Timeline
   and topic messages can reply to one another and link back to what they answer.
+  A threaded channel can make thread titles optional, when it is created or later
+  from its settings.
 - Per-channel privacy: the owner can keep the member list, and the handles
   behind display names, to the owner and moderators and the members they allow.
 - Public or members-only reading; open or invited membership.

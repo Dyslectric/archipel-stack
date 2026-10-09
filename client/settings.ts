@@ -614,7 +614,7 @@ const sections: Section[] = [
       el.innerHTML =
         card(
           `${channelIcon(c)} ${esc(c.name)}`,
-          `<dl class="info"><dt>Address</dt><dd><code>${esc(address)}</code></dd><dt>Description</dt><dd>${esc(c.description || "None")}</dd><dt>Conversation style</dt><dd>${modeLabel(c.mode)}</dd><dt>Who can read</dt><dd>${c.visibility === "members" ? "Members only" : "Everyone on this instance"}</dd><dt>Who can join</dt><dd>${c.admission === "allowlist" ? "Invited users only" : "Anyone on this instance"}</dd><dt>Members</dt><dd><a href="#/settings/channel/members/${c.id}">${c.member_count}</a></dd><dt>Your role</dt><dd>${roleLabel(c.role)}</dd><dt>Shared with</dt><dd>${c.remote_actor ? "Hosted on another server" : c.federation_enabled ? "Members here and on other servers" : "People on this instance"}</dd></dl><p><a class="button secondary" href="#/c/${c.id}">${icon("chat")} Open channel</a></p>`,
+          `<dl class="info"><dt>Address</dt><dd><code>${esc(address)}</code></dd><dt>Description</dt><dd>${esc(c.description || "None")}</dd><dt>Conversation style</dt><dd>${modeLabel(c.mode)}${c.mode === "threaded" ? ` · titles ${c.optional_titles ? "optional" : "required"}` : ""}</dd><dt>Who can read</dt><dd>${c.visibility === "members" ? "Members only" : "Everyone on this instance"}</dd><dt>Who can join</dt><dd>${c.admission === "allowlist" ? "Invited users only" : "Anyone on this instance"}</dd><dt>Members</dt><dd><a href="#/settings/channel/members/${c.id}">${c.member_count}</a></dd><dt>Your role</dt><dd>${roleLabel(c.role)}</dd><dt>Shared with</dt><dd>${c.remote_actor ? "Hosted on another server" : c.federation_enabled ? "Members here and on other servers" : "People on this instance"}</dd></dl><p><a class="button secondary" href="#/c/${c.id}">${icon("chat")} Open channel</a></p>`,
         ) +
         (c.role && c.role !== "owner"
           ? card(
@@ -639,6 +639,13 @@ const sections: Section[] = [
               "Turning reactions off hides them in this channel. Existing reactions are kept and show again if you turn them back on. Reactions stay on this instance, including for instances following the channel.",
             )
           : "") +
+        (reacting && c.mode === "threaded"
+          ? card(
+              "Thread titles",
+              `<form class="stack narrow-form" id="channel-titles"><label class="check"><input type="checkbox" name="optional" ${c.optional_titles ? "checked" : ""}> Let threads start without a title</label>${error}<button>Save</button></form>`,
+              "When titles are required, every new thread needs one. Threads already posted keep the title they have, or none, either way.",
+            )
+          : "") +
         (owning
           ? card(
               "Rename",
@@ -651,6 +658,16 @@ const sections: Section[] = [
               "Removes the channel and every message in it for everyone. This can't be undone.",
             )
           : "");
+      if (reacting && c.mode === "threaded")
+        onSubmit($("#channel-titles", el), async (data) => {
+          await api(`/channels/${c.id}/titles`, "PATCH", {
+            optional: data.get("optional") === "on",
+          });
+          state.channels = await api<Channel[]>("/channels");
+          if (chatChannel()?.id === c.id) resetChat();
+          toast("Channel updated.");
+          ctx.refresh();
+        });
       if (reacting)
         onSubmit($("#channel-reactions", el), async (data) => {
           await api(`/channels/${c.id}/reactions`, "PATCH", {

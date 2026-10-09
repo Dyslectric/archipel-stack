@@ -104,6 +104,7 @@ const dmChannel = (c: Conversation): Channel => ({
   show_members: 0,
   hide_handles: 0,
   reactions: 0,
+  optional_titles: 0,
   sees_members: false,
   sees_handles: true,
   dm: c,
@@ -500,7 +501,7 @@ function react(id: string, emoji: string, on: boolean) {
 }
 function bodyHtml(m: Message, cls = "") {
   if (editing === m.id && !m.deleted_at)
-    return `<form class="stack inline-form picker-host" data-edit-form="${m.id}">${m.title !== null ? `<input name="title" maxlength="160" value="${esc(m.title)}" aria-label="Thread title" required>` : ""}<textarea name="body" rows="3" maxlength="8000" aria-label="Edited message" required>${esc(m.body)}</textarea><p class="form-error" role="alert"></p><div class="row"><button class="small">Save changes</button><button type="button" class="small secondary" data-cancel-edit>Cancel</button><button type="button" class="icon-button" data-emoji-for aria-label="Choose emoji" title="Emoji">${icon("smile")}</button>${attachButton("data-attach-for")}</div></form>`;
+    return `<form class="stack inline-form picker-host" data-edit-form="${m.id}">${threaded() && !m.parent_id ? `<input name="title" maxlength="160" value="${esc(m.title || "")}" placeholder="Thread title${m.title && !current!.optional_titles ? "" : " (optional)"}" aria-label="Thread title" ${m.title && !current!.optional_titles ? "required" : ""}>` : ""}<textarea name="body" rows="3" maxlength="8000" aria-label="Edited message" required>${esc(m.body)}</textarea><p class="form-error" role="alert"></p><div class="row"><button class="small">Save changes</button><button type="button" class="small secondary" data-cancel-edit>Cancel</button><button type="button" class="icon-button" data-emoji-for aria-label="Choose emoji" title="Emoji">${icon("smile")}</button>${attachButton("data-attach-for")}</div></form>`;
   const big = !m.deleted_at && emojiOnly(m.body, m.emojis || []);
   return `<div class="message-body${cls ? ` ${cls}` : ""}${m.deleted_at ? " faded" : " markdown"}${big ? " emoji-only" : ""}">${m.deleted_at ? "This message was removed." : richHtml(m.body, m.emojis || [])}</div>${reactionsHtml(m)}`;
 }
@@ -895,7 +896,7 @@ function wireFeed() {
       void inline(form, async (data) => {
         await api(`/messages/${message.id}`, "PATCH", {
           body: data.get("body"),
-          ...(message.title !== null ? { title: data.get("title") } : {}),
+          ...(data.has("title") ? { title: data.get("title") } : {}),
           expected_edited_at: message.edited_at,
         });
         editing = null;
@@ -1068,7 +1069,7 @@ function renderComposer(keepDraft = true) {
         : `Message ${c.dm ? "" : "#"}${c.name}…`;
   area.innerHTML = `<div class="composer-wrap picker-host"><form id="composer" class="composer">
     ${c.mode === "topical" ? `<div class="compose-to">${channelIcon(c)}<span class="compose-channel">${esc(c.name)}</span>${icon("chevron-right", "sep")}<input id="compose-topic" list="topic-options" maxlength="100" placeholder="Topic" aria-label="Topic" autocomplete="off" required value="${esc(topic)}"><datalist id="topic-options"></datalist></div>` : ""}
-    ${c.mode === "threaded" ? `<input id="thread-title" class="thread-input" maxlength="160" placeholder="New thread title" aria-label="Thread title" required value="${esc(title)}">` : ""}
+    ${c.mode === "threaded" ? `<input id="thread-title" class="thread-input" maxlength="160" placeholder="New thread title${c.optional_titles ? " (optional)" : ""}" aria-label="Thread title" ${c.optional_titles ? "" : "required"} value="${esc(title)}">` : ""}
     ${reply ? `<div class="reply-banner small">${icon("reply")}<span>Replying to <strong>${esc(reply.display_name)}</strong></span><button type="button" id="cancel-reply" class="icon-button" aria-label="Cancel reply">${icon("x")}</button></div>` : ""}
     <textarea id="message-body" maxlength="8000" rows="1" placeholder="${esc(place)}" aria-label="Message" required>${esc(draft)}</textarea>
     <div class="composer-bar"><button type="button" id="choose-emoji" class="icon-button" aria-label="Choose emoji" title="Emoji" aria-expanded="false">${icon("smile")}</button>${attachButton('id="attach-file"')}<span class="muted small composer-hint-keys" title="Shift + Enter for a new line"><kbd>Enter</kbd> to send</span><button id="send-message" type="submit" aria-label="Send message">${icon("send")}<span>${c.mode === "threaded" ? "Post thread" : "Send"}</span></button></div></form></div>`;

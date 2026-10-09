@@ -734,6 +734,11 @@ export function createApp(config: Config, store: Store) {
       store.setReactions(user(res), String(req.params.id), req.body?.enabled),
     ),
   );
+  app.patch("/api/channels/:id/titles", (req, res) =>
+    res.json(
+      store.setOptionalTitles(user(res), String(req.params.id), req.body?.optional),
+    ),
+  );
   app.put("/api/messages/:id/reactions", (req, res) =>
     res.json(
       store.channel(store.message(String(req.params.id)).channel_id).remote_actor

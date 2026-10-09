@@ -79,6 +79,7 @@ export function showChannels(view: HTMLElement, create: boolean) {
       <details class="create-options"><summary>More options</summary><div class="stack">
       <label>Description<textarea name="description" maxlength="500" rows="2" placeholder="What is it for?"></textarea></label>
       <label>Conversation style<select name="mode"><option value="timeline">Timeline: one running conversation</option><option value="topical">Topics: messages grouped by subject</option><option value="threaded">Threads: posts with nested replies</option></select></label>
+      <label class="check" id="create-optional-titles" hidden><input type="checkbox" name="optional_titles"> Let threads start without a title</label>
       <label>Who can read?<select name="visibility"><option value="public">Everyone on this instance</option><option value="members">Members only</option></select></label>
       <label>Who can join?<select name="admission"><option value="open">Anyone on this instance</option><option value="allowlist">Invited users only</option></select></label>
       <label class="check"><input type="checkbox" name="show_members" checked> Show the member list</label>
@@ -123,6 +124,7 @@ export function showChannels(view: HTMLElement, create: boolean) {
   const form = $<HTMLFormElement>("#new-channel form");
   form.addEventListener("change", () => {
     const data = new FormData(form);
+    $("#create-optional-titles", form).hidden = data.get("mode") !== "threaded";
     const style = data.get("mode") === "threaded" ? "Posts with nested replies" : data.get("mode") === "topical" ? "Messages grouped by topic" : "A running conversation";
     $("#create-summary", form).textContent = `${style}. ${data.get("visibility") === "members" ? "Members can read" : "Anyone on this instance can read"}; ${data.get("admission") === "allowlist" ? "joining requires an invitation" : "anyone here can join"}.`;
   });
@@ -134,6 +136,7 @@ export function showChannels(view: HTMLElement, create: boolean) {
         ...Object.fromEntries(data),
         show_members: data.get("show_members") === "on",
         hide_handles: data.get("hide_handles") === "on",
+        optional_titles: data.get("mode") === "threaded" && data.get("optional_titles") === "on",
       },
     );
     state.channels = await api<Channel[]>("/channels");

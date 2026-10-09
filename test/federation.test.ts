@@ -971,6 +971,31 @@ test("reactions cross instances in both directions and follow the home channel's
   await drain(a, b);
   assert.throws(() => b.fed.remoteReact(b.bob, copy().id, { emoji: "tada", on: true }), /turned off/);
 });
+test("untitled threads cross instances where the home channel makes titles optional", async (t) => {
+  const a = await instance(t),
+    b = await instance(t);
+  const home = channel(a, { mode: "threaded" });
+  const sub = await b.fed.subscribe(b.bob, a.fed.channelActor(home));
+  await drain(a, b);
+  const here = () => b.store.channel(sub.channel.id);
+  assert.equal(here().optional_titles, 0);
+  await assert.rejects(b.fed.remotePost(b.bob, sub.channel.id, { body: "No title yet" }), /structure/);
+  a.store.setOptionalTitles(a.alice, home.id, true);
+  await drain(a, b);
+  assert.equal(here().optional_titles, 1);
+  a.store.post(a.alice, home.id, { body: "Untitled at home" });
+  await b.fed.remotePost(b.bob, sub.channel.id, { body: "Untitled from afar" });
+  await drain(a, b);
+  for (const [store, reader, id] of [[a.store, a.alice, home.id], [b.store, b.bob, sub.channel.id]] as const)
+    assert.deepEqual(
+      store.messages(reader, id).map((m) => [m.body, m.title]).sort(),
+      [["Untitled at home", null], ["Untitled from afar", null]],
+    );
+  a.store.setOptionalTitles(a.alice, home.id, false);
+  await drain(a, b);
+  assert.equal(here().optional_titles, 0);
+  await assert.rejects(b.fed.remotePost(b.bob, sub.channel.id, { body: "Too late" }), /structure/);
+});
 test("a federated channel lists its members on every instance, unless its home keeps the list", async (t) => {
   const a = await instance(t),
     b = await instance(t),

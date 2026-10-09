@@ -598,7 +598,7 @@ test("version-two emoji messages keep their image metadata through the federatio
     { id: "asset", name: "island", url: "/api/emojis/asset/image" },
   ]);
   assert.equal(store.user("author").federation_send, 0);
-  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 17);
+  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 18);
 });
 
 test("direct messages reach both members, and only the reader's own are news to them", () => {
@@ -707,7 +707,7 @@ test("personal blocks persist across restarts and upgrade an existing version 4 
   let store = new Store(path);
   const alice = store.loginIdentity("https://id.example", "alice", "alice", []);
   const bob = store.loginIdentity("https://id.example", "bob", "bob", []);
-  store.db.exec("DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; DROP TABLE user_blocks; PRAGMA user_version=4;");
+  store.db.exec("ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; DROP TABLE user_blocks; PRAGMA user_version=4;");
   store.close();
   store = new Store(path);
   const peer = `${store.baseUrl}/actors/users/${alice.id}`;
@@ -757,7 +757,7 @@ test("profile picture migration preserves identities and pictures survive restar
   const path = join(directory, "db.sqlite");
   let store = new Store(path);
   const alice = store.loginIdentity("https://id.example", "alice", "alice", []);
-  store.db.exec("DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; PRAGMA user_version=5;");
+  store.db.exec("ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; PRAGMA user_version=5;");
   store.close();
   store = new Store(path);
   const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
@@ -805,9 +805,9 @@ test("version 9 avatar migration preserves pictures and XMPP cursors and remote 
   const image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
   store.setAvatar(alice, image);
   store.db.prepare("INSERT INTO xmpp_events(seq,kind,object_id) VALUES(50,'Direct','old-message')").run();
-  store.db.exec("DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; PRAGMA user_version=9");
+  store.db.exec("ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; PRAGMA user_version=9");
   store.close(); store = new Store(path);
-  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 17);
+  assert.equal(store.db.prepare("PRAGMA user_version").get()?.user_version, 18);
   assert.equal(Buffer.from(store.avatarImage(alice.id).image).toString("base64"), image);
   assert.equal(store.db.prepare("SELECT seq FROM xmpp_events WHERE object_id='old-message'").get()?.seq, 50);
   const next = store.db.prepare("INSERT INTO xmpp_events(kind,object_id) VALUES('Profile',?)").run(alice.id);
@@ -973,6 +973,42 @@ test("hidden topics and threads leave what is new, and each part of a channel de
 
   store.deleteChannel(alice, topical.id);
   assert.deepEqual(Object.keys(store.prefs(bob)), [`thread:${kept.id}`]);
+  store.close();
+});
+test("threaded channels can make thread titles optional, at creation or later", () => {
+  const { store, alice, bob, charlie } = fixture();
+  const c = store.createChannel(alice, channelInput({ mode: "threaded" }));
+  store.join(bob, c.id);
+  store.join(charlie, c.id);
+  store.setMember(alice, c.id, bob.id, { role: "moderator" });
+  assert.equal(c.optional_titles, 0);
+  denied(() => store.post(alice, c.id, { body: "Untitled" }), 400);
+  denied(() => store.post(alice, c.id, { body: "Blank", title: "  " }), 400);
+  denied(() => store.setOptionalTitles(charlie, c.id, true));
+  denied(() => store.setOptionalTitles(alice, c.id, "yes"), 400);
+  assert.equal(store.setOptionalTitles(bob, c.id, true).optional_titles, 1);
+  const bare = store.post(charlie, c.id, { body: "Untitled" });
+  assert.equal(bare.title, null);
+  assert.equal(store.post(charlie, c.id, { body: "Blank", title: "  " }).title, null);
+  const titled = store.post(charlie, c.id, { body: "Named", title: "A name" });
+  // A title can be added to a thread, and taken off again while titles are optional.
+  let edited = store.editMessage(charlie, bare.id, { body: "Untitled", title: "Now named", expected_edited_at: null });
+  assert.equal(edited.title, "Now named");
+  edited = store.editMessage(charlie, bare.id, { body: "Untitled", title: "", expected_edited_at: edited.edited_at });
+  assert.equal(edited.title, null);
+  // Required again: untitled threads stay as they are, titled ones keep a title.
+  store.setOptionalTitles(alice, c.id, false);
+  denied(() => store.post(charlie, c.id, { body: "Untitled again" }), 400);
+  assert.equal(store.editMessage(charlie, bare.id, { body: "Still untitled", title: "", expected_edited_at: edited.edited_at }).title, null);
+  denied(() => store.editMessage(charlie, titled.id, { body: "Named", title: "", expected_edited_at: null }), 400);
+  // Only threaded channels have the setting.
+  const open = store.createChannel(alice, channelInput({ name: "open-threads", mode: "threaded", optional_titles: true }));
+  assert.equal(open.optional_titles, 1);
+  assert.equal(store.post(alice, open.id, { body: "Untitled" }).title, null);
+  denied(() => store.createChannel(alice, channelInput({ name: "wrong-titles", mode: "threaded", optional_titles: "yes" })), 400);
+  const line = store.createChannel(alice, channelInput({ name: "a-timeline", optional_titles: true }));
+  assert.equal(line.optional_titles, 0);
+  denied(() => store.setOptionalTitles(alice, line.id, true), 400);
   store.close();
 });
 test("members react to messages; moderators turn reactions off and on", () => {
