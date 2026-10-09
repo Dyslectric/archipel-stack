@@ -703,11 +703,13 @@ dialog.share-dialog li + li { margin-top: 6px; }
   .top-inner .brand, .conn { display: none; }
 }
 
-.reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
-.reaction { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; min-height: 32px; font-size: .9rem;
+.reactions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.reaction { display: inline-flex; align-items: center; gap: 6px; padding: 3px 12px; min-height: 38px; font-size: 1rem; font-weight: 500;
+  line-height: 1;
   border: 1px solid var(--line); border-radius: 999px; background: transparent; color: inherit; cursor: pointer; }
 .reaction.mine { background: color-mix(in srgb, var(--accent) 18%, transparent); border-color: var(--accent); }
 .reaction:disabled { cursor: default; }
+.reaction .emoji, .reaction .custom-emoji { vertical-align: middle; }
 .emoji-card { position: fixed; z-index: 60; display: flex; gap: 12px; align-items: center; max-width: 280px; padding: 10px 14px;
   background: var(--card); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow-pop);
   animation: pop-in .12s ease-out; }
