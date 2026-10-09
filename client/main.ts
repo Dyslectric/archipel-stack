@@ -90,10 +90,11 @@ document.addEventListener("click", (event) => {
   const at = event.target as Element;
   for (const menu of $$<HTMLDetailsElement>("details.menu[open]"))
     if (!menu.contains(at) || at.closest("a.menu-item")) menu.open = false;
-  if (
-    (!at.closest("#sidebar") && !at.closest("#mobile-menu")) ||
-    at.closest("#sidebar a")
-  )
+  // The path, not the target's ancestors: folding a section redraws the drawer, and what was
+  // clicked is out of the page by now.
+  const path = event.composedPath(),
+    within = (id: string) => path.some((el) => (el as Element).id === id);
+  if ((!within("sidebar") && !within("mobile-menu")) || at.closest("#sidebar a"))
     document.querySelector("#sidebar")?.classList.remove("mobile-open");
 });
 document.addEventListener("keydown", (event) => {
@@ -185,6 +186,7 @@ document.addEventListener(
     if (s.dragging === "drawer") {
       s.offset = Math.min(0, Math.max(-s.width, (s.open ? 0 : -s.width) + dx));
       s.side!.style.transform = `translateX(${s.offset}px)`;
+      s.side!.style.opacity = String(1 + s.offset / s.width); // it fades as far as it has slid
       return;
     }
     // Past the point where it would reply the message drags, so that the point can be felt.
@@ -211,7 +213,7 @@ function settle(finished: boolean) {
         ? s.speed > 0
         : s.offset > -s.width / 2;
     s.side!.classList.remove("dragging");
-    s.side!.style.transform = "";
+    s.side!.style.transform = s.side!.style.opacity = "";
     s.side!.classList.toggle("mobile-open", open);
   } else if (s?.dragging === "reply") {
     const m = s.message!,
