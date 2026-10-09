@@ -447,7 +447,8 @@ if (typeof document !== "undefined") {
   document.addEventListener("mouseover", (e) => {
     const at = e.target as Element | null,
       img = at?.closest?.<HTMLImageElement>("img.custom-emoji[data-kind]");
-    if (img) show(img);
+    // Only where an emoji was used: not where one is being chosen, listed or summarised.
+    if (img && !img.closest(".emoji-picker, .emoji-suggest, .emoji-sample, .reply-context, dialog")) show(img);
     else if (card && !card.contains(at)) leave();
   });
   document.addEventListener("mouseleave", leave);

@@ -24,7 +24,8 @@
     "gemoji": "8.1.0",
     "helmet": "8.3.0",
     "ipaddr.js": "2.2.0",
-    "openid-client": "6.8.8"
+    "openid-client": "6.8.8",
+    "twemoji-colr-font": "15.0.3"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.0",
