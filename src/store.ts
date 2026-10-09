@@ -1614,15 +1614,28 @@ export class Store {
       avatar_url: message.history_placeholder ? null : this.avatarUrl(message.author_id),
     };
   }
-  private liveEmojis(tags: string) {
-    return (JSON.parse(tags) as CustomEmoji[]).filter(
-      (e) =>
-        !!this.db
-          .prepare(
-            "SELECT 1 FROM custom_emojis WHERE id=? UNION ALL SELECT 1 FROM personal_emojis WHERE id=? UNION ALL SELECT 1 FROM remote_emoji_cache WHERE id=?",
-          )
-          .get(e.id, e.id, e.id),
-    );
+  // The emoji a message used that still exist, each with whose it is and the host it came from.
+  private liveEmojis(tags: string): CustomEmoji[] {
+    const here = new URL(this.baseUrl).host,
+      host = (url: string) => {
+        try {
+          return new URL(url).host;
+        } catch {
+          return here;
+        }
+      };
+    return (JSON.parse(tags) as CustomEmoji[]).flatMap((e) => {
+      const found = this.db
+        .prepare(
+          "SELECT 'instance' AS kind,'' AS source FROM custom_emojis WHERE id=? UNION ALL SELECT 'personal',source_url FROM personal_emojis WHERE id=? UNION ALL SELECT 'remote',source_url FROM remote_emoji_cache WHERE id=?",
+        )
+        .get(e.id, e.id, e.id) as
+        | { kind: "instance" | "personal" | "remote"; source: string }
+        | undefined;
+      return found
+        ? [{ ...e, kind: found.kind, origin: found.source ? host(found.source) : here }]
+        : [];
+    });
   }
   messages(user: User, id: string, before?: number) {
     this.requireRead(user, this.channel(id));
