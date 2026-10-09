@@ -313,3 +313,19 @@ test("renaming a channel moves its room and deleting it drops queued room events
   assert.deepEqual(after.kick, [{ room: moved, jid: session.jid }]);
   f.store.close();
 });
+
+test("a delivery cursor kept from another database starts again instead of withholding every new message", () => {
+  const f = fixture();
+  const inventory = (after: number) => ({ after, sessions: [{ jid: `${f.a.jid}/test`, credential: f.a.id }],
+    occupants: [{ jid: `${f.a.jid}/test`, room: f.roomJid }] });
+  f.store.post(f.alice, f.room.id, { body: "Before the adapter looked" });
+  // Prosody's volume outlived the database: its cursor is past anything issued here.
+  const stale = f.xmpp.sync(inventory(5000));
+  assert.equal(stale.messages.length, 0);
+  assert.ok(stale.after < 5000);
+  f.store.post(f.alice, f.room.id, { body: "Live again" });
+  const next = f.xmpp.sync(inventory(stale.after));
+  assert.deepEqual(next.messages.map(m => m.body), ["Live again"]);
+  // A cursor that is merely caught up is left alone.
+  assert.equal(f.xmpp.sync(inventory(next.after)).after, next.after);
+});

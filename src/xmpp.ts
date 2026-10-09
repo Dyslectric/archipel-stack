@@ -555,8 +555,13 @@ export class Xmpp {
         occupants.push({ room, jid: address, user });
       } catch { kick.push({ room, jid: address }); }
     }
+    // A cursor past every event issued here was kept for another database (Prosody's volume
+    // outlived this one, or a backup was restored): nothing new would ever reach it, so it starts
+    // again from what exists now.
+    const issued = Number(this.store.db.prepare("SELECT seq FROM sqlite_sequence WHERE name='xmpp_events'").get()?.seq ?? 0);
+    const from = Math.min(after, issued);
     const events = this.store.db.prepare("SELECT * FROM xmpp_events WHERE seq>? ORDER BY seq LIMIT 100")
-      .all(after) as { seq: number; kind: string; object_id: string; sender_id: string | null; recipient: string | null }[];
+      .all(from) as { seq: number; kind: string; object_id: string; sender_id: string | null; recipient: string | null }[];
     const messages: Delivery[] = [], profiles: { jid: string; hash: string }[] = [];
     for (const event of events) {
       if (event.kind === "Profile") {
@@ -598,7 +603,7 @@ export class Xmpp {
         if (!access.blocked && (access.incoming || access.outgoing)) avatarRequests.push({ peer: request.peer.slice(5), requester: this.jid(user), attempt });
       } catch { /* Current policy cancels queued remote profile reads. */ }
     }
-    return { after: events.at(-1)?.seq ?? after, messages, disconnect, kick, profiles, avatar_requests: avatarRequests };
+    return { after: events.at(-1)?.seq ?? from, messages, disconnect, kick, profiles, avatar_requests: avatarRequests };
   }
   internalRouter() {
     const router = Router();
