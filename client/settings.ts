@@ -412,7 +412,7 @@ const sections: Section[] = [
           const emoji = saved.find((e) => e.id === button.dataset.renameEmoji)!,
             row = button.closest("li")!;
           row.className = "emoji-edit";
-          row.innerHTML = `<form><span class="emoji-sample">${emojiHtml(`:${emoji.name}:`, [emoji])}</span><label class="grow">New shortcode<input name="name" value="${esc(emoji.name)}" ${shortcode}></label><button class="small">Save shortcode</button><button type="button" class="small secondary" data-cancel>Cancel</button>${error}</form><p class="muted small">Older messages keep their original emoji.</p>`;
+          row.innerHTML = `<form><span class="emoji-sample">${emojiHtml(`:${emoji.name}:`, [emoji])}</span><label class="grow"><input name="name" value="${esc(emoji.name)}" aria-label="New shortcode" ${shortcode}></label><button class="small">Save shortcode</button><button type="button" class="small secondary" data-cancel>Cancel</button>${error}</form><p class="muted small">Older messages keep their original emoji.</p>`;
           $("[data-cancel]", row).addEventListener("click", ctx.refresh);
           $<HTMLInputElement>("input", row).select();
           onSubmit($("form", row), async (data) => {
@@ -1184,7 +1184,7 @@ const sections: Section[] = [
           const emoji = emojis.find((e) => e.name === button.dataset.renameInstanceEmoji)!,
             row = button.closest("li")!;
           row.className = "emoji-edit";
-          row.innerHTML = `<form><span class="emoji-sample">${emojiHtml(`:${emoji.name}:`, [emoji])}</span><label class="grow">New shortcode<input name="name" value="${esc(emoji.name)}" ${shortcode}></label><button class="small">Save shortcode</button><button type="button" class="small secondary" data-cancel>Cancel</button>${error}</form><p class="muted small">Older messages keep showing the emoji under its original shortcode.</p>`;
+          row.innerHTML = `<form><span class="emoji-sample">${emojiHtml(`:${emoji.name}:`, [emoji])}</span><label class="grow"><input name="name" value="${esc(emoji.name)}" aria-label="New shortcode" ${shortcode}></label><button class="small">Save shortcode</button><button type="button" class="small secondary" data-cancel>Cancel</button>${error}</form><p class="muted small">Older messages keep showing the emoji under its original shortcode.</p>`;
           $("[data-cancel]", row).addEventListener("click", ctx.refresh);
           $<HTMLInputElement>("input", row).select();
           onSubmit($("form", row), async (data) => {
