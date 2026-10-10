@@ -348,6 +348,7 @@ const federationPolicy = (s: Session) =>
     s.user?.direct_messages,
     s.user?.attachments,
     s.user?.xmpp_rooms,
+    s.user?.list_members,
   ]);
 function connection(up: boolean) {
   const status = document.querySelector<HTMLElement>("#connection-status");

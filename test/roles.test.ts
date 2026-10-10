@@ -27,7 +27,7 @@ test("everyone starts on the default role, which allows local use and no federat
   const profile = f.store.profile(f.bob, true) as Record<string, unknown>;
   assert.deepEqual(profile.instance_role, { id: role.id, name: "Member" });
   for (const grant of ["create_channels", "federate_channels", "direct_messages", "attachments", "xmpp_rooms"]) assert.equal(profile[grant], true);
-  for (const grant of ["federation_send", "federation_receive", "federation_subscribe", "federation_post"]) assert.equal(profile[grant], false);
+  for (const grant of ["list_members", "federation_send", "federation_receive", "federation_subscribe", "federation_post"]) assert.equal(profile[grant], false);
   assert.equal("instance_role" in f.store.profile(f.bob), false);
   denied(() => f.store.roles(f.bob));
   denied(() => f.store.createRole(f.bob, { name: "Mine" }));
@@ -56,6 +56,34 @@ test("a role's grants gate channel creation, channel federation, direct messages
   assert.equal(f.store.createChannel(f.bob, channel("after")).name, "after");
   assert.equal(f.fed.setChannel(f.bob, open.id, true).federation_enabled, 1);
   f.store.sendDirect(f.bob, f.alice.id, "Hello");
+});
+
+test("the default role cannot list the instance's members; an administrator and a role granted it can", t => {
+  const f = fixture(); t.after(() => f.store.close());
+  denied(() => f.store.directory(f.bob));
+  assert.deepEqual(f.store.directory(f.alice).map(u => u.username), ["alice", "bob"]);
+  // Someone whose handle is known can still be written to.
+  assert.equal(f.store.localRecipient("@alice"), f.alice.id);
+  const greeter = f.store.createRole(f.alice, { name: "Greeter" });
+  assert.equal(greeter.list_members, false);
+  f.store.setUserRole(f.alice, f.bob.id, greeter.id);
+  denied(() => f.store.directory(f.bob));
+  f.store.updateRole(f.alice, greeter.id, { list_members: true });
+  assert.equal((f.store.profile(f.store.user(f.bob.id), true) as Record<string, unknown>).list_members, true);
+  const listed = f.store.directory(f.bob);
+  assert.deepEqual(listed.map(u => u.username), ["alice", "bob"]);
+  assert.equal("banned" in listed[0], false);
+  f.store.setUserRole(f.alice, f.bob.id, null);
+  denied(() => f.store.directory(f.bob));
+});
+
+test("upgrading takes the member list from the default role and leaves it with the others", sqliteOnly, t => {
+  const f = fixture(); t.after(() => f.store.close());
+  const other = f.store.createRole(f.alice, { name: "Other" });
+  f.store.db.exec("ALTER TABLE roles DROP COLUMN list_members; PRAGMA user_version=19");
+  f.store.db.exec(readFileSync(new URL("../migrations/020_list_members.sql", import.meta.url), "utf8"));
+  const roles = Object.fromEntries(f.store.roles(f.alice).map(r => [r.id, r.list_members]));
+  assert.deepEqual(roles, { member: false, [other.id]: true });
 });
 
 test("federation grants follow the role through edits, reassignment, default changes and deletion", t => {

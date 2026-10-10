@@ -30,6 +30,7 @@ export interface User {
   direct_messages?: boolean;
   attachments?: boolean;
   xmpp_rooms?: boolean;
+  list_members?: boolean;
 }
 export interface Topic {
   id: string;
@@ -279,6 +280,9 @@ export const nameButton = (
   actor
     ? `<button type="button" class="${cls} name-button" data-user="${esc(actor)}" data-username="${esc(u.username)}" data-name="${esc(u.display_name)}" data-avatar="${esc(u.avatar_url || "")}" title="About ${esc(u.display_name)}">${esc(u.display_name)}</button>`
     : `<strong class="${cls}">${esc(u.display_name)}</strong>`;
+// Whether this account may see everyone on the instance: its role's grant, or being an administrator.
+export const listsMembers = () =>
+  !!(state.session.user?.admin || state.session.user?.list_members);
 // The handle beside a name; a channel that hides handles sends none.
 export const handleTag = (username: string) =>
   username ? `<span class="handle">@${esc(username)}</span>` : "";

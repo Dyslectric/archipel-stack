@@ -48,8 +48,8 @@ usernames match. New instances start without fabricated channels or conversation
 - Image, GIF and video attachments (PNG, JPEG, GIF, WebP up to 10 MiB; MP4, WebM up
   to 50 MiB), attached with the paperclip, by pasting, or by dropping a file.
 - Instance roles: a default role and any number of others, each granting channel
-  creation, channel federation, direct messages, attachments, XMPP room joining and
-  the four federation grants. See [roles](#roles).
+  creation, channel federation, direct messages, attachments, XMPP room joining,
+  seeing the instance's member list and the four federation grants. See [roles](#roles).
 - A sidebar that resizes and folds away, and a member list beside each channel.
 - Invite-only instance registration with a private admin approval queue for provider identities and verified socials.
 - Timeline channels, topics, and titled threads with nested replies. Timeline
@@ -222,11 +222,12 @@ on it. A role grants, separately:
 | Send direct messages | Writing to anyone, here or elsewhere; what others send still arrives |
 | Attach images and videos | Uploading files into messages |
 | Join XMPP rooms on other servers | Browser and native-client joins, and speaking through a bridge |
+| See the list of everyone on this instance | Browsing all accounts when starting a direct message or changing a channel's access; without it a person is named by their handle. Administrators always see the list |
 | Send / receive federated messages | As described under [federation](docs/federation.md) |
 | Subscribe to remote channels, post in federated channels | Likewise |
 
-Upgrading keeps everyone's access: the default role is created with every local
-grant and no federation grant, and accounts that had federation switches of their
+The default role and new roles start with every local grant except the member
+list, and no federation grant. Upgrading keeps everyone's other access: the default role is created that way, and accounts that had federation switches of their
 own are moved to roles carrying exactly those. Deleting a role returns its accounts
 to the default one. Administrators follow their role like anyone else.
 

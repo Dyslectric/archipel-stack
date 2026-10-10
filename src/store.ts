@@ -86,6 +86,7 @@ export const permissions = [
   "direct_messages",
   "attachments",
   "xmpp_rooms",
+  "list_members",
   "federation_send",
   "federation_receive",
   "federation_subscribe",
@@ -104,6 +105,7 @@ const denied: Record<Permission, string> = {
   direct_messages: "Your role does not allow sending direct messages.",
   attachments: "Your role does not allow attaching files.",
   xmpp_rooms: "Your role does not allow joining XMPP rooms on other servers.",
+  list_members: "Your role does not allow listing the members of this instance.",
   federation_send: "Your role does not allow sending federated messages.",
   federation_receive: "Your role does not allow receiving federated messages.",
   federation_subscribe: "Your role does not allow joining federated channels.",
@@ -454,6 +456,7 @@ export class Store {
       direct_messages: !!role.direct_messages,
       attachments: !!role.attachments,
       xmpp_rooms: !!role.xmpp_rooms,
+      list_members: !!role.list_members,
     };
   }
   // Copies each matching local account's role onto its federation grants, and tells federation who changed.
@@ -531,10 +534,14 @@ export class Store {
       input.name === undefined && current
         ? current.name
         : text(input.name, "Role name", 40);
-    // A new role starts like the default one does: everything local, nothing federated.
+    // A new role starts like the default one does: everything local but the member list, nothing federated.
     const flags = permissions.map((p) => {
       if (input[p] === undefined)
-        return current ? current[p] : p.startsWith("federation_") ? 0 : 1;
+        return current
+          ? current[p]
+          : p.startsWith("federation_") || p === "list_members"
+            ? 0
+            : 1;
       if (typeof input[p] !== "boolean")
         throw new Problem(400, "Role permissions are on or off.");
       return Number(input[p]);
@@ -2706,8 +2713,9 @@ export class Store {
     this.db.prepare("INSERT INTO remote_avatars VALUES(?,?,?,?,?,?,?) ON CONFLICT(peer) DO UPDATE SET revision=excluded.revision,mime=excluded.mime,image=excluded.image,source=excluded.source,fetched_at=excluded.fetched_at")
       .run(hash(peer), peer, revision, mime, image, source, Date.now());
   }
+  // Everyone with an account here: for administrators, and the roles allowed to see the list.
   directory(user: User) {
-    this.active(user.id);
+    if (!this.active(user.id).admin) this.requirePermission(user, "list_members");
     return (
       this.db
         .prepare(

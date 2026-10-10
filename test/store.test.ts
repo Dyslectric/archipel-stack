@@ -465,7 +465,7 @@ test("invite-only identities have a private persistent review status and fresh p
   denied(() => store.applications(alice));
   denied(() => store.reviewApplication(alice, pending.id, "approved"));
   assert.equal(
-    store.directory(alice).some((u) => u.id === pending.id),
+    store.directory(admin).some((u) => u.id === pending.id),
     false,
   );
   assert.equal(store.applications(admin)[0].verified_socials.length, 1);
@@ -599,7 +599,7 @@ test("version-two emoji messages keep their image metadata through the federatio
     { id: "asset", name: "island", url: "/api/emojis/asset/image" },
   ]);
   assert.equal(store.user("author").federation_send, 0);
-  assert.equal(store.db.version(), 19);
+  assert.equal(store.db.version(), 20);
 });
 
 test("direct messages reach both members, and only the reader's own are news to them", () => {
@@ -765,6 +765,7 @@ test("profile pictures are shared through profiles, messages and DMs and invalid
   const peer = `${store.baseUrl}/actors/users/${alice.id}`;
   assert.equal(store.conversations(bob)[0].avatar_url, uploaded.avatar_url);
   assert.equal(store.directHistory(bob, peer).messages[0].avatar_url, uploaded.avatar_url);
+  store.updateRole(store.loginIdentity("https://id.example", "admin", "admin", [], true), "member", { list_members: true });
   assert.equal(store.directory(bob).find((u) => u.id === alice.id)?.avatar_url, uploaded.avatar_url);
   assert.equal(store.avatarImage(alice.id).mime, "image/png");
   assert.equal(Buffer.from(store.avatarImage(alice.id).image).toString("base64"), png);
@@ -835,7 +836,7 @@ test("version 9 avatar migration preserves pictures and XMPP cursors and remote 
   store.db.prepare("INSERT INTO xmpp_events(seq,kind,object_id) VALUES(50,'Direct','old-message')").run();
   store.db.exec("DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; PRAGMA user_version=9");
   store.close(); store = new Store(path);
-  assert.equal(store.db.version(), 19);
+  assert.equal(store.db.version(), 20);
   assert.equal(Buffer.from(store.avatarImage(alice.id).image).toString("base64"), image);
   assert.equal(store.db.prepare("SELECT seq FROM xmpp_events WHERE object_id='old-message'").get()?.seq, 50);
   store.db.prepare("INSERT INTO xmpp_events(kind,object_id) VALUES('Profile',?)").run(alice.id);

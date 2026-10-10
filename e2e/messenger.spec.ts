@@ -123,7 +123,8 @@ test("channel defaults, in-chat options and message menus work on desktop and mo
   await page.setViewportSize({ width: 390, height: 844 });
   await page.reload();
   await expect(page.locator("#sidebar")).toBeHidden();
-  expect(await page.locator("#sidebar").evaluate((el) => getComputedStyle(el).transitionDuration)).toBe("0s");
+  // The drawer slides and fades, and stops being there once it has.
+  expect(await page.locator("#sidebar").evaluate((el) => getComputedStyle(el).transitionDuration)).toBe("0.18s, 0.18s, 0s");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   for (const selector of ["#mobile-menu", "#channel-options", "#choose-emoji", "#attach-file"]) {
     const box = await page.locator(selector).boundingBox();
@@ -581,6 +582,10 @@ test("mobile layout supports profile changes and sign-out", async ({
   ).toBeTruthy();
   await page.getByRole("button", { name: "Show channels" }).click();
   await expect(page.locator("#sidebar")).toBeVisible();
+  // A tap beside the open drawer only puts it away; the next one opens the account menu.
+  await page.locator("#profile").click();
+  await expect(page.locator("#sidebar")).toBeHidden();
+  await expect(page.locator("#account-menu")).not.toHaveAttribute("open");
   await page.locator("#profile").click();
   await page.getByRole("link", { name: "Profile", exact: true }).click();
   await page.getByLabel("Display name", { exact: true }).fill("Charlie");
@@ -1057,13 +1062,16 @@ test("the inbox gathers new channel and direct messages, and the sidebar folds a
     bob.locator(".message-body").filter({ hasText: "Heard." }),
   ).toBeVisible();
 
-  // "New direct message" finds a member by name.
+  // "New direct message" opens a conversation with a member named by their handle; the default
+  // role is not shown who else is here.
   await page
     .locator(".side-foot")
     .filter({ hasText: "New direct message" })
     .click();
   await page.getByLabel("To", { exact: true }).fill("ali");
-  await page.locator(".people-list button").filter({ hasText: "@alice" }).click();
+  await expect(page.locator(".people-list button")).toHaveCount(0);
+  await page.getByLabel("To", { exact: true }).fill("alice");
+  await page.getByRole("button", { name: "Open conversation" }).click();
   await expect(page.locator("#channel-heading strong")).toHaveText("alice");
 
   // Channels go in groups, which fold away and stay that way.

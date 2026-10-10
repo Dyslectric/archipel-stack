@@ -12,6 +12,7 @@ import {
   full,
   go,
   hooks,
+  listsMembers,
   icon,
   imageBase64,
   modeLabel,
@@ -83,6 +84,7 @@ const rolePermissions = [
   ["direct_messages", "Send direct messages"],
   ["attachments", "Attach images and videos"],
   ["xmpp_rooms", "Join XMPP rooms on other servers"],
+  ["list_members", "See the list of everyone on this instance"],
   ["federation_send", "Send federated messages"],
   ["federation_receive", "Receive federated messages"],
   ["federation_subscribe", "Subscribe to remote channels"],
@@ -98,8 +100,8 @@ type Role = {
 const roleBoxes = (role?: Role) =>
   rolePermissions
     .map(
-      ([flag, label], i) =>
-        `${i === 5 ? '<p class="muted small role-split">With other instances and servers, while federation is enabled:</p>' : ""}<label class="check"><input type="checkbox" name="${flag}" ${(role ? role[flag] : !flag.startsWith("federation_")) ? "checked" : ""}> ${label}</label>`,
+      ([flag, label]) =>
+        `${flag === "federation_send" ? '<p class="muted small role-split">With other instances and servers, while federation is enabled:</p>' : ""}<label class="check"><input type="checkbox" name="${flag}" ${(role ? role[flag] : !flag.startsWith("federation_") && flag !== "list_members") ? "checked" : ""}> ${label}</label>`,
     )
     .join("");
 const roleValues = (data: FormData) => ({
@@ -846,8 +848,9 @@ const sections: Section[] = [
     mod: true,
     async draw(el, ctx) {
       const c = ctx.channel!;
+      // Without the instance's member list, the person is named by their handle.
       const [users, rules] = await Promise.all([
-        api<User[]>("/users"),
+        listsMembers() ? api<User[]>("/users") : null,
         api<{ user_id: string; rule: string; username: string }[]>(
           `/channels/${c.id}/rules`,
         ),
@@ -855,12 +858,14 @@ const sections: Section[] = [
       el.innerHTML =
         card(
           "Change someone's access",
-          `<form class="stack narrow-form" id="access-form"><label>Person<select name="user">${users
-            .filter((u) => u.id !== c.owner_id)
-            .map((u) => `<option value="${u.id}">@${esc(u.username)}</option>`)
-            .join(
-              "",
-            )}</select></label><label>Action<select name="action"><option value="allow">Allow to join</option><option value="block">Block and remove membership</option><option value="clear">Clear access rule</option><option value="remove">Remove membership</option>${state.session.user?.admin || c.role === "owner" ? '<option value="moderator">Make moderator</option><option value="member">Make member</option>' : ""}</select></label>${error}<button>Apply change</button></form>`,
+          `<form class="stack narrow-form" id="access-form"><label>Person${
+            users
+              ? `<select name="user">${users
+                  .filter((u) => u.id !== c.owner_id)
+                  .map((u) => `<option value="${u.id}">@${esc(u.username)}</option>`)
+                  .join("")}</select>`
+              : `<span class="input-prefix"><span>@</span><input name="handle" required maxlength="64" placeholder="handle" autocomplete="off"></span>`
+          }</label><label>Action<select name="action"><option value="allow">Allow to join</option><option value="block">Block and remove membership</option><option value="clear">Clear access rule</option><option value="remove">Remove membership</option>${state.session.user?.admin || c.role === "owner" ? '<option value="moderator">Make moderator</option><option value="member">Make member</option>' : ""}</select></label>${error}<button>Apply change</button></form>`,
           `${c.visibility === "members" ? "Members-only" : "Public"} · ${c.admission === "allowlist" ? "invitation required" : "open membership"}`,
         ) +
         card(
@@ -880,8 +885,13 @@ const sections: Section[] = [
         toast("Channel permissions updated.");
         ctx.refresh();
       };
-      onSubmit($("#access-form", el), (data) =>
-        change(data.get("user"), data.get("action") as string),
+      onSubmit($("#access-form", el), async (data) =>
+        change(
+          users
+            ? data.get("user")
+            : (await api<Conversation>("/dms/resolve", "POST", { to: `@${String(data.get("handle")).trim().replace(/^@/, "")}@${state.session.instance}` })).peer.split("/").pop(),
+          data.get("action") as string,
+        ),
       );
       onClick(el, "[data-clear]", (button) =>
         change(button.dataset.clear, "clear"),

@@ -7,6 +7,7 @@ import {
   esc,
   go,
   hooks,
+  listsMembers,
   icon,
   onSubmit,
   popup,
@@ -84,7 +85,7 @@ function newDirectMessage() {
   if (document.querySelector(".dm-dialog")) return;
   const dialog = document.createElement("dialog");
   dialog.className = "card dialog dm-dialog";
-  dialog.innerHTML = `<h2>New direct message</h2><p class="muted small">Pick someone on ${esc(state.session.instance)}, or type the address of someone elsewhere, like <code>name@other.example</code>.</p>
+  dialog.innerHTML = `<h2>New direct message</h2><p class="muted small">${listsMembers() ? `Pick someone on ${esc(state.session.instance)}, or type` : `Type the handle of someone on ${esc(state.session.instance)}, or`} the address of someone elsewhere, like <code>name@other.example</code>.</p>
     <form class="stack"><label>To<input name="to" required maxlength="2048" autocomplete="off" placeholder="Name or address"></label>
     <ul class="plain people-list" aria-label="Members"></ul><p class="form-error" role="alert"></p>
     <div class="row end"><button type="button" class="secondary" data-cancel>Cancel</button><button>Open conversation</button></div></form>`;
@@ -129,6 +130,7 @@ function newDirectMessage() {
     open(found.peer);
   });
   dialog.showModal();
+  if (!listsMembers()) return;
   void api<User[]>("/users")
     .then((users) => {
       people = users;
