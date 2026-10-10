@@ -54,6 +54,7 @@ export interface Channel {
   hide_handles: number;
   reactions: number; // members may react to messages with emoji
   optional_titles: number; // threads may start without a title
+  reaction_bans: string[]; // emoji its moderators keep out of its reactions
   sees_members: boolean;
   sees_handles: boolean;
   topics?: Topic[];
@@ -115,6 +116,7 @@ export interface Reaction {
   emoji: string; // a shortcode name
   count: number;
   mine: boolean;
+  url?: string; // a custom emoji's picture, which may be another instance's
 }
 export interface Message {
   id: string;

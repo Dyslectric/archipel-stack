@@ -681,7 +681,12 @@ const sections: Section[] = [
           ? card(
               "Reactions",
               `<form class="stack narrow-form" id="channel-reactions"><label class="check"><input type="checkbox" name="reactions" ${c.reactions ? "checked" : ""}> Let members react to messages with emoji</label>${error}<button>Save</button></form>`,
-              "Turning reactions off hides them in this channel. Existing reactions are kept and show again if you turn them back on. Reactions stay on this instance, including for instances following the channel.",
+              "Turning reactions off hides them in this channel. Existing reactions are kept and show again if you turn them back on.",
+            ) +
+            card(
+              "Banned reactions",
+              `${c.reaction_bans.length ? `<ul class="plain stack">${c.reaction_bans.map((name) => `<li class="row"><span class="grow">${emojiHtml(`:${name}:`)} <code>:${esc(name)}:</code></span><button type="button" class="small secondary" data-unban="${esc(name)}">Allow again</button></li>`).join("")}</ul>` : '<p class="muted">No emoji is banned.</p>'}<form class="stack narrow-form" id="reaction-ban"><label>Emoji shortcode<input name="emoji" required maxlength="66" pattern=":?[a-z0-9_+\\-]+:?" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="eggplant"></label>${error}<button>Ban emoji</button></form>`,
+              "A banned emoji is taken off every message in this channel and cannot be given as a reaction again, here or from an instance following the channel. A single unwanted reaction can be removed from its message instead.",
             )
           : "") +
         (reacting && c.mode === "threaded"
@@ -713,6 +718,19 @@ const sections: Section[] = [
           toast("Channel updated.");
           ctx.refresh();
         });
+      if (reacting) {
+        const ban = async (emoji: string, banned: boolean) => {
+          await api(`/channels/${c.id}/reaction-bans`, "PUT", { emoji, banned });
+          state.channels = await api<Channel[]>("/channels");
+          if (chatChannel()?.id === c.id) resetChat();
+          toast(banned ? `:${emoji}: is banned from reactions.` : `:${emoji}: can be given again.`);
+          ctx.refresh();
+        };
+        onSubmit($("#reaction-ban", el), (data) =>
+          ban(String(data.get("emoji")).trim().replaceAll(":", ""), true),
+        );
+        onClick(el, "[data-unban]", (button) => ban(button.dataset.unban!, false));
+      }
       if (reacting)
         onSubmit($("#channel-reactions", el), async (data) => {
           await api(`/channels/${c.id}/reactions`, "PATCH", {

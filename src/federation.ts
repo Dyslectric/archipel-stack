@@ -109,6 +109,7 @@ export class Federation {
       },
       channel: (channel, change) => this.channelChanged(channel, change),
       reaction: (user, message, emoji, on) => this.relayReaction(user, message, emoji, on),
+      reactionCleared: (user, message, emoji) => this.relayReaction(user, message, emoji, false, true),
       direct: (user, peer) => {
         let reachable = true;
         try {
@@ -238,6 +239,7 @@ export class Federation {
         showMembers: !!channel.show_members,
         hideHandles: !!channel.hide_handles,
         reactions: !!channel.reactions,
+        reactionBans: this.store.reactionBans(channel),
         optionalTitles: !!channel.optional_titles,
       };
     }
@@ -332,6 +334,11 @@ export class Federation {
     this.store.db
       .prepare("UPDATE channels SET show_members=?,hide_handles=?,reactions=?,optional_titles=? WHERE id=?")
       .run(Number(actor.showMembers !== false), Number(actor.hideHandles === true), Number(actor.reactions !== false), Number(actor.optionalTitles === true), channelId);
+    const bans = Array.isArray(actor.reactionBans) ? actor.reactionBans : [];
+    this.store.keepReactionBans(
+      channelId,
+      bans.filter((name: unknown) => typeof name === "string" && /^[a-z0-9_+-]{1,64}$/.test(name)).slice(0, 200),
+    );
   }
   private channelChanged(channel: Channel, change: "rename" | "privacy" | "delete") {
     const actor = this.channelActor(channel),
@@ -998,7 +1005,15 @@ export class Federation {
       | { id: string }
       | undefined;
   }
+  // A custom emoji goes with the address of its picture: this instance's own, or where the one
+  // kept from another instance came from.
   private reactionObject(channel: Channel, message: Message, emoji: string, on: boolean) {
+    const picture = on ? this.store.reactionEmojiId(message.id, emoji) : undefined,
+      source =
+        picture &&
+        (this.store.db.prepare("SELECT source_url FROM remote_emoji_cache WHERE id=?").get(picture) as
+          | { source_url: string }
+          | undefined);
     return {
       type: "Reaction",
       id: `${this.config.baseUrl}/federation/objects/${randomUUID()}`,
@@ -1006,10 +1021,48 @@ export class Federation {
       channel: this.channelActor(channel),
       emoji,
       on,
+      ...(picture
+        ? { image: source ? source.source_url : `${this.config.baseUrl}/federation/emojis/${picture}/image` }
+        : {}),
     };
   }
-  // Tells the channel's followers about a reaction its home accepted.
-  private relayReaction(user: User, message: Message, emoji: string, on: boolean) {
+  // The picture sent along with a custom emoji reaction, kept here: nothing when there is none
+  // to be had from the instance of whoever sent it.
+  private async reactionPicture(reaction: Doc, from: string[]) {
+    if (
+      reaction.on !== true ||
+      typeof reaction.image !== "string" ||
+      typeof reaction.emoji !== "string" ||
+      !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(reaction.emoji) ||
+      standardEmojis.has(reaction.emoji)
+    )
+      return undefined;
+    try {
+      const origin = this.allowed(reaction.image).origin;
+      if (!from.some((actor) => new URL(actor).origin === origin)) return undefined;
+      return await this.cacheEmoji(reaction.image);
+    } catch {
+      return undefined;
+    }
+  }
+  // Keeps a copy of an emoji picture hosted on another instance; says which it is here.
+  private async cacheEmoji(url: string) {
+    const cached = this.store.db
+      .prepare("SELECT id FROM remote_emoji_cache WHERE source_url=?")
+      .get(url) as { id: string } | undefined;
+    if (cached) return cached.id;
+    const image = await peerRequest(this.allowed(url), this.config);
+    const { decodeEmojiImage } = await import("./emoji-image.js");
+    const decoded = decodeEmojiImage(image.body.toString("base64"));
+    const id = randomUUID();
+    this.store.db
+      .prepare("INSERT INTO remote_emoji_cache VALUES(?,?,?,?)")
+      .run(id, url, decoded.mime, decoded.image);
+    return id;
+  }
+  // Tells the channel's followers about a reaction its home accepted, or one a moderator took
+  // off for everyone.
+  private relayReaction(user: User, message: Message, emoji: string, on: boolean, all = false) {
     const channel = this.store.channel(message.channel_id);
     if (this.importing || channel.remote_actor || !channel.federation_enabled) return;
     if (user.remote_actor?.startsWith("xmpp:")) return;
@@ -1022,7 +1075,10 @@ export class Federation {
     this.queue(
       "Announce",
       this.channelActor(channel),
-      this.activity("React", this.userActor(user), this.reactionObject(channel, message, emoji, on)),
+      this.activity("React", this.userActor(user), {
+        ...this.reactionObject(channel, message, emoji, on),
+        ...(all ? { all: true } : {}),
+      }),
       recipients,
       "relay",
       user.id,
@@ -1043,14 +1099,11 @@ export class Federation {
     if (message.deleted_at) throw new Problem(409, "Removed messages cannot be reacted to.");
     if (typeof input.emoji !== "string" || typeof input.on !== "boolean" || !/^[a-z0-9_+-]{1,64}$/i.test(input.emoji))
       throw new Problem(400, "Choose an emoji.");
-    if (
-      input.on &&
-      !standardEmojis.has(input.emoji) &&
-      !this.store.db
-        .prepare("SELECT 1 FROM message_reactions WHERE message_id=? AND emoji=?")
-        .get(id, input.emoji)
-    )
-      throw new Problem(400, "Only standard emoji can be added in a channel hosted on another instance.");
+    // A custom emoji is this instance's, sent along with its picture, or one already on the message.
+    if (input.on && !standardEmojis.has(input.emoji) && !this.store.reactionEmojiId(id, input.emoji))
+      throw new Problem(400, "That emoji is not available here.");
+    if (input.on && this.store.reactionBans(channel).includes(input.emoji))
+      throw new Problem(403, "That emoji is not allowed as a reaction in this channel.");
     this.queue(
       "React",
       this.userActor(user),
@@ -1679,18 +1732,7 @@ export class Federation {
         this.allowed(emoji.url).origin !== new URL(note.attributedTo).origin
       )
         throw new Problem(400, "Invalid message emoji origin.");
-      let cached = this.store.db
-        .prepare("SELECT id FROM remote_emoji_cache WHERE source_url=?")
-        .get(emoji.url) as { id: string } | undefined;
-      if (!cached) {
-        const image = await peerRequest(this.allowed(emoji.url), this.config);
-        const { decodeEmojiImage } = await import("./emoji-image.js");
-        const decoded = decodeEmojiImage(image.body.toString("base64"));
-        cached = { id: randomUUID() };
-        this.store.db
-          .prepare("INSERT INTO remote_emoji_cache VALUES(?,?,?,?)")
-          .run(cached.id, emoji.url, decoded.mime, decoded.image);
-      }
+      const cached = { id: await this.cacheEmoji(emoji.url) };
       emojis.push({
         id: cached.id,
         name: emoji.name,
@@ -2006,6 +2048,7 @@ export class Federation {
     let prepared: Awaited<ReturnType<Federation["prepareNote"]>> | undefined;
     let snapshot: Awaited<ReturnType<Federation["snapshot"]>> | undefined;
     let roster: Doc[] | undefined;
+    let picture: string | undefined;
     const profileUpdate = activity.type === "Update" && object?.type === "Person";
     const profileRelay = activity.type === "Announce" && sender.type === "Group" && object?.type === "Update" && object.object?.type === "Person";
     const channelUpdate = activity.type === "Update" && object?.type === "Group";
@@ -2031,10 +2074,12 @@ export class Federation {
     } else if (activity.type === "React") {
       if (sender.type !== "Person" || object?.type !== "Reaction")
         throw new Problem(403, "Only a person can react.");
+      picture = await this.reactionPicture(object, [sender.id]);
     } else if (activity.type === "Announce" && object?.type === "React") {
       if (sender.type !== "Group" || typeof object.actor !== "string" || object.object?.type !== "Reaction")
         throw new Problem(400, "Invalid channel distribution activity.");
       reactor = await this.actor(object.actor);
+      picture = await this.reactionPicture(object.object, [object.actor, sender.id]);
     } else if (["Create", "Update"].includes(activity.type)) {
       if (object?.attributedTo !== sender.id || sender.type !== "Person")
         throw new Problem(
@@ -2220,14 +2265,19 @@ export class Federation {
         const target = this.messageAt(channel.id, object.target);
         if (!channel.reactions || !target || this.store.message(target.id).deleted_at)
           throw new Problem(409, "That message cannot be reacted to.");
+        // A custom emoji is one of this instance's, one already on the message, or the picture sent along.
+        const known =
+          typeof object.emoji === "string" ? this.store.reactionEmojiId(target.id, object.emoji) ?? picture : undefined;
         if (
           typeof object.emoji !== "string" ||
           typeof object.on !== "boolean" ||
-          (!standardEmojis.has(object.emoji) &&
-            !this.store.db.prepare("SELECT 1 FROM custom_emojis WHERE name=?").get(object.emoji))
+          !/^[a-z0-9_+-]{1,64}$/i.test(object.emoji) ||
+          (object.on && !standardEmojis.has(object.emoji) && !known)
         )
           throw new Problem(400, "That emoji is not available here.");
-        this.store.applyReaction(remote.id, target.id, object.emoji, object.on);
+        if (object.on && this.store.reactionBans(channel).includes(object.emoji))
+          throw new Problem(403, "That emoji is not allowed as a reaction in this channel.");
+        this.store.applyReaction(remote.id, target.id, object.emoji, object.on, known);
         this.relayReaction(remote, this.store.message(target.id), object.emoji, object.on);
       } else if (activity.type === "Announce" && object?.type === "React") {
         const channel = this.store.db
@@ -2244,8 +2294,9 @@ export class Federation {
         )
           throw new Problem(400, "Invalid reaction.");
         // A message from before this instance followed the channel may not be here.
-        if (target)
-          this.store.applyReaction(this.remoteUser(reactor!).id, target.id, reaction.emoji, reaction.on);
+        if (target && reaction.all === true) this.store.dropReaction(target.id, reaction.emoji);
+        else if (target)
+          this.store.applyReaction(this.remoteUser(reactor!).id, target.id, reaction.emoji, reaction.on, picture);
       } else if (activity.type === "Announce") {
         const channel = this.store.db
           .prepare("SELECT * FROM channels WHERE remote_actor=?")

@@ -599,7 +599,7 @@ test("version-two emoji messages keep their image metadata through the federatio
     { id: "asset", name: "island", url: "/api/emojis/asset/image" },
   ]);
   assert.equal(store.user("author").federation_send, 0);
-  assert.equal(store.db.version(), 21);
+  assert.equal(store.db.version(), 22);
 });
 
 test("direct messages reach both members, and only the reader's own are news to them", () => {
@@ -735,7 +735,7 @@ test("personal blocks persist across restarts and upgrade an existing version 4 
   let store = new Store(path);
   const alice = store.loginIdentity("https://id.example", "alice", "alice", []);
   const bob = store.loginIdentity("https://id.example", "bob", "bob", []);
-  store.db.exec("DROP TABLE device_flows; DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; DROP TABLE user_blocks; PRAGMA user_version=4;");
+  store.db.exec("DROP TABLE reaction_emojis; ALTER TABLE channels DROP COLUMN reaction_bans; DROP TABLE device_flows; DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; DROP TABLE user_blocks; PRAGMA user_version=4;");
   store.close();
   store = new Store(path);
   const peer = `${store.baseUrl}/actors/users/${alice.id}`;
@@ -786,7 +786,7 @@ test("profile picture migration preserves identities and pictures survive restar
   const path = join(directory, "db.sqlite");
   let store = new Store(path);
   const alice = store.loginIdentity("https://id.example", "alice", "alice", []);
-  store.db.exec("DROP TABLE device_flows; DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; PRAGMA user_version=5;");
+  store.db.exec("DROP TABLE reaction_emojis; ALTER TABLE channels DROP COLUMN reaction_bans; DROP TABLE device_flows; DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; PRAGMA user_version=5;");
   store.close();
   store = new Store(path);
   const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
@@ -834,9 +834,9 @@ test("version 9 avatar migration preserves pictures and XMPP cursors and remote 
   const image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
   store.setAvatar(alice, image);
   store.db.prepare("INSERT INTO xmpp_events(seq,kind,object_id) VALUES(50,'Direct','old-message')").run();
-  store.db.exec("DROP TABLE device_flows; DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; PRAGMA user_version=9");
+  store.db.exec("DROP TABLE reaction_emojis; ALTER TABLE channels DROP COLUMN reaction_bans; DROP TABLE device_flows; DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; PRAGMA user_version=9");
   store.close(); store = new Store(path);
-  assert.equal(store.db.version(), 21);
+  assert.equal(store.db.version(), 22);
   assert.equal(Buffer.from(store.avatarImage(alice.id).image).toString("base64"), image);
   assert.equal(store.db.prepare("SELECT seq FROM xmpp_events WHERE object_id='old-message'").get()?.seq, 50);
   store.db.prepare("INSERT INTO xmpp_events(kind,object_id) VALUES('Profile',?)").run(alice.id);
@@ -1069,6 +1069,36 @@ test("members react to messages; moderators turn reactions off and on", () => {
   denied(() => store.react(charlie, m.id, { emoji: "tada", on: true }));
   store.setReactions(alice, c.id, true);
   store.react(charlie, m.id, { emoji: "tada", on: false });
+  store.deleteChannel(alice, c.id);
+  store.close();
+});
+test("moderators take a reaction off a message for everyone and ban an emoji from a channel", () => {
+  const { store, alice, bob, charlie } = fixture();
+  const c = store.createChannel(alice, channelInput());
+  store.join(bob, c.id);
+  store.join(charlie, c.id);
+  store.setMember(alice, c.id, bob.id, { role: "moderator" });
+  const m = store.post(alice, c.id, { body: "Hello" }),
+    second = store.post(alice, c.id, { body: "Again" });
+  const seen = (id = m.id) => store.reactionsOf(alice, id);
+  for (const emoji of ["tada", "eggplant"]) {
+    store.react(bob, m.id, { emoji, on: true });
+    store.react(charlie, m.id, { emoji, on: true });
+  }
+  store.react(charlie, second.id, { emoji: "eggplant", on: true });
+  denied(() => store.clearReaction(charlie, m.id, "eggplant"));
+  assert.deepEqual(store.clearReaction(bob, m.id, "eggplant"), [{ emoji: "tada", count: 2, mine: true }]);
+  // Taken off one message, it can be given again; banned, it is gone from the channel and stays out.
+  store.react(charlie, m.id, { emoji: "eggplant", on: true });
+  denied(() => store.banReaction(charlie, c.id, { emoji: "eggplant", banned: true }));
+  denied(() => store.banReaction(bob, c.id, { emoji: ":eggplant:", banned: true }), 400);
+  assert.deepEqual(store.banReaction(bob, c.id, { emoji: "eggplant", banned: true }).reaction_bans, ["eggplant"]);
+  assert.deepEqual(seen(), [{ emoji: "tada", count: 2, mine: false }]);
+  assert.deepEqual(seen(second.id), []);
+  denied(() => store.react(charlie, m.id, { emoji: "eggplant", on: true }));
+  assert.deepEqual(store.banReaction(alice, c.id, { emoji: "eggplant", banned: false }).reaction_bans, []);
+  store.react(charlie, m.id, { emoji: "eggplant", on: true });
+  assert.equal((seen() as unknown[]).length, 2);
   store.deleteChannel(alice, c.id);
   store.close();
 });

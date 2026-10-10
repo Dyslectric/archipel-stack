@@ -42,6 +42,7 @@ export interface Channel {
   hide_handles: number; // members see names without the handles behind them
   reactions: number; // members may react to messages with emoji
   optional_titles: number; // threads may start without a title
+  reaction_bans: string; // JSON: the emoji names moderators keep out of its reactions
   created_at: string;
 }
 const notifyChoice = (n: number | null) =>
@@ -170,6 +171,8 @@ export class Store {
     read: (user: User, channel: Channel) => void;
     // A reaction was put on, or taken off, a message of a channel hosted here.
     reaction: (user: User, message: Message, emoji: string, on: boolean) => void;
+    // A moderator took an emoji off a message of a channel hosted here, whoever had given it.
+    reactionCleared: (user: User, message: Message, emoji: string) => void;
     // Runs inside the change's transaction, while the channel's rows still exist.
     channel: (channel: Channel, change: "rename" | "privacy" | "delete") => void;
     direct: (user: User, peer: string) => DirectAccess;
@@ -1076,6 +1079,7 @@ export class Store {
       actor_url:
         channel.remote_actor || `${this.baseUrl}/actors/channels/${channel.id}`,
       role: this.role(channel.id, user.id),
+      reaction_bans: this.reactionBans(channel),
       bridge_room: this.bridgeRoom(channel.id),
       mirror: this.mirrorState(channel.id),
       readable: this.readable(user, channel),
@@ -1239,6 +1243,9 @@ export class Store {
         this.dropMedia(message.body, message.author_id);
       this.db
         .prepare(`DELETE FROM message_reactions WHERE message_id IN ${said}`)
+        .run(id);
+      this.db
+        .prepare(`DELETE FROM reaction_emojis WHERE message_id IN ${said}`)
         .run(id);
       this.db.prepare("DELETE FROM messages WHERE channel_id=?").run(id);
       // Members' occupants in a bridged room existed only for this channel.
@@ -1604,7 +1611,8 @@ export class Store {
       : page;
   }
   // ---- reactions: emoji put on a message, if its channel allows them ----
-  // Adds { emoji, count, mine } for each reaction to the messages of a page, in the order first used.
+  // Adds { emoji, count, mine } for each reaction to the messages of a page, in the order first used,
+  // and for a custom emoji the address of its picture.
   private withReactions(user: User, page: (Message & { reactions?: unknown })[]) {
     if (!page.length) return;
     const rows = this.db
@@ -1612,10 +1620,14 @@ export class Store {
         `SELECT message_id,emoji,user_id FROM message_reactions WHERE message_id IN (${page.map(() => "?").join(",")}) ORDER BY created_at,rowid`,
       )
       .all(...page.map((m) => m.id)) as { message_id: string; emoji: string; user_id: string }[];
-    const by = new Map<string, Map<string, { emoji: string; count: number; mine: boolean }>>();
+    const by = new Map<string, Map<string, { emoji: string; count: number; mine: boolean; url?: string }>>();
     for (const r of rows) {
       const list = by.get(r.message_id) ?? new Map();
-      const entry = list.get(r.emoji) ?? { emoji: r.emoji, count: 0, mine: false };
+      let entry = list.get(r.emoji);
+      if (!entry) {
+        const picture = this.reactionEmojiId(r.message_id, r.emoji);
+        entry = { emoji: r.emoji, count: 0, mine: false, ...(picture ? { url: `/api/emojis/${picture}/image` } : {}) };
+      }
       entry.count++;
       if (r.user_id === user.id) entry.mine = true;
       list.set(r.emoji, entry);
@@ -1664,14 +1676,97 @@ export class Store {
       return this.channelInfo(user, this.channel(id));
     });
   }
-  // Records (or removes) one person's reaction; the callers have checked who may react.
-  applyReaction(userId: string, messageId: string, emoji: string, on: boolean) {
+  // The picture a custom emoji stands for as a reaction to a message: the one it was first given
+  // with there, else this instance's emoji of that name.
+  reactionEmojiId(messageId: string, emoji: string) {
+    if (standardEmojis.has(emoji)) return undefined;
+    const kept = this.db
+      .prepare("SELECT emoji_id AS id FROM reaction_emojis WHERE message_id=? AND emoji=?")
+      .get(messageId, emoji) as { id: string } | undefined;
+    if (
+      kept &&
+      this.db
+        .prepare("SELECT 1 FROM custom_emojis WHERE id=? UNION ALL SELECT 1 FROM remote_emoji_cache WHERE id=?")
+        .get(kept.id, kept.id)
+    )
+      return kept.id;
+    return (
+      this.db.prepare("SELECT id FROM custom_emojis WHERE name=?").get(emoji) as { id: string } | undefined
+    )?.id;
+  }
+  reactionBans(channel: Channel) {
+    return JSON.parse(channel.reaction_bans) as string[];
+  }
+  // Takes an emoji off a message, whoever gave it; the callers have checked who may.
+  dropReaction(messageId: string, emoji: string) {
     this.transaction(() => {
-      if (!on)
+      this.db.prepare("DELETE FROM message_reactions WHERE message_id=? AND emoji=?").run(messageId, emoji);
+      this.db.prepare("DELETE FROM reaction_emojis WHERE message_id=? AND emoji=?").run(messageId, emoji);
+    });
+  }
+  // Keeps a channel's list of unwanted reactions, and takes those already given off its messages.
+  keepReactionBans(channelId: string, names: string[]) {
+    this.transaction(() => {
+      this.db.prepare("UPDATE channels SET reaction_bans=? WHERE id=?").run(JSON.stringify(names), channelId);
+      for (const name of names) {
+        this.db
+          .prepare("DELETE FROM message_reactions WHERE emoji=? AND message_id IN (SELECT id FROM messages WHERE channel_id=?)")
+          .run(name, channelId);
+        this.db
+          .prepare("DELETE FROM reaction_emojis WHERE emoji=? AND message_id IN (SELECT id FROM messages WHERE channel_id=?)")
+          .run(name, channelId);
+      }
+    });
+  }
+  // Moderators (and the owner) take an unwanted reaction off a message for everyone.
+  clearReaction(user: User, messageId: string, emoji: string) {
+    const message = this.message(messageId),
+      channel = this.channel(message.channel_id);
+    this.requireManage(user, channel);
+    return this.transaction(() => {
+      this.dropReaction(messageId, emoji);
+      this.audit(user.id, "reaction.remove", JSON.stringify({ channel: channel.id, message: messageId, emoji }));
+      this.federationHooks?.reactionCleared(user, message, emoji);
+      return this.reactionsOf(user, messageId);
+    });
+  }
+  // Moderators (and the owner) keep an emoji out of a channel's reactions, or let it back in.
+  banReaction(user: User, id: string, input: Record<string, unknown>) {
+    const channel = this.channel(id);
+    this.requireManage(user, channel);
+    if (
+      typeof input.emoji !== "string" ||
+      !/^[a-z0-9_+-]{1,64}$/.test(input.emoji) ||
+      typeof input.banned !== "boolean"
+    )
+      throw new Problem(400, "Choose an emoji by its shortcode, and whether it is banned.");
+    const emoji = input.emoji,
+      names = this.reactionBans(channel).filter((name) => name !== emoji);
+    if (input.banned) names.push(emoji);
+    if (names.length > 200)
+      throw new Problem(409, "A channel bans up to 200 emoji.");
+    return this.transaction(() => {
+      this.keepReactionBans(id, names.sort());
+      this.audit(
+        user.id,
+        input.banned ? "reaction.ban" : "reaction.unban",
+        JSON.stringify({ channel: id, emoji }),
+      );
+      this.federationHooks?.channel(this.channel(id), "privacy");
+      return this.channelInfo(user, this.channel(id));
+    });
+  }
+  // Records (or removes) one person's reaction; the callers have checked who may react. A custom
+  // emoji's picture is kept with its first use on the message.
+  applyReaction(userId: string, messageId: string, emoji: string, on: boolean, emojiId?: string) {
+    this.transaction(() => {
+      if (!on) {
         this.db
           .prepare("DELETE FROM message_reactions WHERE message_id=? AND user_id=? AND emoji=?")
           .run(messageId, userId, emoji);
-      else {
+        if (!this.db.prepare("SELECT 1 FROM message_reactions WHERE message_id=? AND emoji=?").get(messageId, emoji))
+          this.db.prepare("DELETE FROM reaction_emojis WHERE message_id=? AND emoji=?").run(messageId, emoji);
+      } else {
         const total = this.db
           .prepare("SELECT COUNT(DISTINCT emoji) AS n FROM message_reactions WHERE message_id=?")
           .get(messageId) as { n: number };
@@ -1683,6 +1778,10 @@ export class Store {
         this.db
           .prepare("INSERT OR IGNORE INTO message_reactions VALUES(?,?,?,?)")
           .run(messageId, userId, emoji, now());
+        if (emojiId)
+          this.db
+            .prepare("INSERT OR IGNORE INTO reaction_emojis VALUES(?,?,?)")
+            .run(messageId, emoji, emojiId);
       }
     });
   }
@@ -1697,13 +1796,14 @@ export class Store {
       throw new Problem(409, "Removed messages cannot be reacted to.");
     if (typeof input.emoji !== "string" || typeof input.on !== "boolean")
       throw new Problem(400, "Choose an emoji.");
-    const emoji = input.emoji;
-    if (
-      !standardEmojis.has(emoji) &&
-      !this.db.prepare("SELECT 1 FROM custom_emojis WHERE name=?").get(emoji)
-    )
+    const emoji = input.emoji,
+      picture = this.reactionEmojiId(messageId, emoji);
+    // A custom emoji is this instance's, or one already given to the message from elsewhere.
+    if (input.on && !standardEmojis.has(emoji) && !picture)
       throw new Problem(400, "That emoji is not available here.");
-    this.applyReaction(user.id, messageId, emoji, input.on);
+    if (input.on && this.reactionBans(channel).includes(emoji))
+      throw new Problem(403, "That emoji is not allowed as a reaction in this channel.");
+    this.applyReaction(user.id, messageId, emoji, input.on, picture);
     this.federationHooks?.reaction(user, message, emoji, input.on);
     return this.reactionsOf(user, messageId);
   }

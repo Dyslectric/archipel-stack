@@ -971,6 +971,45 @@ test("reactions cross instances in both directions and follow the home channel's
   await drain(a, b);
   assert.throws(() => b.fed.remoteReact(b.bob, copy().id, { emoji: "tada", on: true }), /turned off/);
 });
+test("a custom emoji of the reader's own instance is a reaction in a followed channel, until its home removes or bans it", async (t) => {
+  const a = await instance(t),
+    b = await instance(t);
+  const home = channel(a),
+    host = new URL(a.origin).host;
+  const sub = await b.fed.subscribe(b.bob, `#general@${host}`);
+  await drain(a, b);
+  const first = a.store.post(a.alice, home.id, { body: "React to me" });
+  await drain(a, b);
+  type Seen = { emoji: string; count: number; mine: boolean; url?: string }[];
+  const copy = () => b.store.messages(b.bob, sub.channel.id)[0] as unknown as { id: string; reactions: Seen },
+    atHome = () => a.store.reactionsOf(a.alice, first.id) as Seen;
+  assert.throws(() => b.fed.remoteReact(b.bob, copy().id, { emoji: "island", on: true }), /not available/);
+  b.store.addEmoji(b.alice, { name: "island", image });
+  b.fed.remoteReact(b.bob, copy().id, { emoji: "island", on: true });
+  await drain(a, b);
+  // Its home has no emoji of that name: it keeps the picture that came along, and so can its members use it.
+  assert.deepEqual(atHome().map(({ url: _, ...r }) => r), [{ emoji: "island", count: 1, mine: false }]);
+  assert.equal(a.store.emojiImage(atHome()[0].url!.split("/").at(-2)!).mime, "image/png");
+  assert.match(copy().reactions[0].url!, /^\/api\/emojis\/[^/]+\/image$/);
+  a.store.react(a.alice, first.id, { emoji: "island", on: true });
+  await drain(a, b);
+  assert.deepEqual(copy().reactions.map((r) => [r.emoji, r.count, r.mine]), [["island", 2, true]]);
+  // A moderator at home takes it off for everyone, wherever they read.
+  assert.throws(() => b.store.clearReaction(b.alice, copy().id, "island"), /home instance/);
+  a.store.clearReaction(a.alice, first.id, "island");
+  await drain(a, b);
+  assert.deepEqual([atHome(), copy().reactions], [[], []]);
+  // Banned at home, it is gone from the copies and refused before it is sent.
+  b.fed.remoteReact(b.bob, copy().id, { emoji: "island", on: true });
+  b.fed.remoteReact(b.bob, copy().id, { emoji: "tada", on: true });
+  await drain(a, b);
+  assert.equal(copy().reactions.length, 2);
+  a.store.banReaction(a.alice, home.id, { emoji: "island", banned: true });
+  await drain(a, b);
+  assert.deepEqual(copy().reactions.map((r) => r.emoji), ["tada"]);
+  assert.deepEqual(b.store.channelInfo(b.bob, b.store.channel(sub.channel.id)).reaction_bans, ["island"]);
+  assert.throws(() => b.fed.remoteReact(b.bob, copy().id, { emoji: "island", on: true }), /not allowed/);
+});
 test("untitled threads cross instances where the home channel makes titles optional", async (t) => {
   const a = await instance(t),
     b = await instance(t);

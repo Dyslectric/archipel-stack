@@ -104,6 +104,7 @@ const dmChannel = (c: Conversation): Channel => ({
   show_members: 0,
   hide_handles: 0,
   reactions: 0,
+  reaction_bans: [],
   optional_titles: 0,
   sees_members: false,
   sees_handles: true,
@@ -470,13 +471,61 @@ const reactButton = (m: Message, cls: string) =>
   reactable(m) && canPost()
     ? `<button type="button" class="${cls}" data-react-add="${m.id}" aria-label="Add reaction" aria-haspopup="dialog" title="Add reaction">${icon("smile")}<span>React</span></button>`
     : "";
+// A reaction's emoji: a custom one as the picture it was given with, wherever that came from.
+const reactionEmoji = (r: Reaction) =>
+  emojiHtml(`:${r.emoji}:`, r.url ? [{ name: r.emoji, id: "", url: r.url }] : state.emojis);
+// For a moderator, what to do about the reactions a message has.
+const moderateButton = (m: Message, cls: string) =>
+  reactable(m) && m.reactions?.length && canModerate(current!)
+    ? `<button type="button" class="${cls}" data-react-moderate="${m.id}" aria-label="Moderate reactions" aria-haspopup="dialog" title="Moderate reactions">${icon("shield")}<span>Reactions</span></button>`
+    : "";
+// Take a reaction off a message for everyone, or keep its emoji out of the channel altogether.
+function moderateReactions(id: string) {
+  const dialog = document.createElement("dialog");
+  dialog.className = "card dialog";
+  const draw = () => {
+    const rows = (messages.find((m) => m.id === id)?.reactions || [])
+      .map(
+        (r) =>
+          `<li class="row"><span class="grow">${reactionEmoji(r)} <code>:${esc(r.emoji)}:</code> · ${r.count}</span><button type="button" class="small secondary" data-clear="${esc(r.emoji)}">Remove</button><button type="button" class="small secondary bad-text" data-ban="${esc(r.emoji)}">Ban</button></li>`,
+      )
+      .join("");
+    dialog.innerHTML = `<h2>Reactions to this message</h2>${rows ? `<ul class="plain stack">${rows}</ul><p class="muted small">Remove takes a reaction off this message for everyone. Ban also takes the emoji off every message in this channel and keeps it from being given here again; the channel's settings list what is banned.</p>` : '<p class="muted">No reactions are left.</p>'}<div class="row end"><button type="button" class="secondary" data-cancel>Close</button></div>`;
+  };
+  dialog.addEventListener("close", () => dialog.remove());
+  dialog.addEventListener("click", (e) => {
+    const hit = (e.target as Element).closest<HTMLElement>("[data-cancel],[data-clear],[data-ban]");
+    if (!hit) return;
+    if (hit.hasAttribute("data-cancel")) return dialog.close();
+    action(async () => {
+      const token = generation,
+        name = hit.dataset.clear || hit.dataset.ban!;
+      if (hit.dataset.clear) {
+        const left = await api<Reaction[]>(`/messages/${id}/reactions/${encodeURIComponent(name)}`, "DELETE");
+        const m = messages.find((m) => m.id === id);
+        if (m) m.reactions = left;
+      } else {
+        await api(`/channels/${current!.id}/reaction-bans`, "PUT", { emoji: name, banned: true });
+        for (const m of messages) m.reactions = m.reactions?.filter((r) => r.emoji !== name);
+        state.channels = await api<Channel[]>("/channels");
+        toast(`:${name}: is banned from reactions in this channel.`);
+      }
+      if (token !== generation) return dialog.close();
+      draw();
+      render();
+    });
+  });
+  draw();
+  document.body.append(dialog);
+  dialog.showModal();
+}
 function reactionsHtml(m: Message) {
   if (!reactable(m)) return "";
   const can = canPost(),
     chips = (m.reactions || [])
       .map(
         (r) =>
-          `<button type="button" class="reaction${r.mine ? " mine" : ""}" data-react="${m.id}" data-emoji="${esc(r.emoji)}" aria-pressed="${r.mine}" aria-label="${esc(r.emoji)}, ${r.count}" title=":${esc(r.emoji)}:"${can ? "" : " disabled"}>${emojiHtml(`:${r.emoji}:`)}<span>${r.count}</span></button>`,
+          `<button type="button" class="reaction${r.mine ? " mine" : ""}" data-react="${m.id}" data-emoji="${esc(r.emoji)}" aria-pressed="${r.mine}" aria-label="${esc(r.emoji)}, ${r.count}" title=":${esc(r.emoji)}:"${can ? "" : " disabled"}>${reactionEmoji(r)}<span>${r.count}</span></button>`,
       )
       .join("");
   return chips ? `<div class="reactions">${chips}</div>` : "";
@@ -493,7 +542,11 @@ function react(id: string, emoji: string, on: boolean) {
       if (had && had.mine !== on) {
         had.count += on ? 1 : -1;
         had.mine = on;
-      } else if (!had && on) list.push({ emoji, count: 1, mine: true });
+      } else if (!had && on) {
+        // Shown at once with this instance's picture; the channel's home sends back the one it keeps.
+        const url = state.emojis.find((e) => e.name === emoji)?.url;
+        list.push({ emoji, count: 1, mine: true, ...(url ? { url } : {}) });
+      }
       m.reactions = list.filter((r) => r.count > 0);
     } else if (m) m.reactions = reactions;
     render();
@@ -563,6 +616,7 @@ function chatMessage(m: Message, cont: boolean) {
   const time = `<time datetime="${esc(m.created_at)}" title="${esc(full(m.created_at))}">${esc(clock(m.created_at))}</time>`;
   const tools = m.queued ? "" : [
     reactButton(m, "act react-button"),
+    moderateButton(m, "act"),
     repliable(m)
       ? `<button type="button" class="act reply-button" data-reply="${m.id}" aria-label="Reply to ${esc(m.display_name)}" title="Reply">${icon("reply")}<span>Reply</span></button>`
       : "",
@@ -623,6 +677,7 @@ function threadActions(m: Message) {
       ? `<details class="reply-box"><summary aria-label="Reply to ${esc(m.display_name)}">${icon("reply")} Reply</summary><form class="stack inline-form picker-host" data-reply-form="${m.id}"><textarea name="body" rows="3" maxlength="8000" required aria-label="Reply" placeholder="Reply to ${esc(m.display_name)}"></textarea><p class="form-error" role="alert"></p><div class="row"><button class="small">Reply</button><button type="button" class="icon-button" data-emoji-for aria-label="Choose emoji" title="Emoji">${icon("smile")}</button>${attachButton("data-attach-for")}<span class="muted">Ctrl + Enter to send</span></div></form></details>`
       : "",
     reactButton(m, "link react-button"),
+    moderateButton(m, "link"),
     mine(m)
       ? `<button type="button" class="link edit-button" data-edit="${m.id}" aria-label="Edit message">Edit</button>`
       : "",
@@ -961,6 +1016,8 @@ function wireFeed() {
         adoptEmojiDialog({ id, name: (hit.getAttribute("alt") || "emoji").replaceAll(":", "") });
     } else if ((hit = on("[data-react]"))) {
       react(hit.dataset.react!, hit.dataset.emoji!, hit.getAttribute("aria-pressed") !== "true");
+    } else if ((hit = on("[data-react-moderate]"))) {
+      moderateReactions(hit.dataset.reactModerate!);
     } else if ((hit = on("[data-react-add]"))) {
       const id = hit.dataset.reactAdd!;
       togglePicker(hit, (name) => {

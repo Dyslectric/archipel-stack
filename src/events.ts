@@ -30,6 +30,8 @@ const quiet = new Set([
   "federation_keys",
   "federation_objects",
   "mirror_sources",
+  // Written along with the reaction it is the picture of.
+  "reaction_emojis",
   "remote_emoji_cache",
   "xmpp_avatar_requests",
   "xmpp_direct_ids",

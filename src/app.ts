@@ -820,6 +820,12 @@ export function createApp(config: Config, store: Store) {
         : store.react(user(res), String(req.params.id), req.body || {}),
     ),
   );
+  app.delete("/api/messages/:id/reactions/:emoji", (req, res) =>
+    res.json(store.clearReaction(user(res), String(req.params.id), String(req.params.emoji))),
+  );
+  app.put("/api/channels/:id/reaction-bans", (req, res) =>
+    res.json(store.banReaction(user(res), String(req.params.id), req.body || {})),
+  );
   app.delete("/api/channels/:id", (req, res) => {
     store.deleteChannel(user(res), String(req.params.id));
     res.json({ ok: true });
