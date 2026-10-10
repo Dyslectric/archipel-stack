@@ -303,6 +303,74 @@ queued delivery. See [federation operations](docs/federation.md) for the
 permission matrix, deployment requirements, and current limits, and
 [FWDXP](docs/fwdxp.md) for the protocol.
 
+## How this was built
+
+The code in this repository, including its automated tests, was written by an AI
+coding agent working to the author's direction. The author has so far judged the
+result by its behaviour and by the tests, not by reading the source. This section
+says what stands behind each part, and will be updated as that changes.
+
+### The author's design input
+
+- The product brief in [ARCHIPEL.md](ARCHIPEL.md): server-hosted identities,
+  `#channel@instance.domain` addresses, and the timeline, topical and threaded
+  conversation shapes.
+- What each feature does. Features were asked for one at a time, used, and
+  corrected.
+- The permission and privacy model: roles and their grants, federation off until
+  it is granted, channel privacy, and saying what joining shares.
+- Interaction details found by using the application: touch gestures, the emoji
+  card's behaviour, sizes and spacing.
+- The look of both interface styles, given as written descriptions and corrections.
+  The Fusion mockups were AI-generated, then chosen and approved by the author.
+- The protocols: federation between instances, named FWDXP, with XMPP beside it.
+- The deployment shape: Docker only, a Python setup script, Traefik, and OIDC
+  through FedIdP.
+- PostgreSQL as well as SQLite, and Prosody for XMPP. TypeScript is what the
+  author would have chosen; Express was the agent's choice. The author plans a
+  native build that runs from a single executable.
+- The names: FWDXP, Archipel Server, Archipel Web and Archipel Stack.
+
+### What has been verified, and how
+
+"Backend tests" are the suites in `test/`, run as described under
+[Checks](#checks). "Browser tests" are the Playwright suites in `e2e/`, which drive
+Chromium against local servers using development accounts. "By hand" means the
+author used it on the two deployed instances, in Firefox and Chromium on a
+desktop and on an Android phone.
+
+| Area | Backend tests | Browser tests | By hand |
+| --- | --- | --- | --- |
+| OIDC sign-in | Signed local OIDC fixture | Development accounts only | Yes, through FedIdP, which is not yet public |
+| Invite-only registration and approval | Yes | Yes | Yes |
+| Instance roles and grants | Yes | Federation posting grant only | Yes |
+| Channel roles and per-channel instance bans | Yes | No | Not yet recorded |
+| Program sign-in without a browser | Yes | No | Yes |
+| Timeline, topical and threaded channels; replies and quotes | Yes | Yes | Yes |
+| Direct messages, blocks, contact names, closed conversations | Yes | Yes, except closing a conversation | Yes |
+| Editing, Markdown, attachments | Yes | Yes | Yes |
+| Moderation and channel privacy | Yes | Invitation and block only | Yes |
+| Emoji picker, shortcodes and the emoji card | Shortcodes | Yes | Yes |
+| Custom and personal emoji | Yes | Yes | Yes |
+| Reactions | Yes | Yes | Yes |
+| Live updates and push notifications | Yes | Notification choices; no push delivery | Yes |
+| Fusion and Default styles, windows, time format | No | Yes | Yes |
+| Sidebar, members panel and settings layout | No | Yes | Yes |
+| Touch | No | Emulated touch in Chromium | Yes, on an Android phone |
+| FWDXP: channels, messages, edits and removals between instances | Yes, two and three instances over HTTP | Yes, two instances | Yes, between the two deployed instances |
+| FWDXP: direct messages | Yes | Yes | Yes |
+| FWDXP: emoji, reactions, profile pictures, member lists | Yes | Adopting a remote emoji | Yes |
+| Federation controls and blocks | Yes | Admin-controlled posting | Yes |
+| XMPP: app passwords and native client login | Yes, with real Prosody in `npm run test:xmpp` | App passwords | Yes, with Monocles and Conversations: limited but promising |
+| XMPP: local rooms and history | Yes | No | Yes, with the same clients |
+| XMPP: rooms and servers elsewhere | Yes | Joining, posting and room roles | Yes |
+| XMPP: bridges and mirrors | Yes | No | Not yet tested by hand |
+| Setup script and Compose files | Python setup tests | No | Yes, on the deployed hosts behind Traefik |
+| XMPP certificates and DNS | Setup tests | No | Yes |
+| PostgreSQL | Yes, when `ARCHIPEL_TEST_POSTGRES` is set | No | Yes |
+
+Nothing has yet been tested by hand on an iPhone or in Safari.
+
 ## Checks
 
 ```sh

@@ -8,7 +8,7 @@ every interface style from 85% to 175%, independently of the color scheme and st
 Time format switches message times between a 12-hour and a 24-hour clock. Until you
 choose, Fusion shows 24 hours and Default follows your device's language.
 
-Fusion follows the saved Claude mockups: rounded top tabs, framed gray panes,
+Fusion follows the approved mockups: rounded top tabs, framed gray panes,
 subtle button gradients, blue selected rows and Segoe UI. Compact uses time,
 author and message columns without avatars; Cozy shows avatars beside messages,
 members, posts and nested replies. Both have collapsible thread headers, a channel
