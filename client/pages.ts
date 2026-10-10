@@ -23,6 +23,8 @@ import {
 import { sidebarFrame } from "./sidebar.js";
 import { isFusion } from "./appearance.js";
 import { updateFusionToolbar } from "./chat.js";
+import { windowHtml } from "./windows.js";
+import { federatedWindow, xmppWindow } from "./join.js";
 
 interface FeaturedChannel { id: string; name: string; description: string; mode: string; address: string; joined: boolean; }
 
@@ -77,21 +79,20 @@ export function showChannels(view: HTMLElement, create: boolean) {
   document.querySelector("#fusion-directory-tools")?.replaceChildren();
   const workspace = sidebarFrame(view);
   workspace.insertAdjacentHTML("beforeend", `<div class="page"><div class="page-inner directory"><div class="feed-head"><div><h1>Channels</h1><p class="muted small">Everything you can see on ${esc(state.session.instance)}. Find <a href="#/settings/federation/remote">channels on other servers</a>.</p></div></div>
-    <div class="directory-toolbar fusion-only">${state.session.user!.create_channels ? `<button type="button" class="secondary" id="open-create-channel">${icon("plus")} New channel</button>` : ""}<a class="button secondary" href="#/settings/federation/remote">${icon("globe")} Join a federated channel</a><a class="button secondary" href="#/xmpp">${icon("xmpp")} Join an XMPP room</a></div>
+    <div class="directory-toolbar fusion-only">${state.session.user!.create_channels ? `<button type="button" class="secondary" id="open-create-channel">${icon("plus")} New channel</button>` : ""}<button type="button" class="secondary" data-open-window="federated">${icon("globe")} Join a federated channel</button><button type="button" class="secondary" data-open-window="xmpp">${icon("xmpp")} Join an XMPP room</button></div>
     <div class="layout"><section><label class="search-field">${icon("search")}<input type="search" id="channel-search" placeholder="Search channels" aria-label="Search channels"></label><section id="featured-list" class="default-only" hidden></section><ul class="plain browse-list" id="browse-list"></ul><div class="channel-table-wrap"><table class="channel-table"><thead><tr><th>Name</th><th class="channel-description">Description</th><th>Style</th><th>Members</th><th>Status</th><th class="directory-action"><span class="visually-hidden">Action</span></th></tr></thead><tbody id="channel-table-body"></tbody></table></div></section>
     <aside><section class="card"><h2>Federated channels</h2><p class="muted">Follow a channel hosted on another Archipel instance.</p><a class="button secondary" href="#/settings/federation/remote">Join a federated channel</a></section><section class="card"><h2>XMPP rooms</h2><p class="muted">Join a conversation hosted on another XMPP server.</p><a class="button secondary" href="#/xmpp">Join an XMPP room</a></section>${state.session.user!.create_channels ? "" : '<section class="card"><h2>Create a channel</h2><p class="muted">Your role does not allow creating channels.</p></section>'}<section class="card" id="new-channel" ${state.session.user!.create_channels ? "" : "hidden"}><h2>Create a channel</h2><form class="stack">
       <label>Channel name<span class="input-prefix"><span>#</span><input name="name" required minlength="2" maxlength="40" pattern="[a-zA-Z0-9][a-zA-Z0-9_\\-]{1,39}" placeholder="general" autocomplete="off"></span></label>
       <p class="muted small" id="create-summary">A running conversation anyone on this instance can read and join.</p>
       <details class="create-options"><summary>More options</summary><div class="stack">
       <label>Description<textarea name="description" maxlength="500" rows="2" placeholder="What is it for?"></textarea></label>
-      <label class="default-only">Conversation style<select name="mode"><option value="timeline">Timeline: one running conversation</option><option value="topical">Topics: messages grouped by subject</option><option value="threaded">Threads: posts with nested replies</option></select></label>
-      <fieldset class="fusion-only mode-choices"><legend>Conversation style</legend>${[["timeline", "Timeline", "hash"], ["topical", "Topics", "folder"], ["threaded", "Threads", "needle-thread"]].map(([value, label, ico]) => `<label class="check"><input type="radio" name="fusion_mode" value="${value}" ${value === "timeline" ? "checked" : ""}>${icon(ico)} ${label}</label>`).join("")}</fieldset>
+      <label>Conversation style<select name="mode"><option value="timeline">Timeline: one running conversation</option><option value="topical">Topics: messages grouped by subject</option><option value="threaded">Threads: posts with nested replies</option></select></label>
       <label class="check" id="create-optional-titles" hidden><input type="checkbox" name="optional_titles"> Let threads start without a title</label>
       <label>Who can read?<select name="visibility"><option value="public">Everyone on this instance</option><option value="members">Members only</option></select></label>
       <label>Who can join?<select name="admission"><option value="open">Anyone on this instance</option><option value="allowlist">Invited users only</option></select></label>
       <label class="check"><input type="checkbox" name="show_members" checked> Show the member list</label>
       <label class="check"><input type="checkbox" name="hide_handles"> Hide handles, leaving only display names</label>
-      </div></details><p class="form-error" role="alert"></p><button>Create channel</button></form></section><span id="creator-home" hidden></span></aside></div><dialog class="create-channel-dialog" aria-labelledby="creator-heading"><div class="dialog-heading"><h2 id="creator-heading">Create a channel</h2><button type="button" class="icon-button" data-close-creator aria-label="Close create channel">${icon("x")}</button></div></dialog></div></div>`);
+      </div></details><p class="form-error" role="alert"></p><button>Create channel</button></form></section></aside></div></div></div>`);
   const list = $("#browse-list"),
     search = $<HTMLInputElement>("#channel-search");
   $(".directory-toolbar").insertAdjacentHTML("afterend", '<span id="directory-toolbar-home" hidden></span>');
@@ -203,21 +204,17 @@ export function showChannels(view: HTMLElement, create: boolean) {
     });
   });
   const form = $<HTMLFormElement>("#new-channel form");
-  const dialog = $<HTMLDialogElement>(".create-channel-dialog");
-  $("[data-close-creator]", dialog).addEventListener("click", () => dialog.close());
-  document.querySelector("#open-create-channel")?.addEventListener("click", () => { dialog.showModal(); $<HTMLInputElement>("input[name=name]", form).focus(); });
-  adaptChannelCreator();
+  // The card and the Fusion window ask the same things, each in its own form.
+  const summary = (data: FormData) => {
+    const style = data.get("mode") === "threaded" ? "Posts with nested replies" : data.get("mode") === "topical" ? "Messages grouped by topic" : "A running conversation";
+    return `${style}. ${data.get("visibility") === "members" ? "Members can read" : "Anyone on this instance can read"}; ${data.get("admission") === "allowlist" ? "joining requires an invitation" : "anyone here can join"}.`;
+  };
   form.addEventListener("change", () => {
     const data = new FormData(form);
     $("#create-optional-titles", form).hidden = data.get("mode") !== "threaded";
-    const style = data.get("mode") === "threaded" ? "Posts with nested replies" : data.get("mode") === "topical" ? "Messages grouped by topic" : "A running conversation";
-    $("#create-summary", form).textContent = `${style}. ${data.get("visibility") === "members" ? "Members can read" : "Anyone on this instance can read"}; ${data.get("admission") === "allowlist" ? "joining requires an invitation" : "anyone here can join"}.`;
+    $("#create-summary", form).textContent = summary(data);
   });
-  for (const radio of $$<HTMLInputElement>("[name=fusion_mode]", form)) radio.addEventListener("change", () => {
-    $<HTMLSelectElement>("[name=mode]", form).value = radio.value;
-    form.dispatchEvent(new Event("change"));
-  });
-  onSubmit(form, async (data) => {
+  const submit = (each: HTMLFormElement) => onSubmit(each, async (data) => {
     const channel = await api<Channel>(
       "/channels",
       "POST",
@@ -229,41 +226,77 @@ export function showChannels(view: HTMLElement, create: boolean) {
       },
     );
     state.channels = await api<Channel[]>("/channels");
-    dialog.close();
+    dialog?.close();
     go(`#/c/${channel.id}`);
   });
+  submit(form);
+  // Fusion asks in a window instead. It is on the page only in that style, and keeps a draft while the directory stays open.
+  let dialog: HTMLDialogElement | null = null;
+  mountCreator = () => {
+    const directory = document.querySelector(".directory");
+    if (!directory || !isFusion() || !state.session.user!.create_channels) {
+      dialog?.remove();
+      dialog = null;
+      return;
+    }
+    if (dialog?.isConnected) return;
+    directory.insertAdjacentHTML("beforeend", `<dialog class="fusion-window create-channel-dialog" aria-labelledby="creator-heading">${windowHtml("creator-heading", "Create a channel", `
+      <div class="field-grid"><label for="cc-name">Name</label><div class="icon-field">${icon("hash")}<input id="cc-name" name="name" required minlength="2" maxlength="40" pattern="[a-zA-Z0-9][a-zA-Z0-9_\\-]{1,39}" autocomplete="off"></div>
+        <label for="cc-desc" class="top">Description</label><textarea id="cc-desc" name="description" maxlength="500" rows="2" placeholder="What is it for?"></textarea></div>
+      <fieldset><legend>Conversation style</legend>${[["timeline", "Timeline", "hash", "one running conversation"], ["topical", "Topics", "folder", "messages grouped by subject"], ["threaded", "Threads", "needle-thread", "posts with nested replies"]].map(([value, label, ico, about]) => `<label class="choice"><input type="radio" name="mode" value="${value}" ${value === "timeline" ? "checked" : ""}>${icon(ico)}<span><strong>${label}</strong> <span class="muted">${about}</span></span></label>`).join("")}
+        <label class="choice sub"><input type="checkbox" name="optional_titles" disabled>Let threads start without a title</label></fieldset>
+      <fieldset><legend>Access</legend><div class="field-grid"><label for="cc-read">Who can read</label><select id="cc-read" name="visibility"><option value="public">Everyone on this instance</option><option value="members">Members only</option></select>
+        <label for="cc-join">Who can join</label><select id="cc-join" name="admission"><option value="open">Anyone on this instance</option><option value="allowlist">Invited users only</option></select></div></fieldset>
+      <fieldset><legend>Members</legend><label class="choice"><input type="checkbox" name="show_members" checked>Show the member list</label>
+        <label class="choice"><input type="checkbox" name="hide_handles">Hide handles, leaving only display names</label></fieldset>
+      <p class="muted" id="fusion-create-summary"></p>`, '<button type="button" class="secondary" data-close-window>Cancel</button><button>Create channel</button>', "Close create channel")}</dialog>`);
+    dialog = $<HTMLDialogElement>(".create-channel-dialog", directory as HTMLElement);
+    const windowForm = $<HTMLFormElement>("form", dialog);
+    const describe = () => {
+      const data = new FormData(windowForm);
+      $<HTMLInputElement>("[name=optional_titles]", windowForm).disabled = data.get("mode") !== "threaded";
+      $("#fusion-create-summary", windowForm).textContent = summary(data);
+    };
+    windowForm.addEventListener("change", describe);
+    describe();
+    submit(windowForm);
+  };
+  const openCreator = () => {
+    dialog?.showModal();
+    dialog?.querySelector<HTMLInputElement>("input[name=name]")?.focus();
+  };
+  document.querySelector("#open-create-channel")?.addEventListener("click", openCreator);
+  adaptChannelCreator();
   if (create) {
-    if (isFusion() && state.session.user!.create_channels) dialog.showModal();
-    $("#new-channel").scrollIntoView({ block: "nearest" });
-    $<HTMLInputElement>("input[name=name]", form).focus();
+    if (dialog) openCreator();
+    else {
+      $("#new-channel").scrollIntoView({ block: "nearest" });
+      $<HTMLInputElement>("input[name=name]", form).focus();
+    }
   }
 }
+// Fusion puts the directory's commands and search in the command strip, and asks in windows.
 function adaptChannelCreator() {
-  const creator = document.querySelector<HTMLElement>("#new-channel");
-  const dialog = document.querySelector<HTMLDialogElement>(".create-channel-dialog");
-  const home = document.querySelector<HTMLElement>("#creator-home");
-  if (!creator || !dialog || !home) return;
+  const toolbar = document.querySelector(".directory-toolbar"), search = document.querySelector(".search-field");
+  mountCreator();
+  if (!toolbar || !search) return;
   if (isFusion()) {
-    dialog.append(creator);
-    $<HTMLDetailsElement>(".create-options", creator).open = true;
     const tools = document.querySelector("#fusion-directory-tools");
-    const toolbar = document.querySelector(".directory-toolbar");
-    const search = document.querySelector(".search-field");
-    if (tools && toolbar) { tools.replaceChildren(toolbar); if (search) tools.append(search); }
+    if (tools) { tools.replaceChildren(toolbar); tools.append(search); }
   } else {
-    dialog.close();
-    home.before(creator);
-    const toolbar = document.querySelector(".directory-toolbar");
-    const search = document.querySelector(".search-field");
-    if (toolbar) document.querySelector("#directory-toolbar-home")?.before(toolbar);
-    if (search) document.querySelector("#directory-search-home")?.before(search);
+    for (const open of document.querySelectorAll<HTMLDialogElement>("dialog.fusion-window[open]")) open.close();
+    document.querySelector("#directory-toolbar-home")?.before(toolbar);
+    document.querySelector("#directory-search-home")?.before(search);
   }
-  const mode = $<HTMLSelectElement>("[name=mode]", creator).value;
-  for (const radio of $$<HTMLInputElement>("[name=fusion_mode]", creator)) radio.checked = radio.value === mode;
   document.querySelector<HTMLInputElement>("#channel-search")?.dispatchEvent(new Event("input"));
 }
+document.addEventListener("click", (event) => {
+  const which = (event.target as Element).closest<HTMLElement>("[data-open-window]")?.dataset.openWindow;
+  if (which === "federated") federatedWindow();
+  else if (which === "xmpp") action(xmppWindow);
+});
 document.addEventListener("appearance-change", adaptChannelCreator);
-let refreshFeatured = () => {};
+let refreshFeatured = () => {}, mountCreator = () => {};
 // Kept up to date while it's on screen, unless someone is typing in the search.
 export function tickChannels() {
   const search = document.querySelector<HTMLInputElement>("#channel-search");

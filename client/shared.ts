@@ -1,6 +1,6 @@
 import { emojiParts, emojiData, emojiNames, markEmoji, type CustomEmoji } from "../src/emojis.js";
 import { markdownHtml } from "./markdown.js";
-import { isFusion } from "./appearance.js";
+import { isFusion, hour12 } from "./appearance.js";
 
 export type { CustomEmoji };
 export interface User {
@@ -333,10 +333,10 @@ const dayKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 export const sameDay = (a: string, b: string) =>
   dayKey(new Date(a)) === dayKey(new Date(b));
 export const clock = (ts: string) =>
-  new Date(ts).toLocaleTimeString([], isFusion()
-    ? { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }
-    : { hour: "numeric", minute: "2-digit" });
-export const full = (ts: string) => new Date(ts).toLocaleString();
+  new Date(ts).toLocaleTimeString([], hour12()
+    ? { hour: "numeric", minute: "2-digit", hour12: true }
+    : { hour: isFusion() ? "2-digit" : "numeric", minute: "2-digit", hourCycle: "h23" });
+export const full = (ts: string) => new Date(ts).toLocaleString([], { hour12: hour12() });
 export function dayLabel(ts: string) {
   const d = new Date(ts),
     now = new Date(),

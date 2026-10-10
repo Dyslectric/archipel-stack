@@ -34,9 +34,10 @@ import {
   type User,
 } from "./shared.js";
 import { chatChannel, resetChat } from "./chat.js";
-import { styleChoices, textScaleControls } from "./appearance.js";
+import { hourChoices, styleChoices, textScaleControls } from "./appearance.js";
 import { renderSidebar, sidebarFrame } from "./sidebar.js";
 import { mirrorDialog } from "./mirrors.js";
+import { subscribeRemote } from "./join.js";
 import {
   disablePush,
   enablePush,
@@ -369,7 +370,7 @@ const sections: Section[] = [
         "Theme",
         themeSeg(),
         "Kept for this browser only, so each device can have its own. Device follows your system's light or dark setting.",
-      );
+      ) + card("Time format", hourChoices(), "How the time of a message is written. Kept for this browser.");
     },
   },
   {
@@ -527,23 +528,7 @@ const sections: Section[] = [
           "A subscription is pending until the channel's home instance accepts it.",
         );
       onSubmit($("#remote-subscribe", el), async (data) => {
-        const me = s.user!;
-        if (
-          !(await shareDialog(
-            `Subscribe to ${String(data.get("address")).slice(0, 80)}?`,
-            [
-              `Your address, <strong>@${esc(me.username)}@${esc(s.instance)}</strong>, your display name, <strong>${esc(me.display_name)}</strong>, and your profile picture, to the channel's home instance and to whoever it shows them.`,
-              "That you follow the channel, to its home instance. Its owner decides whether other members see who is in it.",
-              "What you write there, to the home instance and to the instances and XMPP servers of everyone following the channel.",
-              me.verified_socials.length
-                ? "Not your verified socials: they stay on this instance."
-                : "",
-            ].filter(Boolean),
-            "Subscribe",
-          ))
-        )
-          return;
-        await api("/federation/subscriptions", "POST", Object.fromEntries(data));
+        if (!(await subscribeRemote(String(data.get("address"))))) return;
         ctx.refresh();
       });
       onClick(el, "#refresh-subscriptions", async () => ctx.refresh());

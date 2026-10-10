@@ -5,6 +5,8 @@ Compact and Fusion Cozy. The choice is saved in this browser; Light, Dark and
 Device are independent color choices. Switching styles preserves composer drafts.
 Fusion starts with 15px text and larger reaction emoji. The Text size slider scales
 every interface style from 85% to 175%, independently of the color scheme and style.
+Time format switches message times between a 12-hour and a 24-hour clock. Until you
+choose, Fusion shows 24 hours and Default follows your device's language.
 
 Fusion follows the saved Claude mockups: rounded top tabs, framed gray panes,
 subtle button gradients, blue selected rows and Segoe UI. Compact uses time,
@@ -19,12 +21,15 @@ to starting a thread, keeping a title you had begun. In the channel directory, s
 a row and double-click it to open or join that channel; section headings fold. The
 status strip shows the connection, the conversation or directory on screen, and a hint.
 
-Fusion quotes preview the original message above the composer. Remove the quote
-without changing the draft, or send it as Markdown with a reply link to the
-original channel message. In threads, Quote replies to the selected post or reply.
-Choose Edit quote to shorten or change the quoted text. Place the cursor between
-passages and choose Split at cursor to answer sections separately. Preview quote
-shows the edited sections; sending preserves their order and the source reply link.
+New channel, Join a federated channel and Join an XMPP room in the directory's command
+strip each open a window over it. Joining still asks you to acknowledge what it shares.
+Drag any window or dialog by its title bar to move it; it returns to the middle the next
+time it opens.
+
+Quote puts the selected message into the composer as quoted text, with the cursor under
+it for your answer. It is ordinary text: trim it, or write between its lines. Outside
+direct messages the answer is also sent as a reply to the message it quotes; in threads,
+Quote replies to the selected post or reply.
 Select a row to use Reply, React or Quote in the command bar; the arrow keys move
 between rows. Right-click a message (or press Shift+F10) to copy, edit or remove it.
 Search filters messages loaded in the current conversation.

@@ -53,8 +53,8 @@ async function create(page: Page, name: string, mode = "timeline") {
   await page.locator("#open-create-channel").click();
   const dialog = page.locator(".create-channel-dialog");
   await expect(dialog).toBeVisible();
-  await dialog.getByLabel("Channel name").fill(name);
-  await dialog.locator(`input[name=fusion_mode][value=${mode}]`).check();
+  await dialog.getByLabel("Name", { exact: true }).fill(name);
+  await dialog.locator(`input[name=mode][value=${mode}]`).check();
   await dialog.getByRole("button", { name: "Create channel", exact: true }).click();
   await expect(page.locator("#channel-heading strong")).toHaveText(name);
 }
@@ -89,6 +89,14 @@ test("settings select independent persistent styles and color schemes", async ({
   await expect(textSize).toHaveValue("125");
   await page.getByRole("button", { name: "Reset to 100%" }).click();
   await expect(textSize).toHaveValue("100");
+  const hours = page.getByRole("group", { name: "Time format" });
+  await hours.getByRole("button", { name: /^24-hour/ }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-hours", "24");
+  await hours.getByRole("button", { name: /^12-hour/ }).click();
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-hours", "12");
+  await expect(page.getByRole("button", { name: /^12-hour/ })).toHaveAttribute("aria-pressed", "true");
+  await page.evaluate(() => localStorage.removeItem("archipel-hours"));
   await page.evaluate(() => localStorage.setItem("archipel-style", "unknown"));
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("data-style", "default");
@@ -104,6 +112,10 @@ test("Fusion chat switches without losing drafts, supports both densities and a 
   await input.fill("An unsent draft.");
   const first = page.locator("article.message").filter({ hasText: "First compact message." });
   await first.click();
+  await expect(first.locator(".compact-time")).toHaveText(/^\d{2}:\d{2}$/);
+  await page.evaluate(() => { const b = document.createElement("button"); b.dataset.setHours = "12"; document.body.append(b); b.click(); b.remove(); });
+  await expect(first.locator(".compact-time")).toHaveText(/^\d{1,2}:\d{2}\s[AP]M$/);
+  await page.evaluate(() => { const b = document.createElement("button"); b.dataset.setHours = "24"; document.body.append(b); b.click(); b.remove(); });
   await expect(first.locator(".compact-time")).toHaveText(/^\d{2}:\d{2}$/);
   await page.locator("#fusion-react").click();
   await page.getByLabel("Search emoji").fill("thumbsup");
@@ -131,15 +143,16 @@ test("Fusion chat switches without losing drafts, supports both densities and a 
   await page.getByLabel("Edited message").fill("First compact message.");
   await page.getByRole("button", { name: "Save changes" }).click();
   await expect(page.getByLabel("Edited message")).toHaveCount(0);
+  await input.press("Control+End");
   await page.locator("#fusion-quote").click();
-  await expect(page.locator(".quote-preview")).toContainText("First compact message.");
-  await expect(input).toHaveValue("An unsent draft.");
-  await page.getByRole("button", { name: "Remove quote" }).click();
-  await expect(page.locator(".quote-preview")).toHaveCount(0);
-  await expect(input).toHaveValue("An unsent draft.");
+  await expect(input).toHaveValue("An unsent draft.\n\n> First compact message.\n\n");
+  await expect(input).toBeFocused();
+  await expect(page.locator(".reply-banner")).toContainText("Replying to alice");
+  await input.fill("");
   await first.click();
   await page.locator("#fusion-quote").click();
-  await input.fill("A quoted answer.");
+  await expect(input).toHaveValue("> First compact message.\n\n");
+  await input.pressSequentially("A quoted answer.");
   await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.locator("article.message").filter({ hasText: "A quoted answer." }).locator("blockquote")).toContainText("First compact message.");
   await input.fill("An unsent draft.");
@@ -182,11 +195,11 @@ test("Fusion directory has a working table, create dialog and administrator feat
   await expect(page.locator("#channel-table-body")).toHaveText("No channels match.");
   await page.getByLabel("Search channels").fill("");
   await page.locator("#open-create-channel").click();
-  await page.locator(".create-channel-dialog").getByLabel("Channel name").fill("retained-draft");
+  await page.locator(".create-channel-dialog").getByLabel("Name", { exact: true }).fill("retained-draft");
   await page.screenshot({ animations: "disabled", path: info.outputPath("fusion-create-dialog.png") });
   await page.getByRole("button", { name: "Close create channel" }).click();
   await page.locator("#open-create-channel").click();
-  await expect(page.locator(".create-channel-dialog").getByLabel("Channel name")).toHaveValue("retained-draft");
+  await expect(page.locator(".create-channel-dialog").getByLabel("Name", { exact: true })).toHaveValue("retained-draft");
   await page.keyboard.press("Escape");
   await page.screenshot({ animations: "disabled", path: info.outputPath("fusion-channel-directory.png") });
   await page.goto("/#/settings/federation/featured");
@@ -207,8 +220,8 @@ test("Fusion threads fold whole conversations and quote into a nested reply", as
   await thread.locator(".post .message-body").click();
   await page.locator("#fusion-quote").click();
   const reply = page.getByRole("textbox", { name: "Message", exact: true });
-  await expect(page.locator(".quote-preview")).toContainText("The original post.");
-  await reply.fill("A nested reply.");
+  await expect(reply).toHaveValue("> The original post.\n\n");
+  await reply.pressSequentially("A nested reply.");
   await page.getByRole("button", { name: "Send message" }).click();
   await expect(thread.locator(".comment .message-body")).toContainText("A nested reply.");
   await thread.locator(":scope > summary").click();
@@ -231,41 +244,21 @@ test("Fusion threads fold whole conversations and quote into a nested reply", as
   await expect(page.locator("section.thread")).toBeVisible();
 });
 
-test("quotes can be edited and split with replies between sections while preserving the original", async ({ page }, info) => {
+test("a quote is ordinary text in the composer, to trim before it is sent as a reply", async ({ page }) => {
   await login(page); await style(page, "fusion-compact");
-  await create(page, "fusion-partition-quotes");
+  await create(page, "fusion-plain-quotes");
   await send(page, "First passage.\n\nSecond passage.");
   const original = page.locator("article.message").first();
   await original.click(); await page.locator("#fusion-quote").click();
   const draft = page.getByRole("textbox", { name: "Message", exact: true });
-  await draft.fill("A closing answer.");
-  await page.getByRole("button", { name: "Edit quote", exact: true }).click();
-  const passage = page.getByRole("textbox", { name: "Quote text 1", exact: true });
-  await passage.fill("First passage.\n\nSecond passage.");
-  await passage.evaluate(el => { const input = el as HTMLTextAreaElement; input.setSelectionRange(16, 16); input.dispatchEvent(new Event("select")); });
-  await page.getByRole("button", { name: "Split at cursor", exact: true }).click();
-  await page.getByRole("textbox", { name: "Quote text 1", exact: true }).fill("Shortened first.");
-  await page.getByRole("textbox", { name: "Reply after quote 1", exact: true }).fill("My answer to the first.");
-  await style(page, "fusion-cozy");
-  await page.getByRole("button", { name: "Preview quote", exact: true }).click();
-  await expect(page.locator(".quote-content").first()).toHaveText("Shortened first.");
-  await expect(draft).toHaveValue("A closing answer.");
-  await page.screenshot({ animations: "disabled", path: info.outputPath("fusion-partitioned-quote.png") });
-  await page.getByRole("button", { name: "Send message" }).click();
-  const posted = page.locator("article.message").filter({ hasText: "A closing answer." });
-  await expect(posted.locator("blockquote")).toHaveCount(2);
-  await expect(posted.locator(".message-body > p").first()).toHaveText("My answer to the first.");
-  await expect(original.locator(".message-body")).toHaveText("First passage.Second passage.");
-  await expect(posted.locator(".reply-context")).toBeVisible();
-  await original.click(); await page.locator("#fusion-quote").click();
-  await draft.fill("Still writing.");
-  await page.getByRole("button", { name: "Edit quote", exact: true }).click();
-  await passage.evaluate(el => { const input = el as HTMLTextAreaElement; input.setSelectionRange(16, 16); input.dispatchEvent(new Event("select")); });
-  await page.getByRole("button", { name: "Split at cursor", exact: true }).click();
-  await page.getByRole("textbox", { name: "Reply after quote 1", exact: true }).fill("Keep this answer.");
-  await page.getByRole("button", { name: "Cancel reply", exact: true }).click();
-  await expect(draft).toHaveValue("Keep this answer.\n\nStill writing.");
+  await expect(draft).toHaveValue(/^> First passage\.\n>\s*\n> Second passage\.\n\n$/);
   await expect(page.locator(".quote-preview")).toHaveCount(0);
+  await draft.fill("> First passage.\n\nAn answer to the first.");
+  await page.getByRole("button", { name: "Send message" }).click();
+  const posted = page.locator("article.message").filter({ hasText: "An answer to the first." });
+  await expect(posted.locator("blockquote")).toHaveText("First passage.");
+  await expect(posted.locator(".reply-context")).toBeVisible();
+  await expect(original.locator(".message-body")).toHaveText("First passage.Second passage.");
 });
 
 test("topical folder icons expand and collapse another channel without navigating", async ({ page }, info) => {

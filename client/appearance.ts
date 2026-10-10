@@ -37,12 +37,39 @@ document.addEventListener("input", event => {
 document.addEventListener("click", event => {
   if ((event.target as Element).closest("[data-reset-text-scale]")) saveTextScale(100);
 });
+// Times on a 12- or a 24-hour clock. Until one is chosen, Fusion shows 24 hours and Default what the device's language uses.
+const savedHours = () => {
+  try {
+    const value = localStorage.getItem("archipel-hours");
+    return value === "12" || value === "24" ? value : null;
+  } catch { return null; }
+};
+export const hour12 = () =>
+  (savedHours() || (isFusion() || !new Intl.DateTimeFormat([], { hour: "numeric" }).resolvedOptions().hour12 ? "24" : "12")) === "12";
+export function applyHours() {
+  const hours = hour12() ? "12" : "24";
+  document.documentElement.dataset.hours = hours;
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-set-hours]")) {
+    const selected = button.dataset.setHours === hours;
+    button.classList.toggle("on", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  }
+}
+export const hourChoices = () => `<div class="seg" role="group" aria-label="Time format">${[["12", "12-hour", "1:30 PM"], ["24", "24-hour", "13:30"]].map(([key, label, sample]) => `<button type="button" data-set-hours="${key}" class="${hour12() === (key === "12") ? "on" : ""}" aria-pressed="${hour12() === (key === "12")}">${label} <span class="muted">${sample}</span></button>`).join("")}</div>`;
+document.addEventListener("click", event => {
+  const value = (event.target as Element).closest<HTMLElement>("[data-set-hours]")?.dataset.setHours;
+  if (value !== "12" && value !== "24") return;
+  try { localStorage.setItem("archipel-hours", value); } catch { /* Keep the choice for this visit. */ }
+  applyHours();
+  document.dispatchEvent(new Event("appearance-change"));
+});
 export function applyStyle(value?: string) {
   if (value === undefined) {
     try { value = localStorage.getItem("archipel-style") || "default"; }
     catch { value = "default"; }
   }
   document.documentElement.dataset.style = valid(value) ? value : "default";
+  applyHours();
   for (const button of document.querySelectorAll<HTMLButtonElement>("[data-set-style]")) {
     const selected = button.dataset.setStyle === appStyle();
     button.classList.toggle("on", selected);
@@ -62,7 +89,7 @@ window.addEventListener("storage", event => {
     applyTextScale();
     document.dispatchEvent(new Event("text-scale-change"));
   }
-  if (event.key !== "archipel-style" && event.key !== null) return;
+  if (event.key !== "archipel-style" && event.key !== "archipel-hours" && event.key !== null) return;
   applyStyle();
   document.dispatchEvent(new Event("appearance-change"));
 });

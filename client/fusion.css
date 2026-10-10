@@ -2,7 +2,7 @@
    flat selectable rows, a one-line composer and a status strip. Compact and Cozy share
    everything but the message rows. Style and colour scheme are independent choices. */
 
-/* ---- pieces every style needs: the style picker, text size, quotes, the channel table ---- */
+/* ---- pieces every style needs: the style picker, text size, the channel table ---- */
 .style-choices { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .style-choice { display: flex; flex-direction: column; align-items: stretch; text-align: left; padding: 12px; gap: 8px;
   background: var(--card); color: var(--text); border: 1px solid var(--line); font-weight: 400; white-space: normal; }
@@ -22,36 +22,16 @@
 .text-scale-control input[type=range] { padding: 0; width: 100%; min-height: 30px; accent-color: var(--accent); }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .fusion-only, .fusion-toolbar, .fusion-status, .fusion-compose-label, .reply-thread, .channel-table-wrap { display: none; }
-.mode-choices { margin: 0; border: 1px solid var(--line); padding: 10px; gap: 16px; flex-wrap: wrap; }
-.mode-choices legend { padding-inline: 5px; color: var(--muted); }
 .compact-time { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .compact-author { min-width: 0; }
 .compact-author .author { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .compact-author .handle { display: none; }
-
-.quote-preview { padding: 4px 10px 8px; background: var(--bg); border-bottom: 1px solid var(--line); }
-.quote-content { max-height: 110px; overflow-y: auto; margin-top: 4px; border-left: 2px solid var(--accent); padding-left: 8px; font-size: .92em; }
-.quote-content p:last-child { margin-bottom: 0; }
-.quote-parts { max-height: min(320px, 36dvh); overflow-y: auto; padding-bottom: 4px; }
-.quote-part + .quote-part { margin-top: 8px; }
-.quote-part .quote-content { max-height: none; }
-.quote-editor-label, .quote-answer-label { display: block; margin-block: 6px; font-size: .95em; }
-.quote-editor-label textarea, .quote-answer-label textarea { background: var(--card); display: block; margin-top: 3px; }
-.quote-editor-label textarea { border-left: 3px solid var(--accent); }
 
 .directory-toolbar { align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
 .channel-table { width: 100%; border-collapse: collapse; background: var(--card); }
 .channel-table th, .channel-table td { text-align: left; vertical-align: middle; }
 .channel-table .directory-name { display: inline-flex; align-items: center; gap: 6px; color: var(--text); }
 .table-section-row { display: flex; align-items: center; gap: 8px; }
-dialog.create-channel-dialog { width: min(560px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); padding: 0; background: var(--card);
-  color: var(--text); border: 1px solid var(--line); box-shadow: var(--shadow-pop); }
-.create-channel-dialog::backdrop { background: rgba(0, 0, 0, .4); }
-.create-channel-dialog > .dialog-heading { display: flex; align-items: center; padding: 6px 6px 6px 12px; border-bottom: 1px solid var(--line); }
-.create-channel-dialog .dialog-heading h2 { margin: 0; flex: 1; }
-.create-channel-dialog #new-channel { border: 0; margin: 0; }
-.create-channel-dialog #new-channel > h2, .create-channel-dialog .create-options > summary { display: none; }
-.create-channel-dialog .create-options > .stack { margin-top: 0; }
 
 /* ---- colours and sizes ---- */
 :root[data-style^="fusion-"] {
@@ -68,6 +48,7 @@ dialog.create-channel-dialog { width: min(560px, calc(100vw - 24px)); max-height
   --fusion-rule: light-dark(#d4d4d4, #4a4a4a);    /* the hairline between rows of a pane */
   --fusion-stripe: light-dark(#f6f6f6, #2f2f2f);  /* every other row */
   --fusion-selection: light-dark(#2b79b5, #2470c2);
+  --fusion-window-edge: light-dark(#6e6e6e, #747474);
   --fusion-button: linear-gradient(light-dark(#fafafa, #444444), light-dark(#e8e8e8, #363636));
   --fusion-button-hover: linear-gradient(light-dark(#ffffff, #4d4d4d), light-dark(#f0f0f0, #3f3f3f));
 }
@@ -322,7 +303,6 @@ dialog.create-channel-dialog { width: min(560px, calc(100vw - 24px)); max-height
   .reply-banner > span { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .reply-banner .icon-button { width: 20px; height: 20px; }
   .reply-banner .icon-button .i { width: 11px; height: 11px; }
-  .quote-preview { flex-basis: 100%; order: -2; border: 1px solid var(--line); border-radius: 2px; background: var(--card); }
   #thread-title { flex: 1 1 200px; max-width: 320px; width: auto; padding: 5px 7px; font-size: 1em; font-weight: 600; background: var(--card);
     border: 1px solid var(--line) !important; border-radius: 3px; }
   #message-body { flex: 3 1 240px; width: auto; min-height: calc(31px * var(--text-scale, 1)); padding: 5px 7px; border: 1px solid var(--line);
@@ -358,8 +338,45 @@ dialog.create-channel-dialog { width: min(560px, calc(100vw - 24px)); max-height
   .directory-name .i { width: 14px; height: 14px; color: var(--muted); }
   .channel-table .directory-action { width: 1%; padding-block: 2px; text-align: right; white-space: nowrap; }
   .directory-action :is(button, .button) { min-width: 70px; padding: 2px 12px; font-size: 1em; }
-  .create-channel-dialog > .dialog-heading { background: var(--fusion-button); }
-  .create-channel-dialog .dialog-heading h2 { font-size: 1em; }
+
+  /* ---- windows: a title bar that drags, a body of labelled fields, buttons at the bottom right ---- */
+  dialog:is(.fusion-window, .dialog) { background: var(--bg); color: var(--text); border: 1px solid var(--fusion-window-edge);
+    border-radius: 4px; box-shadow: 0 6px 18px rgb(0 0 0 / .3); }
+  dialog:is(.fusion-window, .dialog)::backdrop { background: rgb(0 0 0 / .35); }
+  dialog.fusion-window { width: min(calc(552px * var(--text-scale, 1)), calc(100vw - 24px)); max-height: calc(100dvh - 24px); padding: 0; overflow: auto; }
+  dialog.fusion-window.narrow { width: min(calc(480px * var(--text-scale, 1)), calc(100vw - 24px)); }
+  .dialog-heading, dialog.dialog > h2:first-child { background: var(--fusion-top); border-bottom: 1px solid var(--line);
+    border-radius: 3px 3px 0 0; cursor: default; user-select: none; touch-action: none; }
+  .dialog-heading { display: flex; align-items: center; padding: 5px 5px 5px 12px; }
+  .dialog-heading h2, dialog.dialog > h2:first-child { font-size: 1em; font-weight: 600; letter-spacing: 0; }
+  .dialog-heading h2 { flex: 1; margin: 0; }
+  .dialog-heading .icon-button { width: 24px; height: 24px; color: var(--text); }
+  .dialog-heading .icon-button:hover { border-color: var(--line); background: var(--bg); }
+  .dialog-heading .icon-button .i { width: 12px; height: 12px; }
+  .window-body { display: flex; flex-direction: column; gap: 12px; padding: 14px 16px 4px; }
+  .window-body > p { margin: 0; }
+  .field-grid { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 10px; align-items: center; }
+  .window-body > .field-grid { grid-template-columns: calc(96px * var(--text-scale, 1)) minmax(0, 1fr); }
+  .field-grid > label { text-align: right; }
+  .field-grid > label.top { align-self: start; padding-top: 5px; }
+  .field-grid :is(input, select, textarea) { width: 100%; }
+  .field-grid textarea { resize: none; }
+  .icon-field { display: flex; align-items: center; gap: 6px; }
+  .icon-field > .i, .choice > .i { width: 15px; height: 15px; color: var(--muted); }
+  .fusion-window fieldset { min-width: 0; margin: 0; padding: 6px 12px 10px; border: 1px solid var(--line); border-radius: 3px; }
+  .fusion-window legend { padding: 0 4px; }
+  .fusion-window select { background: var(--fusion-button); }
+  .choice { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+  .choice input { margin: 0; }
+  .choice strong { font-weight: 600; }
+  .choice.sub { padding: 3px 0 0 46px; }
+  .choice:has(:disabled) { color: var(--muted); }
+  .window-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding: 10px 16px 14px; }
+  .window-actions button, dialog.dialog form.row.end button { min-width: 84px; padding: 5px 14px; }
+  /* the plain dialogs — confirm, share, prompt — wear the same frame, their heading as the bar */
+  dialog.dialog { padding: 0 16px 14px; }
+  dialog.dialog > h2:first-child { margin: 0 -16px 12px; padding: 7px 12px; }
+  dialog.dialog form { margin-top: 14px; }
 
   /* ---- settings, menus and cards ---- */
   .settings-layout { gap: 7px; }
@@ -377,7 +394,7 @@ dialog.create-channel-dialog { width: min(560px, calc(100vw - 24px)); max-height
 :root[data-style="fusion-compact"] {
   :is(.member-rows, .dm-link, .account-menu > summary, .thread-heading) .avatar, .thread-avatar { display: none; }
   ul.plain.member-rows > li { padding-left: 18px; }
-  .group-body > article.compact-message { grid-template-columns: calc(52px * var(--text-scale, 1)) calc(106px * var(--text-scale, 1)) minmax(0, 1fr);
+  .group-body > article.compact-message { grid-template-columns: calc(var(--fusion-time, 52px) * var(--text-scale, 1)) calc(106px * var(--text-scale, 1)) minmax(0, 1fr);
     gap: 0 8px; padding: 4px 10px; }
   .group-body > article:nth-child(even):not(.selected-message, :hover) { background: var(--fusion-stripe); }
   /* a one-paragraph message keeps its reactions and its edit mark on its line */
@@ -394,6 +411,8 @@ dialog.create-channel-dialog { width: min(560px, calc(100vw - 24px)); max-height
   .row-text { flex: 1; min-width: 0; }
 }
 
+:root[data-style="fusion-compact"][data-hours="12"] { --fusion-time: 76px; }
+
 /* ---- Cozy: a picture beside each message, the name and time above it ---- */
 :root[data-style="fusion-cozy"] {
   .group-body > article { grid-template-columns: 32px minmax(0, 1fr); gap: 0 10px; padding: 7px 12px; }
@@ -405,16 +424,31 @@ dialog.create-channel-dialog { width: min(560px, calc(100vw - 24px)); max-height
   ul.plain.member-rows > li { padding-block: 4px; }
   .fusion-thread[open] > .thread-heading :is(.avatar, .thread-starter) { display: none; }
   .thread-body { padding-bottom: 6px; }
-  .thread-row { gap: 10px; }
-  .thread-avatar { flex: none; line-height: 0; }
+  .thread-avatar { line-height: 0; }
   .thread-avatar .avatar { width: 26px; height: 26px; font-size: .86rem; }
-  .post > .thread-row { padding: 9px 12px 6px; }
   .byline { display: flex; align-items: baseline; gap: 8px; line-height: 1.25; }
+  /* The picture sits level with the middle of the name and the first two lines under it (one, when
+     that line is large emoji), however long the message runs. Each message is a grid for that: the
+     name and the text are its rows, and the picture spans them, no taller than those lines. */
+  --fusion-lead: 4.05em; /* a name's line and two of text */
+  .group-body > article > .message-content, .thread-row > .row-main, .row-main > .row-text { display: contents; }
+  .thread-row { display: grid; align-items: start; column-gap: 10px; }
+  .post > .thread-row { grid-template-columns: 32px minmax(0, 1fr) auto; padding: 9px 12px 6px; }
+  .comment > summary.thread-row, .comments > .comment > summary.thread-row { display: grid; grid-template-columns: auto 26px minmax(0, 1fr); column-gap: 0; }
+  .group-body > article > .message-content > *, .post > .thread-row :is(.byline, .row-text > *) { grid-column: 2; min-width: 0; }
+  .comment > summary :is(.byline, .row-text > *) { grid-column: 3; min-width: 0; margin-left: 10px; }
+  .group-body .reply-context { justify-self: start; }
+  .msg-gutter, .thread-avatar, .comment > summary .fold { grid-row: 1 / span 2; align-self: stretch; display: flex; align-items: center;
+    max-height: var(--fusion-lead); }
+  .msg-gutter { grid-column: 1; }
+  :is(article, .thread-row):has(.emoji-only) :is(.msg-gutter, .thread-avatar, .fold) { max-height: calc(1.25em + 3.6rem); }
+  article:has(.reply-context) > .msg-gutter { grid-row: 1 / span 3; max-height: calc(var(--fusion-lead) + 1.4em); }
+  .thread-row > .pref-button { grid-column: 3; grid-row: 1; }
   .comments { margin-left: 26px; border-left: 1px solid var(--fusion-rule); }
   .comments:empty { display: none; }
-  .comment > summary { padding: 6px 12px 6px 0; gap: 0; }
-  .comment > summary .fold { margin-right: 0; height: 26px; }
-  .comment > summary .thread-avatar { margin-right: 10px; }
+  .comment > summary { padding: 6px 12px 6px 0; }
+  .comment > summary .fold { grid-column: 1; height: auto; min-height: 26px; }
+  .comment > summary .thread-avatar { grid-column: 2; }
   .replies { margin-left: 9px; }
   .post > .inline-form, .comment > .content > .inline-form, .obj-actions:has(details.reply-box[open]) { margin-left: 54px; }
 }
@@ -480,6 +514,10 @@ dialog.create-channel-dialog { width: min(560px, calc(100vw - 24px)); max-height
     .channel-table :is(th, td) { padding-inline: 6px; }
     .directory-row > td { height: 44px; }
     .directory-action :is(button, .button) { min-width: 56px; min-height: 36px; }
+    .dialog-heading .icon-button { width: 44px; height: 44px; }
+    .window-body > .field-grid { grid-template-columns: max-content minmax(0, 1fr); }
+    .choice { min-height: 44px; }
+    .fusion-window :is(input:not([type=checkbox], [type=radio]), select), .window-actions button { min-height: 44px; }
   }
   :root[data-style="fusion-compact"] {
     .group-body > article.compact-message { grid-template-columns: auto minmax(0, 1fr); gap: 0 8px; padding-block: 6px; }

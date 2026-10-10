@@ -43,7 +43,6 @@ import { closePicker, suggestShortcodes, togglePicker } from "./picker.js";
 import { renderSidebar, sidebarFrame } from "./sidebar.js";
 import { attachButton, pickFiles, quoteInto } from "./attach.js";
 import { markdownText } from "./markdown.js";
-import { partitionQuote, quotedReply, type QuotePart } from "./quotes.js";
 import { appStyle, isFusion } from "./appearance.js";
 import { isHidden, notifies, pickPref, prefItems, prefMenu, type PrefKind } from "./prefs.js";
 
@@ -65,7 +64,6 @@ let current: Channel | null = null,
   olderCursor: number | null = null;
 let narrow: string | null = null, // the topic being read on its own
   reply: Message | null = null,
-  quote: Message | null = null,
   editing: string | null = null;
 let generation = 0,
   lastSignature = "",
@@ -79,20 +77,7 @@ let unseen: string[] = [],
 let showHidden = false, // hidden threads are on the page for now
   lastPrefs = "";
 let selectedMessage: string | null = null, messageSearch = "";
-let quoteParts: QuotePart[] = [], quoteEditing = false;
 let threadTitleDraft = "";
-function startQuote(message: Message | null) {
-  const body = document.querySelector<HTMLTextAreaElement>("#message-body");
-  const answers = quote ? quoteParts.map(part => part.answer).filter(text => text.trim()) : [];
-  if (body && answers.length) body.value = [...answers, body.value].filter(text => text.trim()).join("\n\n");
-  quote = message;
-  quoteParts = message ? [{ body: message.body, answer: "" }] : [];
-  quoteEditing = false;
-}
-function quotePreview() {
-  if (!quote) return "";
-  return `<section class="quote-preview" aria-label="Quoted message"><div class="row"><button type="button" class="link" id="quote-source">${icon("quote")} ${esc(quote.display_name)}</button><span class="grow"></span><button type="button" class="small secondary" id="edit-quote" aria-pressed="${quoteEditing}">${quoteEditing ? "Preview quote" : "Edit quote"}</button><button type="button" class="icon-button" id="cancel-quote" aria-label="Remove quote">${icon("x")}</button></div><div class="quote-parts">${quoteParts.map((part, i) => `<div class="quote-part">${quoteEditing ? `<label class="quote-editor-label">Quote section ${i + 1}<textarea data-quote-part="${i}" aria-label="Quote text ${i + 1}" rows="3" maxlength="8000">${esc(part.body)}</textarea></label><button type="button" class="small secondary" data-partition-quote="${i}" disabled title="Place the cursor between the passages you want to separate">Split at cursor</button>` : `<div class="markdown quote-content">${richHtml(part.body, quote!.emojis || [])}</div>`}${i < quoteParts.length - 1 ? `<label class="quote-answer-label">Reply after quote ${i + 1}<textarea data-quote-answer="${i}" aria-label="Reply after quote ${i + 1}" rows="2" maxlength="8000" placeholder="Your reply to this section">${esc(part.answer)}</textarea></label>` : ""}</div>`).join("")}</div></section>`;
-}
 
 export const fusionToolbarHtml = () => `<div class="fusion-toolbar" id="fusion-toolbar"><div id="fusion-chat-tools" class="fusion-tool-group picker-host"><button type="button" data-fusion-action="new">${icon("pencil")}<span id="fusion-new-label">New message</span></button><a class="fusion-tool" href="#/channels">${icon("plus")} Join channel</a><span class="tool-separator"></span><button type="button" id="fusion-reply" data-fusion-action="reply" disabled>${icon("reply")} Reply</button><button type="button" id="fusion-react" data-fusion-action="react" disabled>${icon("smile")} React</button><button type="button" id="fusion-quote" data-fusion-action="quote" disabled>${icon("quote")} Quote</button><button type="button" id="fusion-collapse" data-fusion-action="collapse">${icon("collapse")} Collapse all</button><button type="button" id="fusion-members" data-fusion-action="members" aria-pressed="false">${icon("people")} Members</button><span class="grow"></span><input type="search" id="fusion-search" aria-label="Search messages" placeholder="Search messages" title="Search messages loaded in this conversation"></div><div id="fusion-directory-tools" class="fusion-tool-group"></div></div>`;
 export function updateFusionToolbar() {
@@ -141,7 +126,7 @@ document.addEventListener("click", event => {
   if (command === "members" && current) toggleMembers();
   else if (command === "new") {
     if (!current || !canPost()) return go("#/channels");
-    reply = null; startQuote(null); selectFusionMessage(null); renderComposer();
+    reply = null; selectFusionMessage(null); renderComposer();
     (document.querySelector<HTMLElement>("#thread-title") || document.querySelector<HTMLElement>("#message-body"))?.focus();
   } else if (command === "collapse") {
     const nodes = $$<HTMLDetailsElement>("details.fusion-thread", $("#rows"));
@@ -149,9 +134,14 @@ document.addEventListener("click", event => {
     for (const d of nodes) d.open = open;
   } else if (m && canPost() && !m.deleted_at && !m.queued) {
     if (command === "reply" || command === "quote") {
+      const old = $<HTMLTextAreaElement>("#message-body"), [from, to] = [old.selectionStart, old.selectionEnd];
       reply = current!.dm ? null : m;
-      startQuote(command === "quote" ? m : null);
-      renderComposer(); $("#message-body").focus();
+      renderComposer();
+      const body = $<HTMLTextAreaElement>("#message-body");
+      body.focus();
+      body.setSelectionRange(from, to);
+      // A quote is text in the message, to trim or write between like any other.
+      if (command === "quote") quoteInto(body, m.body);
     } else if (command === "react") togglePicker($("#fusion-react"), name => react(m.id, name, true));
   }
 });
@@ -165,7 +155,6 @@ export const chatChannel = () => current;
 export const chatTopic = () => narrow;
 export function resetChat() {
   current = null;
-  quote = null;
   selectedMessage = null; messageSearch = "";
   messages = [];
   pending = [];
@@ -324,7 +313,6 @@ async function selectChannel(id: string, topicId?: string) {
   pending = page.pending || [];
   olderCursor = page.older_cursor;
   reply = editing = null;
-  quote = null;
   selectedMessage = null; messageSearch = "";
   narrow = topicOf(topicId || null) ? topicId! : null;
   collapsed.clear();
@@ -1196,14 +1184,6 @@ function wireFeed() {
         quoteInto($<HTMLTextAreaElement>("textarea", box), quoted.body);
         return;
       }
-      if (isFusion()) {
-        startQuote(quoted);
-        if (!reply && repliable(quoted)) reply = quoted;
-        if (topic && quoted.topic_id) topic.value = topicOf(quoted.topic_id)?.title || topic.value;
-        renderComposer();
-        $("#message-body").focus();
-        return;
-      }
       // The answer belongs with what it quotes, unless it is already a reply to something else.
       if (topic && !reply && quoted.topic_id)
         topic.value = topicOf(quoted.topic_id)?.title || topic.value;
@@ -1309,7 +1289,6 @@ function renderComposer(keepDraft = true) {
     ${c.mode === "topical" ? `<div class="compose-to">${channelIcon(c)}<span class="compose-channel">${esc(c.name)}</span>${icon("chevron-right", "sep")}<input id="compose-topic" list="topic-options" maxlength="100" placeholder="Topic" aria-label="Topic" autocomplete="off" required value="${esc(topic)}"><datalist id="topic-options"></datalist></div>` : ""}
     ${c.mode === "threaded" && !reply ? `<input id="thread-title" class="thread-input" maxlength="160" placeholder="New thread title${c.optional_titles ? " (optional)" : ""}" aria-label="Thread title" ${c.optional_titles ? "" : "required"} value="${esc(title)}">` : ""}
     ${reply ? `<div class="reply-banner small">${icon("reply")}<span>Replying to <strong>${esc(reply.display_name)}</strong>${thread?.title ? `<span class="reply-thread"> in <strong>${emojiHtml(thread.title, thread.emojis || [])}</strong></span>` : ""}</span><button type="button" id="cancel-reply" class="icon-button" aria-label="Cancel reply">${icon("x")}</button></div>` : ""}
-    ${quotePreview()}
     <textarea id="message-body" maxlength="8000" rows="1" placeholder="${esc(place)}" aria-label="Message" required>${esc(draft)}</textarea>
     <div class="composer-bar"><button type="button" id="choose-emoji" class="icon-button" aria-label="Choose emoji" title="Emoji" aria-expanded="false">${icon("smile")}</button>${attachButton('id="attach-file"')}<span class="muted small composer-hint-keys" title="Shift + Enter for a new line"><kbd>Enter</kbd> to send</span><button id="send-message" type="submit" aria-label="Send message">${icon("send")}<span>${c.mode === "threaded" && !reply ? "Post thread" : "Send"}</span></button></div></form></div>`;
   const body = $<HTMLTextAreaElement>("#message-body");
@@ -1324,41 +1303,9 @@ function renderComposer(keepDraft = true) {
   if (hadFocus) body.focus();
   document.querySelector("#cancel-reply")?.addEventListener("click", () => {
     reply = null;
-    startQuote(null);
     renderComposer();
     $("#message-body").focus();
   });
-  document.querySelector("#cancel-quote")?.addEventListener("click", () => {
-    if (reply?.id === quote?.id) reply = null;
-    startQuote(null);
-    renderComposer();
-    $("#message-body").focus();
-  });
-  document.querySelector("#quote-source")?.addEventListener("click", () => { if (quote) reveal(quote.id); });
-  document.querySelector("#edit-quote")?.addEventListener("click", () => {
-    quoteEditing = !quoteEditing; renderComposer();
-  });
-  for (const input of $$<HTMLTextAreaElement>("[data-quote-part]", area)) {
-    const i = Number(input.dataset.quotePart), button = $<HTMLButtonElement>(`[data-partition-quote="${i}"]`, area);
-    const selection = () => {
-      button.disabled = !input.value.slice(0, input.selectionStart).trim() || !input.value.slice(input.selectionStart).trim();
-    };
-    input.addEventListener("input", () => { quoteParts[i].body = input.value; selection(); });
-    for (const event of ["click", "keyup", "select", "focus"]) input.addEventListener(event, selection);
-    button.addEventListener("click", () => {
-      quoteParts = partitionQuote(quoteParts, i, input.selectionStart);
-      renderComposer();
-      document.querySelector<HTMLTextAreaElement>(`[data-quote-answer="${i}"]`)?.focus();
-    });
-  }
-  for (const input of $$<HTMLTextAreaElement>("[data-quote-answer]", area)) {
-    input.addEventListener("input", () => {
-      quoteParts[Number(input.dataset.quoteAnswer)].answer = input.value;
-      body.required = !quoteParts.some(part => part.answer.trim());
-    });
-    suggestShortcodes(input);
-  }
-  body.required = !quote || !quoteParts.some(part => part.answer.trim());
   $("#choose-emoji").addEventListener("click", (e) =>
     togglePicker(e.currentTarget as HTMLElement, body),
   );
@@ -1376,19 +1323,16 @@ function renderComposer(keepDraft = true) {
     action(async () => {
       const titleInput = document.querySelector<HTMLInputElement>("#thread-title"),
         topicInput = document.querySelector<HTMLInputElement>("#compose-topic");
-      if (!body.value.trim() && !(quote && quoteParts.some(part => part.answer.trim()))) return;
-      const content = quote ? quotedReply(quoteParts, body.value) : body.value;
-      if (content.length > 8000) throw new Error("The quote and message together must be at most 8,000 characters. Remove the quote or shorten your message.");
+      if (!body.value.trim()) return;
       const button = $<HTMLButtonElement>("#send-message");
       if (button.disabled) return;
       button.disabled = true;
       const token = generation;
       try {
         if (c.dm) {
-          await api("/dms", "POST", { to: c.dm.peer, body: content });
+          await api("/dms", "POST", { to: c.dm.peer, body: body.value });
           if (generation !== token) return;
           body.value = "";
-          quote = null;
           await refreshCurrent();
           if (generation !== token) return;
           render({ bottom: true });
@@ -1416,7 +1360,7 @@ function renderComposer(keepDraft = true) {
           `/channels/${c.id}/messages`,
           "POST",
           {
-            body: content,
+            body: body.value,
             ...(titleInput ? { title: titleInput.value } : {}),
             ...(reply ? { parent_id: reply.id } : {}),
             ...(topicId ? { topic_id: topicId } : {}),
@@ -1428,7 +1372,6 @@ function renderComposer(keepDraft = true) {
         // A sent reply leaves the Fusion composer free to start a thread again.
         if (reply && threaded() && isFusion()) selectedMessage = null;
         reply = null;
-        quote = null;
         if (message.queued) pending = [...pending, message];
         else merge(message);
         if (narrow && topicId && narrow !== topicId)
