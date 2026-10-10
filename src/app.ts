@@ -248,6 +248,10 @@ export function createApp(config: Config, store: Store) {
       },
     }),
   );
+  // Signing in a program without a browser (device.ts): it starts here and is told where to
+  // send its user. It has no session yet and may know this instance by another address, so
+  // like its later questions this is not held to the Origin a browser would send.
+  app.post("/auth/device/code", (_req, res) => res.status(201).json(device.begin()));
   app.use((req, res, next) => {
     if (
       !["GET", "HEAD", "OPTIONS"].includes(req.method) &&
@@ -344,11 +348,11 @@ export function createApp(config: Config, store: Store) {
       res.json({ user: store.profile(user, true), csrf: session.csrf });
     },
   );
-  // Signing in a program without a browser (device.ts): it starts here and is told where to
-  // send its user.
-  app.post("/auth/device/code", (_req, res) => res.status(201).json(device.begin()));
-  // The page its user opens. Someone not signed in is taken through sign-in and brought back.
+  // The page a program's user opens to let it in (device.ts). Someone not signed in is taken through sign-in and brought back.
   app.get("/auth/device", (req, res) => {
+    // The answer is a form posted from this page. Under the no-referrer policy the rest of
+    // the instance has, a browser sends such a form with no Origin, and it would be refused.
+    res.setHeader("Referrer-Policy", "same-origin");
     const code = device.code(req.query.code);
     if (!code) return void res.type("html").send(devicePages.ask(req.query.code !== undefined));
     const session = store.session(cookie(req, authCookie));

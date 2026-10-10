@@ -1369,6 +1369,11 @@ test("a program without a browser is signed in by its user saying yes in theirs"
   await alice.login("alice");
   const asked = await alice.request(page);
   assert.equal(asked.headers.get("cache-control"), "no-store");
+  // A browser posts the form with its Origin only under this policy; the instance's usual one withholds it.
+  assert.equal(asked.headers.get("referrer-policy"), "same-origin");
+  assert.equal((await fetch(`${f.origin}/auth/device`, { method: "POST", headers: { Origin: "null", "Content-Type": "application/x-www-form-urlencoded" }, body: "decision=approve" })).status, 403);
+  // The program itself need not know the instance by the address it calls itself.
+  assert.equal((await fetch(`${f.origin}/auth/device/code`, { method: "POST", headers: { Origin: "http://another.example" } })).status, 201);
   const html = await asked.text();
   assert.ok(html.includes(flow.user_code) && html.includes("@alice"));
   assert.ok(!html.includes(flow.device_code));

@@ -90,7 +90,7 @@ const esc = (value: unknown) =>
   );
 /** The page a browser is shown. `body` is HTML; everything put into it is escaped by the caller. */
 function page(heading: string, body: string) {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>${esc(heading)} · Archipel</title><style>
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(heading)} · Archipel</title><style>
 :root{color-scheme:light dark}body{margin:0;min-height:100vh;display:grid;place-items:center;font:16px/1.5 system-ui,sans-serif;background:Canvas;color:CanvasText}
 main{max-width:26rem;margin:1rem;padding:1.5rem 1.75rem;border:1px solid color-mix(in srgb,CanvasText 20%,transparent);border-radius:12px}
 h1{font-size:1.25rem;margin:0 0 .75rem}p{margin:.5rem 0}.muted{opacity:.7;font-size:.9rem}
