@@ -79,7 +79,7 @@ let showHidden = false, // hidden threads are on the page for now
 let selectedMessage: string | null = null, messageSearch = "";
 let threadTitleDraft = "";
 
-export const fusionToolbarHtml = () => `<div class="fusion-toolbar" id="fusion-toolbar"><div id="fusion-chat-tools" class="fusion-tool-group picker-host"><button type="button" data-fusion-action="new">${icon("pencil")}<span id="fusion-new-label">New message</span></button><a class="fusion-tool" href="#/channels">${icon("plus")} Join channel</a><span class="tool-separator"></span><button type="button" id="fusion-reply" data-fusion-action="reply" disabled>${icon("reply")} Reply</button><button type="button" id="fusion-react" data-fusion-action="react" disabled>${icon("smile")} React</button><button type="button" id="fusion-quote" data-fusion-action="quote" disabled>${icon("quote")} Quote</button><button type="button" id="fusion-collapse" data-fusion-action="collapse">${icon("collapse")} Collapse all</button><button type="button" id="fusion-members" data-fusion-action="members" aria-pressed="false">${icon("people")} Members</button><span class="grow"></span><input type="search" id="fusion-search" aria-label="Search messages" placeholder="Search messages" title="Search messages loaded in this conversation"></div><div id="fusion-directory-tools" class="fusion-tool-group"></div></div>`;
+export const fusionToolbarHtml = () => `<div class="fusion-toolbar" id="fusion-toolbar"><div id="fusion-chat-tools" class="fusion-tool-group picker-host"><button type="button" data-fusion-action="new">${icon("pencil")}<span id="fusion-new-label">New message</span></button><a class="fusion-tool" href="#/channels" data-open-window="channel">${icon("plus")} Join channel</a><span class="tool-separator"></span><button type="button" id="fusion-reply" data-fusion-action="reply" disabled>${icon("reply")} Reply</button><button type="button" id="fusion-react" data-fusion-action="react" disabled>${icon("smile")} React</button><button type="button" id="fusion-quote" data-fusion-action="quote" disabled>${icon("quote")} Quote</button><button type="button" id="fusion-collapse" data-fusion-action="collapse">${icon("collapse")} Collapse all</button><button type="button" id="fusion-members" data-fusion-action="members" aria-pressed="false">${icon("people")} Members</button><span class="grow"></span><input type="search" id="fusion-search" aria-label="Search messages" placeholder="Search messages" title="Search messages loaded in this conversation"></div><div id="fusion-directory-tools" class="fusion-tool-group"></div></div>`;
 export function updateFusionToolbar() {
   const tools = document.querySelector<HTMLElement>("#fusion-chat-tools");
   if (!tools) return;
@@ -671,12 +671,12 @@ function removeMessage(id: string) {
     await refreshCurrent();
   });
 }
-function messageMenu(button: HTMLElement, id = button.dataset.messageMenu) {
+function messageMenu(button: HTMLElement, id = button.dataset.messageMenu, at?: { x: number; y: number }) {
   const m = messages.find((m) => m.id === id);
   if (!m || m.queued || m.deleted_at) return;
   const token = generation;
   const item = (key: string, label: string, ico: string) => `<button type="button" class="menu-item" role="menuitem" data-message-action="${key}">${icon(ico)}<span class="grow">${label}</span></button>`;
-  const panel = popup(button, `<div class="menu-section" role="menu">${item("copy", "Copy text", "quote")}${mine(m) ? item("edit", "Edit message", "pencil") : ""}${removable(m) ? item("remove", "Remove message", "trash") : ""}</div>`);
+  const panel = popup(button, `<div class="menu-section" role="menu">${item("copy", "Copy text", "quote")}${mine(m) ? item("edit", "Edit message", "pencil") : ""}${removable(m) ? item("remove", "Remove message", "trash") : ""}</div>`, at);
   panel?.addEventListener("click", (e) => {
     if (generation !== token) return;
     const name = (e.target as Element).closest<HTMLElement>("[data-message-action]")?.dataset.messageAction;
@@ -777,7 +777,7 @@ function threadActions(m: Message) {
   return parts ? `<div class="obj-actions small picker-host">${parts}</div>` : "";
 }
 const byline = (m: Message) => isFusion()
-  ? `${author(m)}<time class="thread-clock" datetime="${esc(m.created_at)}" title="${esc(full(m.created_at))}">${esc(clock(m.created_at))}</time>${edited(m)}`
+  ? `${author(m)}<time class="thread-clock" datetime="${esc(m.created_at)}" title="${esc(full(m.created_at))}">${esc(`${dayLabel(m.created_at)} ${clock(m.created_at)}`)}</time>${edited(m)}`
   : `${author(m)} ${handleTag(m.username)} ·${when(m.created_at)}${edited(m) ? ` · ${edited(m)}` : ""}`;
 function threadNodes(list: Message[]): Node[] {
   const ids = new Set(list.map((m) => m.id)),
@@ -788,7 +788,7 @@ function threadNodes(list: Message[]): Node[] {
   const count = (m: Message): number =>
     (children.get(m.id) || []).reduce((n, child) => n + 1 + count(child), 0);
   const replies = (n: number) => `${n} repl${n === 1 ? "y" : "ies"}`;
-  // In Fusion a message is one row: its summary, which selects it; only the chevron folds its replies.
+  // In Fusion a message is one row: its summary, which selects it; its chevron or the line beside its replies folds them, and what a folded one says is hidden opens it.
   const fusionRow = (m: Message, extra = "") =>
     `<span class="thread-avatar">${avatar(m)}</span><div class="row-main"><div class="byline">${byline(m)}${extra}</div>${editing === m.id ? "" : `<div class="row-text">${bodyHtml(m, "md")}</div>`}</div>`;
   const comment = (m: Message, depth: number): Node => {
@@ -1058,7 +1058,7 @@ function wireFeed() {
   list.addEventListener("contextmenu", (e) => {
     if (!isFusion() || (e.target as Element).closest("input, textarea, a")) return;
     const row = (e.target as Element).closest<HTMLElement>(".message[id]");
-    if (row) { e.preventDefault(); selectFusionMessage(row.id.slice(2)); messageMenu(row, row.id.slice(2)); }
+    if (row) { e.preventDefault(); selectFusionMessage(row.id.slice(2)); messageMenu(row, row.id.slice(2), { x: e.clientX, y: e.clientY }); }
   });
   list.addEventListener("keydown", (e) => {
     if (isFusion() && (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10"))) {
@@ -1123,12 +1123,45 @@ function wireFeed() {
           ?.scrollIntoView({ block: "nearest" });
       });
   });
+  // In Fusion the line down the side of a set of replies is a handle: with the pointer on it, or a
+  // little to either side, it thickens, and a click there folds what it runs beside.
+  let scope: HTMLElement | null = null;
+  const aim = (e: MouseEvent | null) => {
+    let found: HTMLElement | null = null;
+    if (e && isFusion())
+      for (let el = e.target as Element | null; el && el !== list && !found; el = el.parentElement) {
+        // The line may be this element's own, or that of the replies under the message the pointer is in.
+        const box = el.matches(".replies, .comments") ? (el as HTMLElement)
+          : el.matches("details.comment") ? el.querySelector<HTMLElement>(":scope > .content > .replies")
+          : el.matches(".thread-body") ? el.querySelector<HTMLElement>(":scope > .comments") : null;
+        const at = box?.getBoundingClientRect();
+        if (at?.height && parseFloat(getComputedStyle(box!).borderLeftWidth) && Math.abs(e.clientX - at.left) <= 6 && e.clientY >= at.top && e.clientY <= at.bottom) found = box;
+      }
+    if (found === scope) return;
+    scope?.classList.remove("scope-hot");
+    (scope = found)?.classList.add("scope-hot");
+    list.classList.toggle("scope-aim", !!found);
+  };
+  list.addEventListener("mousemove", aim);
+  list.addEventListener("mouseleave", () => aim(null));
   list.addEventListener("click", (e) => {
     const at = e.target as Element;
+    aim(e);
+    if (scope) {
+      // A reply's line folds that reply; the line under a thread's first post folds the thread.
+      const fold = scope.closest<HTMLDetailsElement>("details.comment, details.fusion-thread");
+      e.preventDefault();
+      aim(null);
+      if (fold) {
+        fold.open = false;
+        if (!inView($("summary", fold))) fold.scrollIntoView({ block: "nearest" });
+      }
+      return;
+    }
     if (isFusion()) {
       const row = at.closest<HTMLElement>(".message[id]");
       if (row) selectFusionMessage(row.id.slice(2));
-      if (at.closest("summary.thread-row") && !at.closest(".fold, a, button, input, textarea")) e.preventDefault();
+      if (at.closest("summary.thread-row") && !at.closest(".fold, .collapsed-note, a, button, input, textarea")) e.preventDefault();
     }
     const on = <T extends HTMLElement = HTMLElement>(selector: string) =>
       at.closest<T>(selector);

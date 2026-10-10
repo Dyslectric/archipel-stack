@@ -47,10 +47,11 @@
   --fusion-head: light-dark(#ececec, #383838);    /* a group's heading row */
   --fusion-rule: light-dark(#d4d4d4, #4a4a4a);    /* the hairline between rows of a pane */
   --fusion-stripe: light-dark(#f6f6f6, #2f2f2f);  /* every other row */
-  --fusion-selection: light-dark(#2b79b5, #2470c2);
+  --fusion-selection: light-dark(#d3e4f4, #2b425a);  /* behind what is selected: a tint, under the usual text */
+  --fusion-selection-text: var(--text);
   --fusion-window-edge: light-dark(#6e6e6e, #747474);
-  --fusion-button: linear-gradient(light-dark(#fafafa, #444444), light-dark(#e8e8e8, #363636));
-  --fusion-button-hover: linear-gradient(light-dark(#ffffff, #4d4d4d), light-dark(#f0f0f0, #3f3f3f));
+  --fusion-button: linear-gradient(light-dark(#f8f8f8, #414141), light-dark(#eeeeee, #393939));
+  --fusion-button-hover: linear-gradient(light-dark(#ffffff, #4a4a4a), light-dark(#f5f5f5, #424242));
 }
 
 :root[data-style^="fusion-"] {
@@ -90,7 +91,7 @@
     border-radius: 5px 5px 0 0; color: var(--text); font-size: var(--fusion-font); font-weight: 400; background: none; }
   .nav-item:hover { background: color-mix(in srgb, var(--bg) 55%, transparent); }
   .nav-item.on { background: var(--bg); border-color: var(--line); font-weight: 600; }
-  .nav-item .count { min-width: 0; padding: 0 5px; border-radius: 2px; background: var(--fusion-selection); color: #fff;
+  .nav-item .count { min-width: 0; padding: 0 5px; border-radius: 2px; background: light-dark(#2b79b5, #2470c2); color: #fff;
     font-size: .8em; font-weight: 600; line-height: 1.45; }
   .account-menu { align-self: center; }
   .account-menu > summary { padding: 2px 6px; gap: 7px; min-height: 0; border: 1px solid transparent; border-radius: 3px;
@@ -114,7 +115,7 @@
   .fusion-toolbar .emoji-picker { top: calc(100% + 5px); bottom: auto; width: 392px; }
   .directory-toolbar { margin: 0; padding: 0; gap: 2px; }
   #fusion-directory-tools > .search-field { margin-left: auto; width: 240px; }
-  #fusion-directory-tools .search-field > .i { display: none; }
+  :is(#fusion-directory-tools, .window-body) .search-field > .i { display: none; }
   .app[data-view="channels"] #fusion-chat-tools, .app:not([data-view="channels"]) #fusion-directory-tools { display: none; }
   .app:is([data-view="settings"], [data-view="xmpp"]) .fusion-toolbar { display: none; }
 
@@ -141,14 +142,15 @@
   .side-toggle { padding: 3px 6px 3px 9px; gap: 7px; color: var(--text); border-radius: 0; }
   .side-toggle .chev, .thread-heading .chev, .section-toggle .chev { width: 10px; height: 10px; stroke-width: 3; color: var(--muted); }
   .side-row { border-radius: 0; }
-  .channel-link { gap: 6px; padding: 3px 8px 3px 34px; border-radius: 0; }
+  .channel-link { gap: 6px; padding: 4px 8px 4px 34px; border-radius: 0; }
+  .side-item:nth-child(even) > .side-row { background: var(--fusion-stripe); }
   .channel-link > .i { width: 14px; height: 14px; }
   .channel-link .i { align-self: center; }
   .channel-link > .mode-tag:not(:has(.i)) { display: none; }
   .channel-link .remote-marker .i { width: 1.05em; height: 1.05em; }
   .dm-link { padding-left: 40px; }
   .topic-list { border: 0; margin: 0; padding: 0; }
-  .topic-link { padding: 3px 8px 3px 55px; border-radius: 0; font-size: 1em; color: var(--text); }
+  .topic-link { padding: 4px 8px 4px 55px; border-radius: 0; font-size: 1em; color: var(--text); }
   .topic-placeholder { color: var(--muted); }
   .side-row:has(.topic-toggle) .channel-link { padding-left: 53px; }
   .topic-toggle { left: 30px; width: 20px; height: 100%; border-radius: 0; }
@@ -156,14 +158,17 @@
   /* what is new: the name in bold and a bare number */
   .channel-link .count, .side-toggle .count { min-width: 0; padding: 0; background: none; color: inherit; font-size: 1em; font-weight: 600; }
   .channel-link:has(.count) .grow { font-weight: 600; }
-  :is(.channel-link, .topic-link).on { background: var(--fusion-selection); color: #fff; font-weight: 400; }
+  :is(.channel-link, .topic-link).on { background: var(--fusion-selection); color: var(--fusion-selection-text); font-weight: 400; }
   :is(.channel-link, .topic-link).on :is(.i, .muted, .mode-tag) { color: inherit; }
-  .side-row:has(.channel-link.on) .topic-toggle { color: #fff; background: none; }
+  .side-row:has(.channel-link.on) .topic-toggle { color: var(--fusion-selection-text); background: none; }
   .row-menu, .side-head > .icon-button { opacity: 0; width: 24px; height: 24px; }
   .side-row .row-menu { right: 3px; }
   :is(.side-row, .side-head):is(:hover, :focus-within) > .icon-button { opacity: 1; }
+  /* A heading's + is a square as tall as the heading, lit along with it. */
+  .side-head > .icon-button { flex: none; width: calc(1.4em + 6px); height: calc(1.4em + 6px); border: 0; border-radius: 0; }
+  .side-head:hover > .icon-button, .side-head > .icon-button[aria-expanded=true] { background: var(--hover); }
   .side-row:has([data-item-menu]) .channel-link { padding-right: 30px; }
-  .side-row:has(.channel-link.on) .row-menu { color: #fff; }
+  .side-row:has(.channel-link.on) .row-menu { color: var(--fusion-selection-text); }
   .side-group > .side-items { margin-left: 0; padding-left: 0; border: 0; }
 
   /* who is here */
@@ -175,6 +180,7 @@
   .panel-body { padding: 0 0 8px; }
   .panel-body h3.side-label { padding: 8px 10px 2px; font-size: 1em; font-weight: 400; text-transform: none; letter-spacing: 0; }
   ul.plain.member-rows > li { padding: 3px 10px; border-radius: 0; gap: 8px; }
+  ul.plain.member-rows > li:nth-child(even):not(:hover) { background: var(--fusion-stripe); }
   button.member-name { font-weight: 400; }
   .member-rows .mode-tag { color: var(--muted); font-size: 1em; }
   #members[aria-pressed="true"] { background: var(--hover); border: 1px solid var(--line); border-radius: 3px; }
@@ -232,13 +238,13 @@
 
   /* the selected message */
   .group-body > article.selected-message, .group-body > article.selected-message:hover,
-  .post.selected-message > .thread-row, .comment.selected-message > summary {
-    background: var(--fusion-selection); color: #fff;
+  .post.selected-message > .thread-row, .comment.selected-message > summary, .comments > .comment.selected-message > summary {
+    background: var(--fusion-selection); color: var(--fusion-selection-text);
     :is(.author, time, .compact-time, .message-meta, .byline, .handle, .edited, .muted, .fold, .mode-tag, .collapsed-note, .reply-context,
       .reply-context strong, .pref-button, a, blockquote) { color: inherit; }
-    .markdown :is(code, pre) { background: rgb(255 255 255 / .16); border-color: rgb(255 255 255 / .3); color: inherit; }
-    .markdown blockquote { border-color: rgb(255 255 255 / .55); }
-    ::selection { background: rgb(255 255 255 / .3); }
+    .markdown :is(code, pre) { background: color-mix(in srgb, currentColor 10%, transparent); border-color: color-mix(in srgb, currentColor 28%, transparent); color: inherit; }
+    .markdown blockquote { border-color: color-mix(in srgb, currentColor 45%, transparent); }
+    ::selection { background: color-mix(in srgb, currentColor 22%, transparent); }
   }
 
   /* ---- threads: a heading per thread, its post, then replies indented under what they answer ---- */
@@ -266,8 +272,7 @@
   .post:not(.selected-message) > .thread-row:hover, .comment:not(.selected-message) > summary:hover { background: var(--hover); }
   .post > .inline-form, .comment > .content > .inline-form { margin: 4px 10px 8px 27px; }
   .obj-actions { display: none; }
-  .obj-actions:has(details.reply-box[open]) { display: block; margin: 4px 10px 8px 27px; }
-  /* a reply: the whole row is its summary; only the chevron folds what is under it */
+  /* a reply: the whole row is its summary; the chevron, or the line beside its replies, folds what is under it */
   .comment, .comments > .comment { margin: 0; padding: 0; }
   .comment > summary, .comments > .comment > summary { display: flex; margin: 0; border-radius: 0; cursor: default; color: var(--text); }
   .comment:not([open]) > summary { opacity: 1; }
@@ -276,9 +281,16 @@
   .comment.has-replies > summary .fold { visibility: visible; }
   .comment > summary .fold .i { width: 10px; height: 10px; stroke-width: 3; }
   .comment > summary:is(:hover, :focus-visible) .fold { background: none; color: inherit; }
-  .comment > summary .collapsed-note { margin-left: 8px; padding: 0; background: none; color: var(--muted); font-size: var(--fusion-small); font-weight: 400; }
+  /* what a folded reply says is hidden opens it again */
+  .comment > summary .collapsed-note { margin-left: 8px; padding: 0; background: none; color: var(--muted); font-size: var(--fusion-small); font-weight: 400;
+    cursor: pointer; }
+  .comment > summary .collapsed-note:hover { text-decoration: underline; }
   .replies { margin-left: 17px; border-left: 1px solid var(--fusion-rule); }
   .replies:empty { display: none; }
+  /* the line beside replies thickens under the pointer, without moving what is next to it */
+  :is(.comments, .replies) { transition: border-color .15s ease, box-shadow .15s ease; }
+  :is(.comments, .replies).scope-hot { border-left-color: var(--muted); box-shadow: -1px 0 0 var(--muted), inset 1px 0 0 var(--muted); }
+  .scope-aim, .scope-aim * { cursor: pointer !important; }
 
   /* ---- the composer: who it goes to, the message, send ---- */
   #composer-area { margin-top: 7px; padding: 0; border: 0; background: none; }
@@ -310,10 +322,11 @@
   :is(#message-body, #thread-title):focus { border-color: var(--accent) !important; box-shadow: 0 0 0 1px var(--accent) !important; }
   .composer-bar { display: contents; }
   .composer-hint-keys, #send-message > .i { display: none; }
-  #choose-emoji, #attach-file { width: calc(34px * var(--text-scale, 1)); height: auto; min-height: calc(31px * var(--text-scale, 1)); align-self: stretch;
+  /* One line tall however far the message grows, level with its middle. */
+  #choose-emoji, #attach-file { width: calc(34px * var(--text-scale, 1)); height: calc(31px * var(--text-scale, 1)); align-self: center;
     border: 1px solid var(--line); background: var(--fusion-button); color: var(--text); }
   :is(#choose-emoji, #attach-file):hover { background: var(--fusion-button-hover); }
-  #send-message { align-self: stretch; min-height: calc(31px * var(--text-scale, 1)); margin: 0; padding: 4px 22px; }
+  #send-message { align-self: center; height: calc(31px * var(--text-scale, 1)); margin: 0; padding: 4px 22px; }
 
   /* ---- the channel directory: one table that fills the pane ---- */
   .workspace > .page:has(> .directory) { overflow: hidden; scrollbar-gutter: auto; border: 1px solid var(--line); border-radius: 2px; background: var(--card); }
@@ -322,7 +335,7 @@
   .directory .layout { display: block; margin: 0; }
   .channel-table thead th { position: sticky; top: 0; z-index: 1; padding: 4px 10px; background: var(--fusion-button); font-weight: 400;
     border-bottom: 1px solid var(--line); white-space: nowrap; }
-  .channel-table td { padding: 4px 10px; }
+  .channel-table td { padding: 9px 10px; }
   .channel-table .table-section th { padding: 3px 10px; background: var(--fusion-head); font-weight: 400;
     border-block: 1px solid var(--fusion-rule); }
   .channel-table tbody > .table-section:first-child th { border-top: 0; }
@@ -331,7 +344,7 @@
   .section-toggle[aria-expanded=false] .chev { transform: rotate(-90deg); }
   .directory-row:nth-child(odd) { background: var(--fusion-stripe); }
   .directory-row:hover { background: var(--hover); }
-  .directory-row.selected-row { background: var(--fusion-selection); color: #fff; }
+  .directory-row.selected-row { background: var(--fusion-selection); color: var(--fusion-selection-text); }
   .directory-row.selected-row :is(.directory-name, .muted, .i) { color: inherit; }
   .directory-name strong { font-weight: 600; }
   .directory-name:hover { text-decoration: none; }
@@ -355,6 +368,11 @@
   .dialog-heading .icon-button .i { width: 12px; height: 12px; }
   .window-body { display: flex; flex-direction: column; gap: 12px; padding: 14px 16px 4px; }
   .window-body > p { margin: 0; }
+  .join-list { max-height: min(46vh, 340px); overflow-y: auto; border: 1px solid var(--line); border-radius: 2px; background: var(--card); }
+  ul.plain.join-list > li { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border: 0; }
+  ul.plain.join-list > li:nth-child(even) { background: var(--fusion-stripe); }
+  .join-list .grow { min-width: 0; display: flex; flex-direction: column; }
+  .join-list .grow > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .field-grid { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 10px; align-items: center; }
   .window-body > .field-grid { grid-template-columns: calc(96px * var(--text-scale, 1)) minmax(0, 1fr); }
   .field-grid > label { text-align: right; }
@@ -366,6 +384,8 @@
   .fusion-window fieldset { min-width: 0; margin: 0; padding: 6px 12px 10px; border: 1px solid var(--line); border-radius: 3px; }
   .fusion-window legend { padding: 0 4px; }
   .fusion-window select { background: var(--fusion-button); }
+  /* The list a select opens takes its colours from the options, not from the gradient on the select. */
+  select option { background-color: var(--card); color: var(--text); }
   .choice { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
   .choice input { margin: 0; }
   .choice strong { font-weight: 600; }
@@ -381,12 +401,27 @@
   /* ---- settings, menus and cards ---- */
   .settings-nav { border-radius: 2px; box-shadow: none; padding-block: 3px; }
   .settings-nav a { border-radius: 0; padding: 4px 10px; }
-  .settings-nav a.on { background: var(--fusion-selection); color: #fff; }
+  .settings-nav a.on { background: var(--fusion-selection); color: var(--fusion-selection-text); }
   .settings-nav a.on .i { color: inherit; }
   .menu-panel { padding: 3px; }
-  .emoji-card { max-width: min(340px, calc(100vw - 16px)); }
-  .emoji-card img { width: 96px; height: 96px; }
-  .emoji-card .ec-glyph { font-size: 72px; line-height: 96px; min-width: 96px; }
+  /* An emoji's card is a small window: its shortcode in the title bar, the picture and what it is under it. */
+  .emoji-card { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto 1fr repeat(3, auto) 1fr;
+    gap: 0 10px; max-width: min(260px, calc(100vw - 16px)); padding: 0; overflow: hidden; background: var(--bg);
+    border: 1px solid var(--fusion-window-edge); border-radius: 3px; box-shadow: 0 6px 20px rgb(0 0 0 / .3); }
+  .emoji-card .ec-text { display: contents; }
+  .emoji-card .ec-text > strong { grid-area: 1 / 1 / 2 / -1; padding: 3px 9px; background: var(--fusion-top);
+    border-bottom: 1px solid var(--line); font-weight: 600; }
+  .emoji-card > :first-child { grid-area: 2 / 1 / -1 / 2; align-self: center; margin: 7px 0 7px 9px; }
+  .emoji-card .ec-text > span { grid-column: 2; padding-right: 10px; }
+  .emoji-card .ec-text > :nth-child(2) { grid-row: 3; }
+  .emoji-card .ec-text > :nth-child(3) { grid-row: 4; }
+  .emoji-card .ec-text > :nth-child(4) { grid-row: 5; }
+  .emoji-card :is(.ec-kind, .ec-hint) { font-size: var(--fusion-small); }
+  .emoji-card .ec-hint { font-style: normal; }
+  .emoji-card img { width: 56px; height: 56px; }
+  .emoji-card .ec-glyph { font-size: 42px; line-height: 56px; min-width: 56px; }
+  .emoji-card .ec-keep { padding: 3px; border-radius: 3px; }
+  .emoji-card .ec-keep:is(:hover, :focus-visible) { background: var(--fusion-button-hover); }
 }
 
 /* ---- Compact: one line a message — time, who, what — and no pictures ---- */
@@ -421,10 +456,14 @@
   .group-body .message-meta .handle:not(:has(+ time)), .group-body .message-meta .handle { display: none; }
   .member-rows .avatar, .dm-link .avatar { width: 1.5rem; height: 1.5rem; font-size: .82rem; }
   ul.plain.member-rows > li { padding-block: 4px; }
+  .channel-link { gap: 8px; padding-block: 6px; }
+  .channel-table td { padding-block: 12px; }
+  .topic-link { padding-block: 5px; }
+  .channel-link > .i { width: 1.125rem; height: 1.125rem; }
   .fusion-thread[open] > .thread-heading :is(.avatar, .thread-starter) { display: none; }
   .thread-body { padding-bottom: 6px; }
   .thread-avatar { line-height: 0; }
-  .thread-avatar .avatar { width: 1.625rem; height: 1.625rem; font-size: .86rem; }
+  .thread-avatar .avatar { width: 2rem; height: 2rem; font-size: 1rem; }
   .byline { display: flex; align-items: baseline; gap: 8px; line-height: 1.25; }
   /* The picture sits level with the middle of the name and the first line under it (the top half of
      that line, when it is large emoji), however long the message runs. Each message is a grid for
@@ -433,7 +472,7 @@
   .group-body > article > .message-content, .thread-row > .row-main, .row-main > .row-text { display: contents; }
   .thread-row { display: grid; align-items: start; column-gap: 10px; }
   .post > .thread-row { grid-template-columns: 2rem minmax(0, 1fr) auto; padding: 9px 12px 6px; }
-  .comment > summary.thread-row, .comments > .comment > summary.thread-row { display: grid; grid-template-columns: auto 1.625rem minmax(0, 1fr); column-gap: 0; }
+  .comment > summary.thread-row, .comments > .comment > summary.thread-row { display: grid; grid-template-columns: auto 2rem minmax(0, 1fr); column-gap: 0; }
   .group-body > article > .message-content > *, .post > .thread-row :is(.byline, .row-text > *) { grid-column: 2; min-width: 0; }
   .comment > summary :is(.byline, .row-text > *) { grid-column: 3; min-width: 0; margin-left: 10px; }
   .group-body .reply-context { justify-self: start; }
@@ -443,13 +482,17 @@
   :is(article, .thread-row):has(.emoji-only) :is(.msg-gutter, .thread-avatar, .fold) { max-height: calc(1.25em + 1.8rem); }
   article:has(.reply-context) > .msg-gutter { grid-row: 1 / span 3; max-height: calc(var(--fusion-lead) + 1.4em); }
   .thread-row > .pref-button { grid-column: 3; grid-row: 1; }
-  .comments { margin-left: 26px; border-left: 1px solid var(--fusion-rule); }
+  /* The line down the side of a set of replies runs under the middle of the picture they answer.
+     Replies show no chevron: the line folds them, and a folded one says what it hides. */
+  .comments { margin-left: calc(12px + 1rem - .5px); border-left: 1px solid var(--fusion-rule); }
   .comments:empty { display: none; }
-  .comment > summary { padding: 6px 12px 6px 0; }
-  .comment > summary .fold { grid-column: 1; height: auto; min-height: 1.625rem; }
+  /* A reply's picture starts where the text it answers does: a picture and its gap in from that one's. */
+  .comment > summary { padding: 6px 12px 6px calc(1rem + 9.5px); }
+  .comment > summary .fold { display: none; }
+  .comment > summary .fold { grid-column: 1; height: auto; min-height: 2rem; }
   .comment > summary .thread-avatar { grid-column: 2; }
-  .replies { margin-left: 9px; }
-  .post > .inline-form, .comment > .content > .inline-form, .obj-actions:has(details.reply-box[open]) { margin-left: calc(2rem + 22px); }
+  .replies { margin-left: calc(2rem + 9px); }
+  .post > .inline-form, .comment > .content > .inline-form { margin-left: calc(2rem + 22px); }
 }
 
 /* ---- by touch, and on a phone: full-size targets, panes as drawers ---- */

@@ -1,4 +1,7 @@
-import { $, api, esc, go, onSubmit, shareDialog, state, toast, type XmppRoom } from "./shared.js";
+import {
+  $, action, api, channelIcon, channelShares, esc, go, icon, onSubmit, shareDialog, state, toast,
+  type Channel, type XmppRoom,
+} from "./shared.js";
 import { openWindow } from "./windows.js";
 
 // Following a channel hosted on another instance, once what that shares is acknowledged.
@@ -29,6 +32,37 @@ export async function joinXmppRoom(jid: string | undefined, room: string, nick: 
 const cancel = '<button type="button" class="secondary" data-close-window>Cancel</button>';
 const close = '<button type="button" class="secondary" data-close-window>Close</button>';
 // The Fusion directory's windows for both.
+// The channels of this instance not joined yet, to pick one from; those hosted elsewhere have
+// windows of their own.
+export function channelWindow() {
+  const dialog = openWindow("Join a channel",
+    `<label class="search-field">${icon("search")}<input type="search" id="join-search" placeholder="Search channels" aria-label="Search channels" autocomplete="off"></label>
+      <ul class="plain join-list" id="join-list"></ul>`,
+    `<a href="#/channels" data-close-window>All channels</a><span class="grow"></span>${state.session.federation_enabled ? '<button type="button" class="secondary" data-close-window data-open-window="federated">On another server…</button>' : ""}${state.xmppEnabled ? '<button type="button" class="secondary" data-close-window data-open-window="xmpp">XMPP room…</button>' : ""}${close}`);
+  const list = $("#join-list", dialog), search = $<HTMLInputElement>("#join-search", dialog);
+  const draw = () => {
+    const query = search.value.trim().toLowerCase();
+    list.innerHTML = state.channels
+      .filter((c) => !c.role && (c.can_join || c.readable) && `${c.name} ${c.description}`.toLowerCase().includes(query))
+      .map((c) => `<li>${channelIcon(c, false)}<div class="grow"><strong>${esc(c.name)}</strong><span class="muted small">${esc(c.description || "No description.")}</span></div><span class="muted small">${c.member_count} member${c.member_count === 1 ? "" : "s"}</span>${c.can_join ? `<button type="button" class="secondary small" data-join="${c.id}">Join</button>` : `<a class="button secondary small" href="#/c/${c.id}" data-close-window>View</a>`}</li>`)
+      .join("") || `<li class="muted">${query ? "No channels match." : "There is no channel here you have not joined."}</li>`;
+  };
+  draw();
+  search.addEventListener("input", draw);
+  // Enter in the search is not an answer to the window.
+  $("form", dialog).addEventListener("submit", (e) => e.preventDefault());
+  list.addEventListener("click", (e) => {
+    const id = (e.target as Element).closest<HTMLElement>("[data-join]")?.dataset.join,
+      c = state.channels.find((c) => c.id === id);
+    if (c) action(async () => {
+      if (!(await shareDialog(`Join #${c.name}?`, channelShares(c), "Join channel"))) return;
+      await api(`/channels/${c.id}/join`, "POST", {});
+      state.channels = await api<Channel[]>("/channels");
+      dialog.close();
+      go(`#/c/${c.id}`);
+    });
+  });
+}
 export function federatedWindow() {
   const s = state.session;
   const allowed = s.federation_enabled && s.user?.federation_subscribe && s.user?.federation_receive;

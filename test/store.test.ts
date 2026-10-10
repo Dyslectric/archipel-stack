@@ -807,6 +807,8 @@ test("a sidebar layout is kept per member and cleaned on the way in", () => {
       items: ["a", "a", 7],
       groups: [{ id: "g1", name: " Work ", items: ["b"], extra: true }],
     },
+    order: ["xmpp", "nowhere", "xmpp"],
+    merged: "yes",
   });
   assert.deepEqual(saved, {
     dms: { collapsed: false, items: [], groups: [] },
@@ -816,7 +818,11 @@ test("a sidebar layout is kept per member and cleaned on the way in", () => {
       groups: [{ id: "g1", name: "Work", collapsed: false, items: ["b"] }],
     },
     xmpp: { collapsed: false, items: [], groups: [] },
+    order: ["xmpp", "dms", "channels"],
+    merged: false,
   });
+  assert.equal(store.setLayout(alice, { ...saved, merged: true }).merged, true);
+  store.setLayout(alice, saved);
   assert.deepEqual(store.overview(alice).layout, saved);
   assert.equal(store.overview(bob).layout, null);
   denied(

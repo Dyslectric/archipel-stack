@@ -27,7 +27,7 @@ export async function showXmppRooms(view: HTMLElement, id?: string) {
     const body = document.querySelector<HTMLTextAreaElement>("#xmpp-composer textarea");
     if (quoted && body) quoteInto(body, quoted.body);
   });
-  $("#channel-actions").innerHTML = '<a class="button secondary" href="#/xmpp">Join another room</a>';
+  $("#channel-actions").innerHTML = '<a class="button secondary" href="#/xmpp" data-open-window="xmpp">Join another room</a>';
   if (id) { await tickXmppRooms(true); return; }
   const connection = await api<{ enabled: boolean; jid?: string }>("/xmpp");
   if (token !== generation || !view.isConnected) return;
@@ -51,7 +51,7 @@ export async function showXmppRooms(view: HTMLElement, id?: string) {
 
 function paint(room: XmppRoom) {
   $("#channel-heading").innerHTML = `<h1>${icon("globe")}<span class="topic-name">${esc(room.room)}</span></h1><span class="desc">${esc(room.state)} · ${esc(room.nick)}${room.role !== "none" ? ` · ${esc(room.role)}` : ""}</span>`;
-  $("#channel-actions").innerHTML = `<a class="button secondary" href="#/xmpp">Join another room</a><button type="button" class="secondary" id="xmpp-mirror" title="Keep your own copy of this room in a channel you own">Mirror</button><button type="button" class="secondary" id="xmpp-rejoin">${room.desired && room.state === "joined" ? "Reconnect" : "Join again"}</button>${room.desired ? '<button type="button" class="secondary" id="xmpp-leave">Leave room</button>' : ""}`;
+  $("#channel-actions").innerHTML = `<a class="button secondary" href="#/xmpp" data-open-window="xmpp">Join another room</a><button type="button" class="secondary" id="xmpp-mirror" title="Keep your own copy of this room in a channel you own">Mirror</button><button type="button" class="secondary" id="xmpp-rejoin">${room.desired && room.state === "joined" ? "Reconnect" : "Join again"}</button>${room.desired ? '<button type="button" class="secondary" id="xmpp-leave">Leave room</button>' : ""}`;
   $("#xmpp-mirror").addEventListener("click", () => mirrorDialog("xmpp", room.id, room.room));
   $("#xmpp-rejoin").addEventListener("click", () => action(async () => {
     await api("/xmpp/rooms", "POST", { room: room.room, nick: room.nick, reconnect: true });

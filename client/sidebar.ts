@@ -31,9 +31,11 @@ import {
 } from "./chat.js";
 import { isHidden, pickPref, prefItems } from "./prefs.js";
 
-// The sidebar: direct messages, channels, then XMPP rooms. Each section folds away, and its conversations can be
-// put in named groups and reordered, by dragging or from the menu on each row. The arrangement is
-// kept with the account (state.layout), so it follows the reader to other browsers.
+// The sidebar: direct messages, channels, then XMPP rooms, in the order the reader dragged their
+// headings into. Each section folds away, and its conversations can be put in named groups and
+// reordered, by dragging or from the menu on each row. XMPP rooms can be listed among the channels
+// instead of in a section of their own. The arrangement is kept with the account (state.layout), so
+// it follows the reader to other browsers.
 const titles: Record<SideKind, string> = {
   dms: "Direct messages",
   channels: "Channels",
@@ -42,7 +44,7 @@ const titles: Record<SideKind, string> = {
 const kinds = Object.keys(titles) as SideKind[];
 let html = "",
   saving = 0;
-let drag: { type: "item" | "group"; kind: SideKind; id: string } | null = null;
+let drag: { type: "item" | "group" | "section"; kind: SideKind; id: string } | null = null;
 const topicExpansion = new Map<string, boolean>();
 const topicCache = new Map<string, Topic[]>();
 const topicLoading = new Set<string>();
@@ -62,8 +64,12 @@ async function toggleTopics(id: string) {
   } finally { topicLoading.delete(id); renderSidebar(); }
 }
 
+const isRoom = (id: string) => id.startsWith("xmpp:");
+// Rooms listed among the channels, in the channels' section.
+const merged = () => !!state.layout?.merged;
+// The section a conversation is listed in.
 const kindOf = (id: string): SideKind =>
-  id.startsWith("dm:") ? "dms" : id.startsWith("xmpp:") ? "xmpp" : "channels";
+  id.startsWith("dm:") ? "dms" : isRoom(id) && !merged() ? "xmpp" : "channels";
 // What is new, leaving out the conversation on screen: that one is being read.
 const unread = (id: string) =>
   chatChannel()?.id === id ? 0 : state.unread[id] || 0;
@@ -84,13 +90,24 @@ function conversations(): Conversation[] {
     : state.dms;
 }
 const joinedRooms = () => state.xmppRooms.filter((r) => r.desired);
+// Instances without XMPP have no rooms to list.
+const hasRooms = () => state.xmppEnabled || !!joinedRooms().length;
+const roomsIn = (kind: SideKind) =>
+  kind === (merged() ? "channels" : "xmpp") ? joinedRooms() : [];
 function available(kind: SideKind) {
   return kind === "dms"
     ? conversations().map((c) => `dm:${c.peer}`)
-    : kind === "xmpp"
-      ? joinedRooms().map((r) => `xmpp:${r.id}`)
-      : state.channels.filter((c) => c.role).map((c) => c.id);
+    : [
+        ...(kind === "channels" ? state.channels.filter((c) => c.role).map((c) => c.id) : []),
+        ...roomsIn(kind).map((r) => `xmpp:${r.id}`),
+      ];
 }
+// The sections from top to bottom, as saved, and those of them that show.
+const order = () => [
+  ...new Set([...(state.layout?.order || []).filter((k) => kinds.includes(k)), ...kinds]),
+];
+const sections = () =>
+  order().filter((k) => k !== "xmpp" || (!merged() && hasRooms()));
 // The saved arrangement with every current conversation somewhere in it: new direct messages
 // go on top, newly joined channels and rooms at the end.
 function placed(kind: SideKind): SideSection {
@@ -112,9 +129,15 @@ function placed(kind: SideKind): SideSection {
   return section;
 }
 function save(kind: SideKind, section: SideSection) {
-  const layout = Object.fromEntries(
-    kinds.map((k) => [k, k === kind ? section : placed(k)]),
-  ) as Layout;
+  commit({
+    ...(Object.fromEntries(
+      kinds.map((k) => [k, k === kind ? section : placed(k)]),
+    ) as Record<SideKind, SideSection>),
+    order: order(),
+    merged: merged(),
+  });
+}
+function commit(layout: Layout) {
   state.layout = layout;
   renderSidebar();
   saving++;
@@ -167,6 +190,42 @@ function moveGroup(kind: SideKind, id: string, before: string | null) {
   const at = before ? section.groups.findIndex((g) => g.id === before) : -1;
   section.groups.splice(at < 0 ? section.groups.length : at, 0, group);
   save(kind, section);
+}
+function moveSection(kind: SideKind, before: SideKind | null) {
+  if (before === kind) return;
+  const next = order().filter((k) => k !== kind),
+    at = before ? next.indexOf(before) : -1;
+  next.splice(at < 0 ? next.length : at, 0, kind);
+  commit({ dms: placed("dms"), channels: placed("channels"), xmpp: placed("xmpp"), order: next, merged: merged() });
+}
+// One place up or down among the sections that are showing.
+function stepSection(kind: SideKind, by: 1 | -1) {
+  const shown = sections(),
+    at = shown.indexOf(kind) + by;
+  if (at < 0 || at >= shown.length) return;
+  moveSection(kind, by < 0 ? shown[at] : shown[at + 1] || null);
+}
+// Rooms move in with the channels, after them, or back out to a section of their own.
+function setMerged(on: boolean) {
+  if (on === merged()) return;
+  const dms = placed("dms"),
+    channels = placed("channels"),
+    xmpp = placed("xmpp");
+  if (on) {
+    channels.items.push(...xmpp.items);
+    channels.groups.push(...xmpp.groups);
+    xmpp.items = [];
+    xmpp.groups = [];
+  } else {
+    // A group of nothing but rooms goes with them.
+    const theirs = channels.groups.filter((g) => g.items.length && g.items.every(isRoom));
+    channels.groups = channels.groups.filter((g) => !theirs.includes(g));
+    xmpp.items.push(...channels.items.filter(isRoom), ...channels.groups.flatMap((g) => g.items.filter(isRoom)));
+    xmpp.groups.push(...theirs);
+    channels.items = channels.items.filter((id) => !isRoom(id));
+    for (const g of channels.groups) g.items = g.items.filter((id) => !isRoom(id));
+  }
+  commit({ dms, channels, xmpp, order: order(), merged: on });
 }
 function fold(kind: SideKind, group: string) {
   const section = placed(kind),
@@ -268,11 +327,12 @@ function sectionHtml(kind: SideKind) {
   const rows = new Map(
     kind === "dms"
       ? conversations().map((c) => [`dm:${c.peer}`, dmRow(c)] as const)
-      : kind === "xmpp"
-        ? joinedRooms().map((r) => [`xmpp:${r.id}`, roomRow(r)] as const)
-        : state.channels
-          .filter((c) => c.role)
-          .map((c) => [c.id, channelRow(c)] as const),
+      : [
+          ...(kind === "channels" ? state.channels.filter((c) => c.role) : []).map(
+            (c) => [c.id, channelRow(c)] as const,
+          ),
+          ...roomsIn(kind).map((r) => [`xmpp:${r.id}`, roomRow(r)] as const),
+        ],
   );
   const items = (ids: string[]) =>
     ids
@@ -304,7 +364,7 @@ function sectionHtml(kind: SideKind) {
     kind === "channels" && chatChannel() && !chatChannel()!.role
       ? `<div class="side-label">Looking at</div><div class="side-row">${channelRow(chatChannel()!).link}</div><div class="side-label">Joined</div>`
       : "";
-  return `<section class="side-section" data-section="${kind}"><div class="side-head"><button type="button" class="side-toggle" data-fold="" aria-expanded="${!section.collapsed}">${icon("chevron-down", "chev")}<h2 class="grow">${titles[kind]}</h2>${section.collapsed ? news(everything) : ""}</button>
+  return `<section class="side-section" data-section="${kind}"><div class="side-head" draggable="true"><button type="button" class="side-toggle" data-fold="" aria-expanded="${!section.collapsed}">${icon("chevron-down", "chev")}<h2 class="grow">${titles[kind]}</h2>${section.collapsed ? news(everything) : ""}</button>
     <button type="button" class="icon-button" data-section-menu aria-haspopup="menu" aria-label="Add or organise ${titles[kind].toLowerCase()}" title="Add or organise">${icon("plus")}</button></div>
     ${section.collapsed ? "" : `${looking}<div class="side-items" data-list="">${loose}</div>${groups}`}</section>`;
 }
@@ -317,11 +377,7 @@ export function renderSidebar() {
   }
   const list = document.querySelector("#channel-list");
   if (!list || drag) return;
-  // Instances without XMPP have no rooms section.
-  const next = kinds
-    .filter((k) => k !== "xmpp" || state.xmppEnabled || joinedRooms().length)
-    .map(sectionHtml)
-    .join("");
+  const next = sections().map(sectionHtml).join("");
   if (next === html && list.childElementCount) return;
   list.innerHTML = html = next;
 }
@@ -329,19 +385,31 @@ export function renderSidebar() {
 // ---- menus ----
 const item = (name: string, label: string, ico: string, on = false) =>
   `<button type="button" class="menu-item${on ? " on" : ""}" role="menuitem" data-do="${esc(name)}">${icon(ico)}<span class="grow">${esc(label)}</span>${on ? icon("check") : ""}</button>`;
-function sectionMenu(button: HTMLElement, kind: SideKind) {
-  const link = (href: string, label: string, ico: string) =>
-    `<a class="menu-item" role="menuitem" href="${href}">${icon(ico)}<span class="grow">${label}</span></a>`;
+// Whether rooms keep a section of their own: offered wherever channels or rooms are.
+const separate = () =>
+  hasRooms()
+    ? `<div class="menu-section" role="menu"><button type="button" class="menu-item" role="menuitemcheckbox" aria-checked="${!merged()}" data-do="separate"><input type="checkbox" tabindex="-1" aria-hidden="true"${merged() ? "" : " checked"}><span class="grow">Separate XMPP rooms from channels</span></button></div>`
+    : "";
+type Point = { x: number; y: number };
+function sectionMenu(button: HTMLElement, kind: SideKind, at?: Point) {
+  // One that names a window opens it in Fusion, and goes to the page elsewhere.
+  const link = (href: string, label: string, ico: string, win = "") =>
+    `<a class="menu-item" role="menuitem" href="${href}"${win ? ` data-open-window="${win}"` : ""}>${icon(ico)}<span class="grow">${label}</span></a>`;
   const add = kind === "dms"
     ? `<button type="button" class="menu-item" role="menuitem" data-new-dm>${icon("pencil")}<span class="grow">New direct message</span></button>`
-    : kind === "xmpp" ? link("#/xmpp", "Join an XMPP room", "globe")
-    : `${state.session.user?.create_channels ? link("#/channels/new", "Create channel", "plus") : ""}${link("#/channels", "Browse channels", "compass")}${link("#/settings/federation/remote", "Join a channel on another server", "globe")}`;
-  const panel = popup(button, `<div class="menu-section" role="menu">${add}</div><div class="menu-section" role="menu">${item("group", "New group…", "folder-plus")}</div>`);
+    : kind === "xmpp" ? link("#/xmpp", "Join an XMPP room", "globe", "xmpp")
+    : `${state.session.user?.create_channels ? link("#/channels/new", "Create channel", "plus") : ""}${link("#/channels", "Browse channels", "compass")}${state.session.federation_enabled ? link("#/settings/federation/remote", "Join a channel on another server", "globe", "federated") : ""}${merged() && state.xmppEnabled ? link("#/xmpp", "Join an XMPP room", "globe", "xmpp") : ""}`;
+  const panel = popup(button, `<div class="menu-section" role="menu">${add}</div><div class="menu-section" role="menu">${item("group", "New group…", "folder-plus")}${item("up", "Move section up", "arrow-up")}${item("down", "Move section down", "arrow-down")}</div>${kind === "dms" ? "" : separate()}`, at);
   panel?.addEventListener("click", (e) => {
-    if ((e.target as Element).closest('[data-do="group"]')) void newGroup(kind);
+    const name = (e.target as Element).closest<HTMLElement>("[data-do]")
+      ?.dataset.do;
+    if (name === "group") void newGroup(kind);
+    else if (name === "up") stepSection(kind, -1);
+    else if (name === "down") stepSection(kind, 1);
+    else if (name === "separate") setMerged(!merged());
   });
 }
-function itemMenu(button: HTMLElement) {
+function itemMenu(button: HTMLElement, at?: Point) {
   const id = button.closest<HTMLElement>("[data-item]")!.dataset.item!,
     kind = kindOf(id),
     section = placed(kind),
@@ -349,7 +417,8 @@ function itemMenu(button: HTMLElement) {
   const panel = popup(
     button,
     `<div class="menu-section" role="menu">${item("up", "Move up", "arrow-up")}${item("down", "Move down", "arrow-down")}</div>
-    <div class="menu-section" role="menu"><div class="menu-label">Group</div>${section.groups.map((g) => item(`to:${g.id}`, g.name, "folder", g === inGroup)).join("")}${inGroup ? item("to:", "No group", "x") : ""}${item("new", "New group…", "folder-plus")}</div>${kind === "xmpp" ? "" : prefItems(kind === "dms" ? "dm" : "channel", id)}${kind === "dms" ? `<div class="menu-section" role="menu">${item("close", "Close conversation", "x")}</div>` : ""}`,
+    <div class="menu-section" role="menu"><div class="menu-label">Group</div>${section.groups.map((g) => item(`to:${g.id}`, g.name, "folder", g === inGroup)).join("")}${inGroup ? item("to:", "No group", "x") : ""}${item("new", "New group…", "folder-plus")}</div>${isRoom(id) ? "" : prefItems(kind === "dms" ? "dm" : "channel", id)}${kind === "dms" ? `<div class="menu-section" role="menu">${item("close", "Close conversation", "x")}</div>` : separate()}`,
+    at,
   );
   panel?.addEventListener("click", (e) => {
     pickPref(e, id, () => {
@@ -362,6 +431,7 @@ function itemMenu(button: HTMLElement) {
     else if (name === "down") stepItem(id, 1);
     else if (name === "new") void newGroup(kind, id);
     else if (name === "close") closeConversation(id);
+    else if (name === "separate") setMerged(!merged());
     else if (name?.startsWith("to:")) moveItem(id, name.slice(3), null);
   });
 }
@@ -521,8 +591,22 @@ export function wireSidebar(list: HTMLElement) {
     else if ((hit = at.closest<HTMLElement>("[data-group-menu]")))
       groupMenu(hit);
   });
+  // A right click on a channel or a room, or on their headings, opens the menu that says whether
+  // rooms keep a section of their own.
+  list.addEventListener("contextmenu", (e) => {
+    const on = e.target as Element,
+      kind = sectionOf(on),
+      button = on.closest(".side-row")?.querySelector<HTMLElement>("[data-item-menu]"),
+      head = on.closest(".side-head")?.querySelector<HTMLElement>("[data-section-menu]");
+    if (!kind || kind === "dms" || !hasRooms() || !(button || head)) return;
+    e.preventDefault();
+    const at = { x: e.clientX, y: e.clientY };
+    if (button) itemMenu(button, at);
+    else sectionMenu(head!, kind, at);
+  });
 
-  // Dragging a row to another place or group, or a group's heading among the groups.
+  // Dragging a row to another place or group, a group's heading among the groups, or a section's
+  // heading among the sections.
   const clear = () => {
     for (const el of $$(".drop-before, .drop-end, .dragging", list))
       el.classList.remove("drop-before", "drop-end", "dragging");
@@ -531,12 +615,17 @@ export function wireSidebar(list: HTMLElement) {
   function target(e: DragEvent) {
     if (!drag) return null;
     const at = e.target as Element;
-    if (sectionOf(at) !== drag.kind) return null;
     const before = (rows: HTMLElement[]) =>
       rows.find((row) => {
         const box = row.getBoundingClientRect();
         return e.clientY < box.top + box.height / 2;
       }) || null;
+    if (drag.type === "section") {
+      const all = $$("[data-section]", list),
+        row = before(all);
+      return { mark: row, end: all[all.length - 1], group: "", before: row?.dataset.section };
+    }
+    if (sectionOf(at) !== drag.kind) return null;
     if (drag.type === "group") {
       const section = at.closest<HTMLElement>("[data-section]")!,
         row = before($$("[data-group]", section));
@@ -562,16 +651,18 @@ export function wireSidebar(list: HTMLElement) {
   list.addEventListener("dragstart", (e) => {
     const at = e.target as Element,
       row = at.closest<HTMLElement>("[data-item]"),
-      head = at.closest<HTMLElement>(".group-head"),
+      head = at.closest<HTMLElement>(".group-head, .side-head"),
       kind = sectionOf(at);
     if (!kind || (!row && !head)) return;
     drag = row
       ? { type: "item", kind, id: row.dataset.item! }
-      : {
-          type: "group",
-          kind,
-          id: head!.closest<HTMLElement>("[data-group]")!.dataset.group!,
-        };
+      : head!.matches(".side-head")
+        ? { type: "section", kind, id: kind }
+        : {
+            type: "group",
+            kind,
+            id: head!.closest<HTMLElement>("[data-group]")!.dataset.group!,
+          };
     e.dataTransfer!.effectAllowed = "move";
     e.dataTransfer!.setData("text/plain", (row || head)!.textContent || "");
     (row || head!.parentElement)!.classList.add("dragging");
@@ -595,7 +686,9 @@ export function wireSidebar(list: HTMLElement) {
     e.preventDefault();
     drag = null;
     clear();
-    if (moved.type === "group")
+    if (moved.type === "section")
+      moveSection(moved.kind, (to.before as SideKind) || null);
+    else if (moved.type === "group")
       moveGroup(moved.kind, moved.id, to.before || null);
     else moveItem(moved.id, to.group, to.before || null);
   });

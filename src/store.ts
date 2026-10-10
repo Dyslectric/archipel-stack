@@ -2778,10 +2778,20 @@ export class Store {
         })),
       };
     };
+    const kinds = ["dms", "channels", "xmpp"];
     const layout = {
       dms: section(input.dms),
       channels: section(input.channels),
       xmpp: section(input.xmpp),
+      // Top to bottom; a section left out keeps its usual place after the others.
+      order: [
+        ...new Set([
+          ...(Array.isArray(input.order) ? input.order : []).filter((k) => kinds.includes(k)),
+          ...kinds,
+        ]),
+      ],
+      // XMPP rooms listed among the channels.
+      merged: input.merged === true,
     };
     this.db
       .prepare(

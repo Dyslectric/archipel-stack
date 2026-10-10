@@ -90,7 +90,8 @@ export interface SideSection {
   groups: SideGroup[];
 }
 export type SideKind = "dms" | "channels" | "xmpp";
-export type Layout = Record<SideKind, SideSection>;
+// The sections, the order they are listed in, and whether XMPP rooms are listed among the channels.
+export type Layout = Record<SideKind, SideSection> & { order?: SideKind[]; merged?: boolean };
 export interface Overview {
   xmpp_enabled: boolean;
   xmpp_rooms: XmppRoom[];
@@ -751,7 +752,7 @@ export function adoptEmojiDialog(emoji: { id: string; name: string }) {
 let closePopup: (() => void) | null = null;
 export const roleLabel = (role: string | null | undefined) =>
   role === "owner" ? "Owner" : role === "moderator" ? "Moderator" : role === "member" ? "Member" : "Not a member";
-export function popup(anchor: HTMLElement, html: string) {
+export function popup(anchor: HTMLElement, html: string, at?: { x: number; y: number }) {
   const wasOpen = anchor.getAttribute("aria-expanded") === "true";
   closePopup?.();
   if (wasOpen) return null;
@@ -763,9 +764,16 @@ export function popup(anchor: HTMLElement, html: string) {
   const box = anchor.getBoundingClientRect(),
     width = panel.offsetWidth,
     height = panel.offsetHeight;
-  panel.style.left = `${Math.max(8, Math.min(box.left, innerWidth - width - 8))}px`;
-  panel.style.top = `${Math.max(8, Math.min(innerHeight - height - 8,
-    box.bottom + height + 8 > innerHeight && box.top > height + 8 ? box.top - height - 4 : box.bottom + 4))}px`;
+  if (at) {
+    // Opened by a right click: a corner of it under the pointer, the top left one unless the panel
+    // would run off the right or the bottom of the screen.
+    panel.style.left = `${Math.max(8, at.x + width + 8 > innerWidth ? at.x - width : at.x)}px`;
+    panel.style.top = `${Math.max(8, at.y + height + 8 > innerHeight ? at.y - height : at.y)}px`;
+  } else {
+    panel.style.left = `${Math.max(8, Math.min(box.left, innerWidth - width - 8))}px`;
+    panel.style.top = `${Math.max(8, Math.min(innerHeight - height - 8,
+      box.bottom + height + 8 > innerHeight && box.top > height + 8 ? box.top - height - 4 : box.bottom + 4))}px`;
+  }
   const away = (e: Event) => {
     const at = e.target as Node;
     if (
