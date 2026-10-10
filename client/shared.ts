@@ -1,5 +1,6 @@
 import { emojiParts, emojiData, emojiNames, markEmoji, type CustomEmoji } from "../src/emojis.js";
 import { markdownHtml } from "./markdown.js";
+import { isFusion } from "./appearance.js";
 
 export type { CustomEmoji };
 export interface User {
@@ -194,6 +195,17 @@ export const go = (hash: string) => {
 };
 
 const paths: Record<string, string> = {
+  "fusion-pencil": '<path d="M4 20h4L18.5 9.5a2.828 2.828 0 1 0-4-4L4 16zm9.5-13.5l4 4"/>',
+  "fusion-reply": '<path d="m9 14-4-4 4-4M5 10h11a4 4 0 1 1 0 8h-1"/>',
+  "fusion-smile": '<path d="M3 12a9 9 0 1 0 18 0a9 9 0 1 0-18 0m6-2h.01M15 10h.01M9.5 15a3.5 3.5 0 0 0 5 0"/>',
+  "fusion-quote": '<path d="M10 11H6a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v6q0 4-4 5m13-7h-4a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v6q0 4-4 5"/>',
+  "fusion-chevron-down": '<path class="solid" d="M4 8h16l-8 10z"/>',
+  "fusion-folder": '<g transform="scale(1.5)"><path d="M3.2 3.6h2.6c.5 0 .9.2 1.2.6l.6.8c.2.2.4.3.7.3h4.5c.7 0 1.2.5 1.2 1.2v4.8c0 .7-.5 1.2-1.2 1.2H3.2c-.7 0-1.2-.5-1.2-1.2V4.8c0-.7.5-1.2 1.2-1.2z"/></g>',
+  collapse: '<path d="M12 3v6l3-3M9 6l3 3m0 12v-6l3 3m-6 0l3-3m-8-3h1m4 0h1m4 0h1m4 0h1"/>',
+  "fusion-hash": '<path d="M5 9h14M5 15h14M11 4 7 20M17 4l-4 16"/>',
+  "fusion-globe": '<path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0-18 0M3.6 9h16.8M3.6 15h16.8M11.5 3a17 17 0 0 0 0 18M12.5 3a17 17 0 0 1 0 18"/>',
+  "needle-thread": '<path d="M3 21Q2 20 14.785 4.291a3.5 3.5 0 1 1 5.078 4.791Q4.001 22 3 21M17.5 6.5l-1 1"/><path d="M17 7c-2.333-2.667-3.5-4-5-4s-2 1-2 2c0 4 8.161 8.406 6 11c-1.056 1.268-3.363 1.285-5.75.808m-4.511-1.383C4.346 14.86 2 13.5 2 12m17.5-2.5L21 11"/>',
+  xmpp: '<path class="solid" d="M1.2 3.9l3.75 1.2c.6 3.9 1.8 6.9 3.6 9.75C5.1 12.3 2.25 8.7 1.2 3.9zm21.6 0-3.75 1.2c-.6 3.9-1.8 6.9-3.6 9.75 3.45-2.55 6.3-6.15 7.35-10.95zM6.45 5.4l3.9-1.35c.15 4.65 1.35 8.55 3.45 11.85 1.2 1.8 2.7 3.3 4.5 4.5-3.9-1.05-6.9-3.3-9-6.6-1.5-2.4-2.55-5.25-2.85-8.4zm11.1 0-3.9-1.35c-.15 4.65-1.35 8.55-3.45 11.85-1.2 1.8-2.7 3.3-4.5 4.5 3.9-1.05 6.9-3.3 9-6.6 1.5-2.4 2.55-5.25 2.85-8.4z"/>',
   logo: '<circle class="solid" cx="7.5" cy="14" r="4.5"/><circle class="solid" cx="16" cy="7.5" r="3.5"/><circle class="solid" cx="18" cy="17.5" r="2.5"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   hash: '<path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/>',
@@ -254,7 +266,7 @@ const paths: Record<string, string> = {
 };
 // Decorative: say what it means in text or a label next to it.
 export const icon = (name: string, cls = "") =>
-  `<svg class="i${cls ? ` ${cls}` : ""}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${paths[name] || paths.hash}</svg>`;
+  `<svg class="i${cls ? ` ${cls}` : ""}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${paths[isFusion() && paths[`fusion-${name}`] ? `fusion-${name}` : name] || paths.hash}</svg>`;
 
 function hue(name: string) {
   let h = 0;
@@ -308,7 +320,9 @@ export const modeLabel = (mode: string) =>
   ({ timeline: "Timeline", topical: "Topics", threaded: "Threads" })[mode] ||
   mode;
 export const channelIcon = (c: Channel) =>
-  icon(c.remote_actor ? "globe" : c.visibility === "members" ? "lock" : "hash");
+  isFusion()
+    ? icon(c.mode === "topical" ? "folder" : c.mode === "threaded" ? "needle-thread" : "hash") + (c.remote_actor ? `<span class="mode-tag" title="On another instance" aria-label="On another instance">${icon("globe")}</span>` : c.visibility === "members" ? `<span class="mode-tag" title="Members only" aria-label="Members only">${icon("lock")}</span>` : "")
+    : icon(c.remote_actor ? "globe" : c.visibility === "members" ? "lock" : "hash");
 export const canModerate = (c: Channel) =>
   !c.remote_actor &&
   (!!state.session.user?.admin ||
@@ -318,7 +332,9 @@ const dayKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 export const sameDay = (a: string, b: string) =>
   dayKey(new Date(a)) === dayKey(new Date(b));
 export const clock = (ts: string) =>
-  new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  new Date(ts).toLocaleTimeString([], isFusion()
+    ? { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }
+    : { hour: "numeric", minute: "2-digit" });
 export const full = (ts: string) => new Date(ts).toLocaleString();
 export function dayLabel(ts: string) {
   const d = new Date(ts),

@@ -42,7 +42,8 @@ import {
 import { closePicker, suggestShortcodes, togglePicker } from "./picker.js";
 import { renderSidebar, sidebarFrame } from "./sidebar.js";
 import { attachButton, pickFiles, quoteInto } from "./attach.js";
-import { markdownText } from "./markdown.js";
+import { markdownQuote, markdownText } from "./markdown.js";
+import { appStyle, isFusion } from "./appearance.js";
 import { isHidden, notifies, pickPref, prefItems, prefMenu, type PrefKind } from "./prefs.js";
 
 interface Page {
@@ -63,6 +64,7 @@ let current: Channel | null = null,
   olderCursor: number | null = null;
 let narrow: string | null = null, // the topic being read on its own
   reply: Message | null = null,
+  quote: Message | null = null,
   editing: string | null = null;
 let generation = 0,
   lastSignature = "",
@@ -75,11 +77,72 @@ let unseen: string[] = [],
   popped: string[] = [];
 let showHidden = false, // hidden threads are on the page for now
   lastPrefs = "";
+let selectedMessage: string | null = null, messageSearch = "";
+
+export const fusionToolbarHtml = () => `<div class="fusion-toolbar" id="fusion-toolbar"><div id="fusion-chat-tools" class="fusion-tool-group picker-host"><button type="button" data-fusion-action="new">${icon("pencil")}<span id="fusion-new-label">New message</span></button><a class="fusion-tool" href="#/channels">${icon("plus")} Join channel</a><span class="tool-separator"></span><button type="button" id="fusion-reply" data-fusion-action="reply" disabled>${icon("reply")} Reply</button><button type="button" id="fusion-react" data-fusion-action="react" disabled>${icon("smile")} React</button><button type="button" id="fusion-quote" data-fusion-action="quote" disabled>${icon("quote")} Quote</button><button type="button" id="fusion-collapse" data-fusion-action="collapse">${icon("collapse")} Collapse all</button><button type="button" id="fusion-members" data-fusion-action="members" aria-pressed="false">${icon("people")} Members</button><span class="grow"></span><input type="search" id="fusion-search" aria-label="Search messages" placeholder="Search messages" title="Search messages loaded in this conversation"></div><div id="fusion-directory-tools" class="fusion-tool-group"></div></div>`;
+export function updateFusionToolbar() {
+  const tools = document.querySelector<HTMLElement>("#fusion-chat-tools");
+  if (!tools) return;
+  const c = current, selected = messages.find(m => m.id === selectedMessage);
+  const active = !!c && !!document.querySelector("#rows.mode-timeline, #rows.mode-topical, #rows.mode-threaded");
+  $("#fusion-new-label", tools).textContent = c?.mode === "threaded" ? "New thread" : "New message";
+  $("[data-fusion-action=new]", tools).setAttribute("aria-label", c?.mode === "threaded" ? "New thread" : "New message");
+  for (const command of ["reply", "react", "quote"] as const) {
+    const b = $<HTMLButtonElement>(`#fusion-${command}`, tools);
+    b.disabled = !active || !selected || !!selected.deleted_at || !!selected.queued || !canPost() || (command === "reply" && !!c?.dm) || (command === "react" && !c?.reactions);
+  }
+  $("#fusion-collapse", tools).hidden = c?.mode !== "threaded";
+  const members = $<HTMLButtonElement>("#fusion-members", tools);
+  members.hidden = !c?.sees_members || !!c?.dm;
+  members.setAttribute("aria-pressed", String(membersOpen()));
+  const search = $<HTMLInputElement>("#fusion-search", tools);
+  if (document.activeElement !== search) search.value = messageSearch;
+  search.placeholder = c?.mode === "threaded" ? "Search threads" : "Search messages";
+  const status = document.querySelector("#fusion-status-place");
+  const view = document.querySelector<HTMLElement>(".app")?.dataset.view;
+  if (status) status.textContent = active && c
+    ? `${c.name}, ${c.member_count} member${c.member_count === 1 ? "" : "s"}`
+    : view === "channels" ? "Channel directory" : view === "settings" ? "Settings"
+    : view === "xmpp" ? "XMPP rooms" : state.session?.instance || "";
+}
+function selectFusionMessage(id: string | null) {
+  selectedMessage = id;
+  for (const row of $$(".message[id]")) row.classList.toggle("selected-message", row.id === `m-${id}`);
+  updateFusionToolbar();
+}
+document.addEventListener("click", event => {
+  const command = (event.target as Element).closest<HTMLElement>("[data-fusion-action]")?.dataset.fusionAction;
+  if (!command) return;
+  const m = messages.find(m => m.id === selectedMessage);
+  if (command === "members" && current) toggleMembers();
+  else if (command === "new") {
+    if (!current || !canPost()) return go("#/channels");
+    reply = quote = null; renderComposer();
+    (document.querySelector<HTMLElement>("#thread-title") || document.querySelector<HTMLElement>("#message-body"))?.focus();
+  } else if (command === "collapse") {
+    const nodes = $$<HTMLDetailsElement>("details.fusion-thread", $("#rows"));
+    const open = nodes.every(d => !d.open);
+    for (const d of nodes) d.open = open;
+  } else if (m && canPost() && !m.deleted_at && !m.queued) {
+    if (command === "reply" || command === "quote") {
+      reply = current!.dm ? null : m;
+      quote = command === "quote" ? m : null;
+      renderComposer(); $("#message-body").focus();
+    } else if (command === "react") togglePicker($("#fusion-react"), name => react(m.id, name, true));
+  }
+});
+document.addEventListener("input", event => {
+  if ((event.target as HTMLElement).id !== "fusion-search") return;
+  messageSearch = (event.target as HTMLInputElement).value.trim().toLowerCase();
+  render();
+});
 
 export const chatChannel = () => current;
 export const chatTopic = () => narrow;
 export function resetChat() {
   current = null;
+  quote = null;
+  selectedMessage = null; messageSearch = "";
   messages = [];
   pending = [];
   generation++;
@@ -237,6 +300,8 @@ async function selectChannel(id: string, topicId?: string) {
   pending = page.pending || [];
   olderCursor = page.older_cursor;
   reply = editing = null;
+  quote = null;
+  selectedMessage = null; messageSearch = "";
   narrow = topicOf(topicId || null) ? topicId! : null;
   collapsed.clear();
   seen.clear();
@@ -357,7 +422,7 @@ function renderMembers() {
       .map(([role, label]) => {
         const list = members.filter((u) => u.role === role);
         return list.length
-          ? `<h3 class="side-label">${label}${role === "owner" ? "" : ` · ${list.length}`}</h3><ul class="plain member-rows">${list.map((u) => `<li>${avatar(u, "small")}${nameButton(u, u.actor_url, "member-name")}${u.actor_url?.startsWith("xmpp:") ? '<span class="mode-tag">XMPP</span>' : u.actor_url && !u.actor_url.startsWith(location.origin) ? `<span class="mode-tag" title="On another instance">${icon("globe")}</span>` : ""}</li>`).join("")}</ul>`
+          ? `<h3 class="side-label">${label}${role === "owner" ? "" : ` · ${list.length}`}</h3><ul class="plain member-rows">${list.map((u) => `<li>${avatar(u, "small")}${nameButton(u, u.actor_url, "member-name")}${u.actor_url?.startsWith("xmpp:") ? `<span class="mode-tag" title="XMPP" aria-label="XMPP">${icon("xmpp")}</span>` : u.actor_url && !u.actor_url.startsWith(location.origin) ? `<span class="mode-tag" title="On another instance">${icon("globe")}</span>` : ""}</li>`).join("")}</ul>`
           : "";
       })
       .join("")}</div>`;
@@ -415,6 +480,7 @@ function hiddenThreads() {
 function renderHeader() {
   const c = current!,
     topic = topicOf(narrow);
+  updateFusionToolbar();
   if (c.dm) {
     $("#channel-heading").innerHTML =
       `<h1>${avatar(c.dm, "small")}<strong>${nameButton(c.dm, c.dm.peer)}</strong></h1><span class="handle">@${esc(c.dm.username)}</span>${c.dm.remote ? '<span class="pill new">Remote</span>' : ""}<span class="desc muted small">Direct messages</span>`;
@@ -571,7 +637,7 @@ const repliable = (m: Message) =>
 // Occupants of other XMPP servers are marked; their handle is their full address.
 const author = (m: Message) =>
   nameButton(m, m.history_placeholder ? undefined : m.author_actor_url) +
-  (m.author_actor_url?.startsWith("xmpp:") ? ' <span class="pill new">XMPP</span>' : "");
+  (m.author_actor_url?.startsWith("xmpp:") ? ` <span class="mode-tag" title="XMPP" aria-label="XMPP">${icon("xmpp")}</span>` : "");
 
 function editMessage(id: string) {
   editing = id;
@@ -587,8 +653,8 @@ function removeMessage(id: string) {
     await refreshCurrent();
   });
 }
-function messageMenu(button: HTMLElement) {
-  const m = messages.find((m) => m.id === button.dataset.messageMenu);
+function messageMenu(button: HTMLElement, id = button.dataset.messageMenu) {
+  const m = messages.find((m) => m.id === id);
   if (!m || m.queued || m.deleted_at) return;
   const token = generation;
   const item = (key: string, label: string, ico: string) => `<button type="button" class="menu-item" role="menuitem" data-message-action="${key}">${icon(ico)}<span class="grow">${label}</span></button>`;
@@ -625,6 +691,8 @@ function chatMessage(m: Message, cont: boolean) {
       : "",
     !m.deleted_at ? `<button type="button" class="icon-button" data-message-menu="${m.id}" aria-label="More message actions" aria-haspopup="menu" title="More">${icon("more")}</button>` : "",
   ].join("");
+  if (appStyle() === "fusion-compact")
+    return `<article class="message compact-message picker-host${m.deleted_at ? " deleted" : ""}${queuedClass(m)}" id="m-${m.id}"><span class="compact-time">${time}</span><div class="compact-author">${author(m)}${handleTag(m.username)}</div><div class="message-content">${context}${bodyHtml(m)}${edited(m)}</div>${tools ? `<div class="message-actions">${tools}</div>` : ""}</article>`;
   return `<article class="message picker-host${cont ? " cont" : ""}${m.deleted_at ? " deleted" : ""}${queuedClass(m)}" id="m-${m.id}"><div class="msg-gutter">${cont ? time : avatar(m)}</div>
     <div class="message-content">${cont ? "" : `<div class="message-meta">${author(m)}${handleTag(m.username)}${time}${edited(m)}</div>`}${context}${bodyHtml(m)}${cont ? edited(m) : ""}</div>${tools ? `<div class="message-actions">${tools}</div>` : ""}</article>`;
 }
@@ -633,7 +701,7 @@ function chatKids(list: Message[]): Node[] {
   return list.map((m, i) => {
     const prev = list[i - 1];
     const cont =
-      !!prev &&
+      !isFusion() && !!prev &&
       prev.author_id === m.author_id &&
       !m.parent_id &&
       new Date(m.created_at).getTime() - new Date(prev.created_at).getTime() <
@@ -677,6 +745,9 @@ function threadActions(m: Message) {
       ? `<details class="reply-box"><summary aria-label="Reply to ${esc(m.display_name)}">${icon("reply")} Reply</summary><form class="stack inline-form picker-host" data-reply-form="${m.id}"><textarea name="body" rows="3" maxlength="8000" required aria-label="Reply" placeholder="Reply to ${esc(m.display_name)}"></textarea><p class="form-error" role="alert"></p><div class="row"><button class="small">Reply</button><button type="button" class="icon-button" data-emoji-for aria-label="Choose emoji" title="Emoji">${icon("smile")}</button>${attachButton("data-attach-for")}<span class="muted">Ctrl + Enter to send</span></div></form></details>`
       : "",
     reactButton(m, "link react-button"),
+    canPost() && !m.deleted_at
+      ? `<button type="button" class="link quote-button" data-quote="${m.id}" aria-label="Quote ${esc(m.display_name)}">${icon("quote")} Quote</button>`
+      : "",
     moderateButton(m, "link"),
     mine(m)
       ? `<button type="button" class="link edit-button" data-edit="${m.id}" aria-label="Edit message">Edit</button>`
@@ -687,8 +758,9 @@ function threadActions(m: Message) {
   ].join("");
   return parts ? `<div class="obj-actions small picker-host">${parts}</div>` : "";
 }
-const byline = (m: Message) =>
-  `${author(m)} ${handleTag(m.username)} ·${when(m.created_at)}${edited(m) ? ` · ${edited(m)}` : ""}`;
+const byline = (m: Message) => isFusion()
+  ? `${appStyle() === "fusion-compact" ? `<time class="thread-clock" datetime="${esc(m.created_at)}">${esc(clock(m.created_at))}</time> ` : ""}${author(m)}${appStyle() === "fusion-cozy" ? ` <time class="thread-clock" datetime="${esc(m.created_at)}">${esc(clock(m.created_at))}</time>` : ""}${edited(m)}`
+  : `${author(m)} ${handleTag(m.username)} ·${when(m.created_at)}${edited(m) ? ` · ${edited(m)}` : ""}`;
 function threadNodes(list: Message[]): Node[] {
   const ids = new Set(list.map((m) => m.id)),
     children = new Map<string, Message[]>();
@@ -702,7 +774,7 @@ function threadNodes(list: Message[]): Node[] {
     const n = count(m);
     return {
       key: m.id,
-      html: `<details open class="comment message d${depth % 8}${queuedClass(m)}" id="m-${m.id}" data-depth="${depth}"><summary class="meta small message-meta"><span class="fold" aria-hidden="true">${icon("chevron-down")}</span>${byline(m)}<span class="collapsed-note">${n ? `${replies(n)} hidden` : "collapsed"}</span></summary>
+      html: `<details open class="comment message d${depth % 8}${queuedClass(m)}" id="m-${m.id}" data-depth="${depth}">${isFusion() ? `<span class="thread-avatar">${avatar(m)}</span>` : ""}<summary class="meta small message-meta"><span class="fold" aria-hidden="true">${icon("chevron-down")}</span>${byline(m)}<span class="collapsed-note">${n ? `${replies(n)} hidden` : "collapsed"}</span></summary>
         <button type="button" class="bar" title="Collapse this thread" aria-label="Collapse this thread"></button>
         <div class="content">${bodyHtml(m, "md")}${threadActions(m)}<div class="replies" data-kids></div></div></details>`,
       kids: (children.get(m.id) || []).map((child) => comment(child, depth + 1)),
@@ -719,9 +791,12 @@ function threadNodes(list: Message[]): Node[] {
         };
       // The post and everything said under it share one card; the replies fold away together.
       const n = count(m);
+      const post = `<article class="post message${queuedClass(m)}" id="m-${m.id}">${isFusion() ? `<span class="thread-avatar">${avatar(m)}</span>` : ""}${m.title && editing !== m.id ? `<h2 class="thread-title">${emojiHtml(m.title, m.emojis || [])}</h2>` : ""}<div class="meta small message-meta post-meta"><span class="grow">${byline(m)}${isHidden(`thread:${m.id}`) ? ' · <span class="pill warn">Hidden</span>' : ""}</span>${current!.role && !m.queued ? prefButton("thread", `thread:${m.id}`, m.title || "this thread") : ""}</div>${bodyHtml(m, "md")}${threadActions(m)}</article>${n ? `<details open class="thread-replies" data-key="r-${m.id}"><summary title="Show or hide every reply in this thread">${icon("chevron-down", "chev")}<span>${replies(n)}</span></summary><div class="comments" data-kids></div></details>` : '<div class="comments" data-kids></div>'}`;
       return {
         key: `t-${m.id}`,
-        html: `<section class="thread card${isHidden(`thread:${m.id}`) ? " hidden-thread" : ""}"><article class="post message${queuedClass(m)}" id="m-${m.id}">${m.title && editing !== m.id ? `<h2 class="thread-title">${emojiHtml(m.title, m.emojis || [])}</h2>` : ""}<div class="meta small message-meta post-meta"><span class="grow">${byline(m)}${isHidden(`thread:${m.id}`) ? ' · <span class="pill warn">Hidden</span>' : ""}</span>${current!.role && !m.queued ? prefButton("thread", `thread:${m.id}`, m.title || "this thread") : ""}</div>${bodyHtml(m, "md")}${threadActions(m)}</article>${n ? `<details open class="thread-replies" data-key="r-${m.id}"><summary title="Show or hide every reply in this thread">${icon("chevron-down", "chev")}<span>${replies(n)}</span></summary><div class="comments" data-kids></div></details>` : '<div class="comments" data-kids></div>'}</section>`,
+        html: isFusion()
+          ? `<details open class="thread card fusion-thread${isHidden(`thread:${m.id}`) ? " hidden-thread" : ""}"><summary class="thread-heading">${icon("chevron-down", "chev")}${appStyle() === "fusion-cozy" ? avatar(m, "small") : ""}<strong class="grow">${emojiHtml(m.title || "Untitled thread", m.emojis || [])}</strong><span class="thread-starter">${esc(m.display_name)}</span><span>${replies(n)}</span><span>${esc(dayLabel(m.created_at))}</span></summary><div class="thread-body">${post}</div></details>`
+          : `<section class="thread card${isHidden(`thread:${m.id}`) ? " hidden-thread" : ""}">${post}</section>`,
         kids: (children.get(m.id) || []).map((child) => comment(child, 0)),
       };
     });
@@ -780,6 +855,11 @@ function render(
   if (!current || !document.querySelector("#rows")) return;
   const c = current,
     list = $("#message-list");
+  // Native toggle events are queued. Read the current state before replacing a styled thread.
+  for (const d of $$<HTMLDetailsElement>(folds, list)) {
+    if (d.open) collapsed.delete(d.dataset.key!);
+    else collapsed.add(d.dataset.key!);
+  }
   const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 80,
     oldHeight = list.scrollHeight,
     oldTop = list.scrollTop;
@@ -791,7 +871,7 @@ function render(
     ).length;
   if (!hiddenCount) showHidden = false;
   const all = everything();
-  const shown =
+  let shown =
     c.mode === "topical"
       ? all.filter((m) =>
           narrow ? m.topic_id === narrow : !isHidden(`topic:${m.topic_id}`),
@@ -799,6 +879,15 @@ function render(
       : quiet.size && !showHidden
         ? all.filter((m) => !quiet.has(m))
         : all;
+  if (messageSearch && isFusion()) {
+    const match = (m: Message) => `${m.body} ${m.title || ""} ${m.display_name}`.toLowerCase().includes(messageSearch);
+    if (threaded()) {
+      const roots = new Set<string>();
+      const root = (m: Message) => { let top = m; for (let parent = shown.find(p => p.id === top.parent_id); parent; parent = shown.find(p => p.id === top.parent_id)) top = parent; return top.id; };
+      for (const m of shown) if (match(m)) roots.add(root(m));
+      shown = shown.filter(m => roots.has(root(m)));
+    } else shown = shown.filter(match);
+  }
   const top = `${
     olderCursor
       ? '<button type="button" id="older-messages" class="secondary small older-button">Load earlier messages</button>'
@@ -814,9 +903,14 @@ function render(
     !!opts.animate,
   );
   $("#rows").className = `rows mode-${c.mode}`;
+  if (isFusion()) for (const row of $$(".message[id]", $("#rows"))) {
+    row.tabIndex = 0;
+    row.classList.toggle("selected-message", row.id === `m-${selectedMessage}`);
+  }
+  updateFusionToolbar();
   $("#feed-empty").innerHTML = shown.length
     ? ""
-    : `<p class="card empty muted">${c.mode === "threaded" ? (hiddenCount ? "Every thread here is hidden." : "No threads yet.") : narrow ? "No messages in this topic yet." : messages.length ? "Every topic here is hidden. Open one from the sidebar to read it." : "No messages yet."}</p>`;
+    : `<p class="card empty muted">${messageSearch ? "No messages match." : c.mode === "threaded" ? (hiddenCount ? "Every thread here is hidden." : "No threads yet.") : narrow ? "No messages in this topic yet." : messages.length ? "Every topic here is hidden. Open one from the sidebar to read it." : "No messages yet."}</p>`;
   for (const d of $$<HTMLDetailsElement>(folds, list))
     d.open = !collapsed.has(d.dataset.key!);
   refreshTimes(list);
@@ -835,7 +929,7 @@ function render(
   updatePill();
 }
 // What folds in a threaded channel: one reply with those under it, or all of a thread's replies.
-const folds = "details.comment, details.thread-replies";
+const folds = "details.comment, details.thread-replies, details.fusion-thread";
 function inView(el: Element) {
   const box = $("#message-list").getBoundingClientRect(),
     r = el.getBoundingClientRect();
@@ -920,6 +1014,7 @@ function wireFeed() {
     "toggle",
     (e) => {
       const d = e.target as HTMLDetailsElement;
+      if (!d.isConnected) return;
       if (d.matches("details.reply-box") && d.open) $("textarea", d).focus();
       if (!d.matches(folds)) return;
       if (d.open) collapsed.delete(d.dataset.key!);
@@ -927,7 +1022,22 @@ function wireFeed() {
     },
     true,
   );
+  list.addEventListener("contextmenu", (e) => {
+    if (!isFusion() || (e.target as Element).closest("input, textarea, a")) return;
+    const row = (e.target as Element).closest<HTMLElement>(".message[id]");
+    if (row) { e.preventDefault(); selectFusionMessage(row.id.slice(2)); messageMenu(row, row.id.slice(2)); }
+  });
   list.addEventListener("keydown", (e) => {
+    if (isFusion() && (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10"))) {
+      const row = (e.target as Element).closest<HTMLElement>(".message[id]");
+      if (row) { e.preventDefault(); selectFusionMessage(row.id.slice(2)); messageMenu(row, row.id.slice(2)); }
+    }
+    if (isFusion() && ["ArrowUp", "ArrowDown"].includes(e.key) && !(e.target as Element).closest("input, textarea, button, a")) {
+      const rows = $$(".message[id]", list).filter(row => row.getBoundingClientRect().height > 0);
+      const i = rows.findIndex(row => row.id === `m-${selectedMessage}`);
+      const row = rows[Math.max(0, Math.min(rows.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)))];
+      if (row) { e.preventDefault(); selectFusionMessage(row.id.slice(2)); row.focus(); }
+    }
     const area = (e.target as Element).closest<HTMLTextAreaElement>(
       ".inline-form textarea",
     );
@@ -982,6 +1092,10 @@ function wireFeed() {
   });
   list.addEventListener("click", (e) => {
     const at = e.target as Element;
+    if (isFusion()) {
+      const row = at.closest<HTMLElement>(".message[id]");
+      if (row) selectFusionMessage(row.id.slice(2));
+    }
     const on = <T extends HTMLElement = HTMLElement>(selector: string) =>
       at.closest<T>(selector);
     let hit: HTMLElement | null;
@@ -992,7 +1106,7 @@ function wireFeed() {
     } else if ((hit = on("[data-fold]"))) {
       // Collapsing leaves the posts; expanding opens every reply under them.
       const open = hit.dataset.fold === "open";
-      for (const d of $$<HTMLDetailsElement>(open ? folds : "details.thread-replies", list))
+      for (const d of $$<HTMLDetailsElement>(open ? folds : "details.thread-replies, details.fusion-thread", list))
         d.open = open;
     } else if ((hit = on("[data-pref-menu]"))) openPrefMenu(hit);
     else if ((hit = on("[data-message-menu]"))) messageMenu(hit);
@@ -1029,6 +1143,21 @@ function wireFeed() {
       const quoted = messages.find((m) => m.id === hit!.dataset.quote),
         topic = document.querySelector<HTMLInputElement>("#compose-topic");
       if (!quoted) return;
+      if (threaded()) {
+        const box = document.getElementById(`m-${quoted.id}`)?.querySelector<HTMLDetailsElement>(":scope > .obj-actions > details.reply-box");
+        if (!box) return;
+        box.open = true;
+        quoteInto($<HTMLTextAreaElement>("textarea", box), quoted.body);
+        return;
+      }
+      if (isFusion()) {
+        quote = quoted;
+        if (!reply && repliable(quoted)) reply = quoted;
+        if (topic && quoted.topic_id) topic.value = topicOf(quoted.topic_id)?.title || topic.value;
+        renderComposer();
+        $("#message-body").focus();
+        return;
+      }
       // The answer belongs with what it quotes, unless it is already a reply to something else.
       if (topic && !reply && quoted.topic_id)
         topic.value = topicOf(quoted.topic_id)?.title || topic.value;
@@ -1119,17 +1248,17 @@ function renderComposer(keepDraft = true) {
           null,
       )?.title || "";
   const place =
-    c.mode === "threaded"
+    reply ? `Reply to ${reply.display_name}…` : c.mode === "threaded"
       ? "Start the thread…"
-      : reply
-        ? `Reply to ${reply.display_name}…`
-        : `Message ${c.dm ? "" : "#"}${c.name}…`;
+      : `Message ${c.dm ? "" : "#"}${c.name}…`;
   area.innerHTML = `<div class="composer-wrap picker-host"><form id="composer" class="composer">
+    <span class="fusion-compose-label">${reply ? `Reply to <strong>${esc(reply.display_name)}</strong>` : `To <strong>${esc(c.name)}</strong>`}${topic ? ` › ${esc(topic)}` : ""}</span>
     ${c.mode === "topical" ? `<div class="compose-to">${channelIcon(c)}<span class="compose-channel">${esc(c.name)}</span>${icon("chevron-right", "sep")}<input id="compose-topic" list="topic-options" maxlength="100" placeholder="Topic" aria-label="Topic" autocomplete="off" required value="${esc(topic)}"><datalist id="topic-options"></datalist></div>` : ""}
-    ${c.mode === "threaded" ? `<input id="thread-title" class="thread-input" maxlength="160" placeholder="New thread title${c.optional_titles ? " (optional)" : ""}" aria-label="Thread title" ${c.optional_titles ? "" : "required"} value="${esc(title)}">` : ""}
+    ${c.mode === "threaded" && !reply ? `<input id="thread-title" class="thread-input" maxlength="160" placeholder="New thread title${c.optional_titles ? " (optional)" : ""}" aria-label="Thread title" ${c.optional_titles ? "" : "required"} value="${esc(title)}">` : ""}
     ${reply ? `<div class="reply-banner small">${icon("reply")}<span>Replying to <strong>${esc(reply.display_name)}</strong></span><button type="button" id="cancel-reply" class="icon-button" aria-label="Cancel reply">${icon("x")}</button></div>` : ""}
+    ${quote ? `<section class="quote-preview" aria-label="Quoted message"><div class="row"><button type="button" class="link" id="quote-source">${icon("quote")} ${esc(quote.display_name)}</button><span class="grow"></span><button type="button" class="icon-button" id="cancel-quote" aria-label="Remove quote">${icon("x")}</button></div><div class="markdown quote-content">${richHtml(quote.body, quote.emojis || [])}</div></section>` : ""}
     <textarea id="message-body" maxlength="8000" rows="1" placeholder="${esc(place)}" aria-label="Message" required>${esc(draft)}</textarea>
-    <div class="composer-bar"><button type="button" id="choose-emoji" class="icon-button" aria-label="Choose emoji" title="Emoji" aria-expanded="false">${icon("smile")}</button>${attachButton('id="attach-file"')}<span class="muted small composer-hint-keys" title="Shift + Enter for a new line"><kbd>Enter</kbd> to send</span><button id="send-message" type="submit" aria-label="Send message">${icon("send")}<span>${c.mode === "threaded" ? "Post thread" : "Send"}</span></button></div></form></div>`;
+    <div class="composer-bar"><button type="button" id="choose-emoji" class="icon-button" aria-label="Choose emoji" title="Emoji" aria-expanded="false">${icon("smile")}</button>${attachButton('id="attach-file"')}<span class="muted small composer-hint-keys" title="Shift + Enter for a new line"><kbd>Enter</kbd> to send</span><button id="send-message" type="submit" aria-label="Send message">${icon("send")}<span>${c.mode === "threaded" && !reply ? "Post thread" : "Send"}</span></button></div></form></div>`;
   const body = $<HTMLTextAreaElement>("#message-body");
   const grow = () => {
     body.style.height = "auto";
@@ -1142,9 +1271,17 @@ function renderComposer(keepDraft = true) {
   if (hadFocus) body.focus();
   document.querySelector("#cancel-reply")?.addEventListener("click", () => {
     reply = null;
+    quote = null;
     renderComposer();
     $("#message-body").focus();
   });
+  document.querySelector("#cancel-quote")?.addEventListener("click", () => {
+    if (reply?.id === quote?.id) reply = null;
+    quote = null;
+    renderComposer();
+    $("#message-body").focus();
+  });
+  document.querySelector("#quote-source")?.addEventListener("click", () => { if (quote) reveal(quote.id); });
   $("#choose-emoji").addEventListener("click", (e) =>
     togglePicker(e.currentTarget as HTMLElement, body),
   );
@@ -1163,15 +1300,18 @@ function renderComposer(keepDraft = true) {
       const titleInput = document.querySelector<HTMLInputElement>("#thread-title"),
         topicInput = document.querySelector<HTMLInputElement>("#compose-topic");
       if (!body.value.trim()) return;
+      const content = quote ? `${markdownQuote(quote.body)}\n\n${body.value}` : body.value;
+      if (content.length > 8000) throw new Error("The quote and message together must be at most 8,000 characters. Remove the quote or shorten your message.");
       const button = $<HTMLButtonElement>("#send-message");
       if (button.disabled) return;
       button.disabled = true;
       const token = generation;
       try {
         if (c.dm) {
-          await api("/dms", "POST", { to: c.dm.peer, body: body.value });
+          await api("/dms", "POST", { to: c.dm.peer, body: content });
           if (generation !== token) return;
           body.value = "";
+          quote = null;
           await refreshCurrent();
           if (generation !== token) return;
           render({ bottom: true });
@@ -1199,7 +1339,7 @@ function renderComposer(keepDraft = true) {
           `/channels/${c.id}/messages`,
           "POST",
           {
-            body: body.value,
+            body: content,
             ...(titleInput ? { title: titleInput.value } : {}),
             ...(reply ? { parent_id: reply.id } : {}),
             ...(topicId ? { topic_id: topicId } : {}),
@@ -1209,6 +1349,7 @@ function renderComposer(keepDraft = true) {
         body.value = "";
         if (titleInput) titleInput.value = "";
         reply = null;
+        quote = null;
         if (message.queued) pending = [...pending, message];
         else merge(message);
         if (narrow && topicId && narrow !== topicId)
@@ -1234,6 +1375,7 @@ function updateTopicOptions() {
 // ---- keeping up: called when the server says the conversation on screen changed ----
 export function redrawChat(composer = false, header = false) {
   if (!current) return;
+  if (header) renderMembers();
   if (header && document.querySelector("#rows")) renderHeader();
   render();
   if (composer) renderComposer();

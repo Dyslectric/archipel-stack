@@ -3,11 +3,16 @@ import { attachButton, pickFiles, quoteInto } from "./attach.js";
 import { chatFrame, resetChat } from "./chat.js";
 import { renderSidebar } from "./sidebar.js";
 import { mirrorDialog } from "./mirrors.js";
+import { appStyle, isFusion } from "./appearance.js";
 
 type Message = { id: string; seq: number; sender: string; sender_jid: string | null; blocked: boolean; body: string; created_at: string; status: string; error: string | null };
 type Page = { room: XmppRoom; messages: Message[]; more: boolean };
 let selected: string | undefined, generation = 0, more = false;
 let messages = new Map<string, Message>();
+document.addEventListener("appearance-change", () => {
+  const room = state.xmppRooms.find(r => r.id === selected);
+  if (room && document.querySelector(".xmpp-rows")) paint(room);
+});
 
 export async function showXmppRooms(view: HTMLElement, id?: string) {
   const token = ++generation;
@@ -80,14 +85,16 @@ function paint(room: XmppRoom) {
     const nick = m.sender.slice(m.sender.indexOf("/") + 1);
     const status = m.status === "queued" ? "Queued" : m.status === "sent" ? "Awaiting room confirmation" : m.status === "failed" ? `Failed: ${m.error || "Message was rejected"}` : "";
     const day = !prev || !sameDay(prev.created_at, m.created_at);
-    const cont = !day && prev!.sender === m.sender && new Date(m.created_at).getTime() - new Date(prev!.created_at).getTime() < 600000;
+    const cont = !isFusion() && !day && prev!.sender === m.sender && new Date(m.created_at).getTime() - new Date(prev!.created_at).getTime() < 600000;
     const time = `<time datetime="${esc(m.created_at)}" title="${esc(full(m.created_at))}">${esc(clock(m.created_at))}</time>`;
     const note = status ? `<span class="edited">${esc(status)}</span>` : "";
     if (day) html += `${prev ? "</div></section>" : ""}<section class="day-group"><div class="day-divider"><span>${esc(dayLabel(m.created_at))}</span></div><div class="group-body">`;
     const own = m.sender === `${room.room}/${room.nick}`, who = { username: m.sender_jid || m.sender, display_name: nick };
     const name = own ? `<span class="author" title="${esc(m.sender)}">${esc(nick)}</span>`
       : `${nameButton(who, `xmpp:${m.sender_jid || m.sender}`)}${m.sender_jid ? ` <span class="handle">${esc(m.sender_jid)}</span>` : ""}`;
-    html += `<article class="message xmpp-message${cont ? " cont" : ""}${status ? ` queued${m.status === "failed" ? " failed" : ""}` : ""}"><div class="msg-gutter">${cont ? time : avatar(who)}</div>
+    if (appStyle() === "fusion-compact") {
+      html += `<article class="message compact-message xmpp-message${status ? ` queued${m.status === "failed" ? " failed" : ""}` : ""}"><span class="compact-time">${time}</span><div class="compact-author">${name}</div><div class="message-content"><div class="message-body${m.blocked ? " faded" : " markdown"}${!m.blocked && emojiOnly(m.body) ? " emoji-only" : ""}">${m.blocked ? esc(m.body) : richHtml(m.body)}</div>${note}</div>${room.can_post && !m.blocked ? `<div class="message-actions"><button type="button" class="icon-button quote-button" data-quote="${esc(m.id)}" aria-label="Quote ${esc(nick)}" title="Quote">${icon("quote")}</button></div>` : ""}</article>`;
+    } else html += `<article class="message xmpp-message${cont ? " cont" : ""}${status ? ` queued${m.status === "failed" ? " failed" : ""}` : ""}"><div class="msg-gutter">${cont ? time : avatar(who)}</div>
       <div class="message-content">${cont ? "" : `<div class="message-meta">${name}${time}${note}</div>`}<div class="message-body${m.blocked ? " faded" : " markdown"}${!m.blocked && emojiOnly(m.body) ? " emoji-only" : ""}">${m.blocked ? esc(m.body) : richHtml(m.body)}</div>${cont ? note : ""}</div>${
         room.can_post && !m.blocked ? `<div class="message-actions"><button type="button" class="icon-button quote-button" data-quote="${esc(m.id)}" aria-label="Quote ${esc(nick)}" title="Quote">${icon("quote")}</button></div>` : ""}</article>`;
     prev = m;

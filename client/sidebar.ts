@@ -234,7 +234,7 @@ function roomRow(r: XmppRoom) {
   return {
     name: r.room,
     extra: "",
-    link: `<a class="channel-link${on ? " on" : ""}" draggable="false" href="#/xmpp/${r.id}"${on ? ' aria-current="page"' : ""} title="${esc(r.room)}">${icon("globe")}<span class="grow">${esc(r.room)}</span>${r.state !== "joined" ? `<span class="mode-tag">${esc(r.reconnecting ? "reconnecting" : r.state)}</span>` : ""}</a>`,
+    link: `<a class="channel-link${on ? " on" : ""}" draggable="false" href="#/xmpp/${r.id}"${on ? ' aria-current="page"' : ""} title="${esc(r.room)}">${icon("xmpp")}<span class="grow">${esc(r.room)}</span>${r.state !== "joined" ? `<span class="mode-tag">${esc(r.reconnecting ? "reconnecting" : r.state)}</span>` : ""}</a>`,
   };
 }
 const empty: Record<SideKind, string> = {

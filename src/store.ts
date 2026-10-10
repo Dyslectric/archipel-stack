@@ -378,6 +378,48 @@ export class Store {
       throw new Problem(403, "Instance administrator access is required.");
     return current;
   }
+  // Featuring publishes directory metadata only. Reading or following still uses federation permissions.
+  featuredSettings() {
+    const raw = this.db.prepare("SELECT value FROM instance_settings WHERE key='featured_channels'").get()?.value;
+    return raw ? JSON.parse(String(raw)) as { enabled: boolean; channels: { id: string; enabled: boolean }[] } : { enabled: false, channels: [] as { id: string; enabled: boolean }[] };
+  }
+  featuredCandidates(user: User) {
+    this.requireAdmin(user);
+    return (this.db.prepare("SELECT c.* FROM channels c WHERE c.remote_actor IS NOT NULL AND c.visibility='public' AND EXISTS (SELECT 1 FROM memberships m WHERE m.channel_id=c.id) ORDER BY c.name").all() as unknown as Channel[])
+      .map(c => ({ id: c.id, name: c.name, description: c.description, mode: c.mode, address: c.remote_actor! }));
+  }
+  setFeaturedChannels(user: User, input: Record<string, unknown>) {
+    this.requireAdmin(user);
+    if (typeof input.enabled !== "boolean" || !Array.isArray(input.channels) || input.channels.length > 50)
+      throw new Problem(400, "Choose whether to show featured channels and up to 50 channels.");
+    const candidates = new Set(this.featuredCandidates(user).map(c => c.id));
+    const seen = new Set<string>();
+    const channels = input.channels.map((item: unknown) => {
+      if (!item || typeof item !== "object" || !("id" in item) || !("enabled" in item) || typeof item.id !== "string" || typeof item.enabled !== "boolean" || seen.has(item.id) || !candidates.has(item.id))
+        throw new Problem(400, "Feature each public external channel once, after someone on this instance follows it.");
+      seen.add(item.id);
+      return { id: item.id, enabled: item.enabled };
+    });
+    const settings = { enabled: input.enabled, channels };
+    this.transaction(() => {
+      this.db.prepare("INSERT INTO instance_settings VALUES('featured_channels',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(settings));
+      this.audit(user.id, "instance.featured_channels", JSON.stringify(settings));
+    });
+    return settings;
+  }
+  featuredChannels(user: User) {
+    this.active(user.id);
+    const settings = this.featuredSettings();
+    if (!settings.enabled) return [];
+    const channels = this.db.prepare("SELECT c.* FROM channels c WHERE c.remote_actor IS NOT NULL AND c.visibility='public' AND EXISTS (SELECT 1 FROM memberships m WHERE m.channel_id=c.id)").all() as unknown as Channel[];
+    return settings.channels.filter(item => item.enabled).flatMap(item => {
+      const c = channels.find(c => c.id === item.id);
+      if (!c || this.rule(c.id, user.id) === "block") return [];
+      const origin = new URL(c.remote_actor!).origin;
+      if (this.db.prepare("SELECT 1 FROM federation_blocks WHERE target=? OR target=?").get(origin, c.remote_actor!)) return [];
+      return [{ id: c.id, name: c.name, description: c.description, mode: c.mode, address: c.remote_actor!, joined: !!this.role(c.id, user.id) && this.readable(user, c) }];
+    });
+  }
   setRegistration(user: User, mode: unknown) {
     this.requireAdmin(user);
     const value = choice(mode, ["open", "invite_only"], "registration mode");

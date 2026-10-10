@@ -34,6 +34,7 @@ import {
   type User,
 } from "./shared.js";
 import { chatChannel, resetChat } from "./chat.js";
+import { styleChoices } from "./appearance.js";
 import { renderSidebar, sidebarFrame } from "./sidebar.js";
 import { mirrorDialog } from "./mirrors.js";
 import {
@@ -364,7 +365,7 @@ const sections: Section[] = [
     about: "How Archipel looks in this browser.",
     icon: "sun",
     async draw(el) {
-      el.innerHTML = card(
+      el.innerHTML = card("Interface style", styleChoices(), "Applied immediately and kept for this browser. Each style supports light and dark colors.") + card(
         "Theme",
         themeSeg(),
         "Kept for this browser only, so each device can have its own. Device follows your system's light or dark setting.",
@@ -452,6 +453,51 @@ const sections: Section[] = [
             await changed();
           });
         });
+    },
+  },
+  {
+    group: "federation",
+    key: "featured",
+    label: "Featured channels",
+    about: "Recommend public channels from other servers in the channel directory.",
+    icon: "globe",
+    admin: true,
+    async draw(el, ctx) {
+      type Candidate = { id: string; name: string; address: string };
+      const settings = await api<{ enabled: boolean; channels: { id: string; enabled: boolean }[]; candidates: Candidate[] }>("/admin/featured-channels");
+      // Drop stale entries when a channel has become private or is no longer followed.
+      settings.channels = settings.channels.filter(item => settings.candidates.some(c => c.id === item.id));
+      el.innerHTML = card("Featured channels", `<label class="check"><input type="checkbox" id="featured-enabled" ${settings.enabled ? "checked" : ""}> Show featured external channels in the directory</label><ul class="plain">${settings.channels.map((item, i) => {
+        const c = settings.candidates.find(c => c.id === item.id)!;
+        return `<li class="member-row"><label class="check grow"><input type="checkbox" data-featured-toggle="${esc(c.id)}" ${item.enabled ? "checked" : ""}> ${esc(c.name)}<span class="muted small">${esc(new URL(c.address).host)}</span></label><button type="button" class="icon-button" data-featured-up="${esc(c.id)}" aria-label="Move ${esc(c.name)} up" ${i === 0 ? "disabled" : ""}>${icon("arrow-up")}</button><button type="button" class="icon-button" data-featured-down="${esc(c.id)}" aria-label="Move ${esc(c.name)} down" ${i === settings.channels.length - 1 ? "disabled" : ""}>${icon("arrow-down")}</button><button type="button" class="secondary small" data-featured-remove="${esc(c.id)}">Remove</button></li>`;
+      }).join("") || '<li class="muted">No featured channels yet.</li>'}</ul><form id="featured-add" class="stack narrow-form"><label>External channel<select name="id" required><option value="">Choose a followed public channel</option>${settings.candidates.filter(c => !settings.channels.some(item => item.id === c.id)).map(c => `<option value="${esc(c.id)}">${esc(c.name)} · ${esc(new URL(c.address).host)}</option>`).join("")}</select></label>${error}<button>Add featured channel</button></form>`, "Only instance administrators manage this list. A channel must be public and already followed by someone here. Featuring it shares its name and description; each member subscribes with their own federation permissions.");
+      const save = async () => {
+        await api("/admin/featured-channels", "PUT", { enabled: settings.enabled, channels: settings.channels });
+        await ctx.refresh();
+      };
+      $<HTMLInputElement>("#featured-enabled", el).addEventListener("change", event => action(async () => {
+        settings.enabled = (event.target as HTMLInputElement).checked;
+        await save();
+      }));
+      for (const box of $$<HTMLInputElement>("[data-featured-toggle]", el)) box.addEventListener("change", () => action(async () => {
+        settings.channels.find(item => item.id === box.dataset.featuredToggle)!.enabled = box.checked;
+        await save();
+      }));
+      onClick(el, "[data-featured-up], [data-featured-down], [data-featured-remove]", async button => {
+        const id = button.dataset.featuredUp || button.dataset.featuredDown || button.dataset.featuredRemove;
+        const i = settings.channels.findIndex(item => item.id === id);
+        if (button.dataset.featuredRemove) settings.channels.splice(i, 1);
+        else {
+          const to = i + (button.dataset.featuredUp ? -1 : 1);
+          if (i < 0 || to < 0 || to >= settings.channels.length) return;
+          [settings.channels[i], settings.channels[to]] = [settings.channels[to]!, settings.channels[i]!];
+        }
+        await save();
+      });
+      onSubmit($("#featured-add", el), async data => {
+        settings.channels.push({ id: String(data.get("id")), enabled: true });
+        await save();
+      });
     },
   },
   {

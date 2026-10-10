@@ -1,4 +1,6 @@
 import "./style.css";
+import "./fusion.css";
+import { applyStyle } from "./appearance.js";
 import "./emoji-scale.js";
 import {
   $,
@@ -29,6 +31,8 @@ import {
   refreshCurrent,
   resetChat,
   showChat,
+  fusionToolbarHtml,
+  updateFusionToolbar,
 } from "./chat.js";
 import { adoptLayout, renderSidebar, toggleSidebar } from "./sidebar.js";
 import { adoptPrefs } from "./prefs.js";
@@ -47,6 +51,12 @@ import { closePicker } from "./picker.js";
 import { showXmppRooms, tickXmppRooms } from "./xmpp-rooms.js";
 
 applyTheme();
+applyStyle();
+document.addEventListener("appearance-change", () => {
+  redrawChat(false, true);
+  renderSidebar();
+  updateFusionToolbar();
+});
 let refreshBusy = false;
 
 // Direct conversations, what is new in each conversation, and how the sidebar is arranged.
@@ -87,7 +97,7 @@ function renderShell() {
         <a class="menu-item" href="#/settings">${icon("settings")}<span class="grow">All settings</span></a></div>
       <div class="menu-section"><div class="menu-label">Theme</div>${themeSeg()}</div>
       <div class="menu-section"><button type="button" class="menu-item" id="sign-out-menu">${icon("logout")}<span class="grow">Sign out</span></button></div>
-    </div></details></div></header><div id="view"></div></div>`;
+    </div></details></div></header>${fusionToolbarHtml()}<div id="view"></div><footer class="fusion-status"><span class="fusion-connection"><span class="status-dot"></span><span id="fusion-connection-label">Connected</span></span><span id="fusion-status-place">${instance}</span><span class="grow">Enter sends, Shift+Enter starts a new line</span></footer></div>`;
   renderAccount();
   $("#mobile-menu").addEventListener("click", toggleSidebar);
   $("#sign-out-menu").addEventListener("click", () => action(hooks.signOut));
@@ -287,6 +297,7 @@ async function route() {
       parts[0] === "c" ? parts[1] : undefined,
       parts[2] === "t" ? parts[3] : undefined,
     );
+  updateFusionToolbar();
 }
 addEventListener("hashchange", () => action(route));
 // A link to the page you're already on reloads it.
@@ -357,6 +368,9 @@ function connection(up: boolean) {
   status.title = up
     ? `Connected to ${state.session.instance}`
     : "Connection interrupted. Retrying…";
+  const label = document.querySelector("#fusion-connection-label");
+  if (label) label.textContent = up ? "Connected" : "Reconnecting…";
+  document.querySelector(".fusion-connection")?.classList.toggle("down", !up);
 }
 // ---- keeping up: the server says when something on screen may have changed, and the page
 // looks again at what the notice names ----

@@ -784,6 +784,16 @@ export function createApp(config: Config, store: Store) {
   app.get("/api/channels", (_req, res) =>
     res.json(store.listChannels(user(res))),
   );
+  app.get("/api/featured-channels", (_req, res) =>
+    res.json(federation.enabled() ? store.featuredChannels(user(res)) : []),
+  );
+  app.get("/api/admin/featured-channels", (_req, res) => {
+    const candidates = store.featuredCandidates(user(res));
+    res.json({ ...store.featuredSettings(), candidates });
+  });
+  app.put("/api/admin/featured-channels", (req, res) =>
+    res.json(store.setFeaturedChannels(user(res), req.body || {})),
+  );
   app.post("/api/channels", (req, res) =>
     res.status(201).json(store.createChannel(user(res), req.body || {})),
   );

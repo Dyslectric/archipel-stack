@@ -51,6 +51,18 @@ async function listen(t: TestContext) {
     origin: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
   };
 }
+test("featured directory settings require an administrator, a session and CSRF", async t => {
+  const f = await application(t);
+  const admin = browser(f.origin), member = browser(f.origin);
+  await admin.login("alice"); await member.login("bob");
+  assert.equal((await fetch(`${f.origin}/api/featured-channels`)).status, 401);
+  assert.equal((await member.request("/api/admin/featured-channels")).status, 403);
+  assert.equal((await member.request("/api/admin/featured-channels", "PUT", { enabled: true, channels: [] })).status, 403);
+  assert.equal((await admin.request("/api/admin/featured-channels", "PUT", { enabled: true, channels: [] }, { "X-CSRF-Token": "invalid" })).status, 403);
+  assert.equal((await admin.request("/api/admin/featured-channels", "PUT", { enabled: true, channels: [] })).status, 200);
+  assert.equal((await admin.request("/api/admin/featured-channels").then(r => r.json())).enabled, true);
+  assert.deepEqual(await member.request("/api/featured-channels").then(r => r.json()), []);
+});
 async function application(t: TestContext, override: Partial<Config> = {}) {
   const { server, origin } = await listen(t);
   const config = {
