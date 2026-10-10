@@ -26,7 +26,7 @@ const pushTimer = setInterval(() => {
 }, 1500);
 pushTimer.unref();
 const server = app.listen(config.port, config.host, () => {
-  console.log(`Archipel is running at ${config.baseUrl}`);
+  console.log(`Archipel Server is running at ${config.baseUrl}`);
   console.log(`Database: ${store.db.dialect === "postgres" ? "PostgreSQL" : "SQLite"}.`);
   console.log(
     config.devAuth

@@ -97,7 +97,7 @@ export async function syncPush() {
 }
 export const testPush = () => api("/push/test", "POST", {});
 
-// A click on a notification, with Archipel already open: the worker asks this tab to go there.
+// A click on a notification, with Archipel Web already open: the worker asks this tab to go there.
 if ("serviceWorker" in navigator)
   navigator.serviceWorker.addEventListener("message", (event) => {
     const url = event.data?.type === "open" ? event.data.url : null;

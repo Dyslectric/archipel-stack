@@ -1,4 +1,4 @@
-// Archipel's service worker: shows the notifications the instance pushes (src/push.ts), and takes
+// Archipel Web's service worker: shows the notifications the instance pushes (src/push.ts), and takes
 // the reader to the conversation when one is clicked. It keeps nothing and answers no requests.
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
@@ -15,10 +15,10 @@ self.addEventListener("push", (event) => {
   }
   event.waitUntil(
     (async () => {
-      // Someone looking at Archipel sees what is new there already.
+      // Someone looking at Archipel Web sees what is new there already.
       if (!notice.test && (await windows()).some((client) => client.focused))
         return;
-      await self.registration.showNotification(notice.title || "Archipel", {
+      await self.registration.showNotification(notice.title || "Archipel Web", {
         body: notice.body || "Something new was said.",
         tag: notice.tag,
         renotify: !!notice.tag,

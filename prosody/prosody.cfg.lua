@@ -11,7 +11,7 @@ modules_enabled = {
   "disco"; "roster"; "saslauth"; "tls"; "limits";
   "smacks"; "private"; "ping"; "version";
 }
--- Independent histories/offline queues would bypass current Archipel policy.
+-- Independent histories/offline queues would bypass current Archipel Server policy.
 modules_disabled = { "register"; "mam"; "offline"; "carbons"; "blocklist" }
 allow_registration = false
 c2s_require_encryption = true

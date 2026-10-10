@@ -1,7 +1,7 @@
 {
-  "name": "Archipel",
+  "name": "Archipel Web",
   "short_name": "Archipel",
-  "description": "Archipel, a federated messenger.",
+  "description": "Archipel Web, a federated messenger.",
   "id": "/",
   "start_url": "/",
   "scope": "/",

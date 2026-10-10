@@ -161,7 +161,7 @@ module:hook("pre-stanza", function(event)
   local origin = event.origin;
   if origin.type == "c2s" and origin.username and not event.stanza._archipel then
     if not bridge.operation(event, "check") then
-      origin:close({ condition = "not-authorized"; text = "Archipel access was revoked or is unavailable." }); return true;
+      origin:close({ condition = "not-authorized"; text = "Archipel Server access was revoked or is unavailable." }); return true;
     end
   end
 end, 1000);
@@ -185,11 +185,11 @@ local runner = async.runner(function()
   local result = bridge.request("/sync", { after = cursor; sessions = sessions; occupants = occupants });
   if not result then
     -- No cached policy is accepted during an adapter outage.
-    for _, session in pairs(active) do session:close({ condition = "internal-server-error"; text = "Archipel policy service is unavailable." }); end
+    for _, session in pairs(active) do session:close({ condition = "internal-server-error"; text = "Archipel Server policy service is unavailable." }); end
     for _, entry in ipairs(occupants) do
       local room = jid.host(entry.jid) ~= module.host and muc.get_room_from_jid(entry.room);
       local occupant = room and room:get_occupant_by_real_jid(entry.jid);
-      if occupant then room:set_role(true, occupant.nick, nil, "Archipel policy service is unavailable"); end
+      if occupant then room:set_role(true, occupant.nick, nil, "Archipel Server policy service is unavailable"); end
     end
     busy = false; return;
   end
@@ -197,7 +197,7 @@ local runner = async.runner(function()
   for _, entry in ipairs(result.kick) do
     local room = muc.get_room_from_jid(entry.room);
     local occupant = room and room:get_occupant_by_real_jid(entry.jid);
-    if occupant then room:set_role(true, occupant.nick, nil, "Archipel channel access revoked"); end
+    if occupant then room:set_role(true, occupant.nick, nil, "Archipel Server channel access revoked"); end
   end
   for _, item in ipairs(result.messages) do
     if jid.host(item.to) == module.host then
@@ -221,5 +221,5 @@ local runner = async.runner(function()
   cursor = result.after;
   assert(cursor_store:set(nil, { after = cursor }));
   busy = false;
-end, { error = function(_, err) busy = false; module:log("error", "Archipel synchronization failed: %s", err); end });
+end, { error = function(_, err) busy = false; module:log("error", "Archipel Server synchronization failed: %s", err); end });
 module:add_timer(1, function() if not busy then busy = true; runner:run(true); end return 1; end);

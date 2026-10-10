@@ -1,9 +1,9 @@
 # Prosody XMPP backend
 
-Archipel now integrates with Prosody 13.0 for standard XMPP streams, TLS,
+Archipel Server now integrates with Prosody 13.0 for standard XMPP streams, TLS,
 authentication, routing, roster/presence, stream management, and MUC presence.
 The integration modules expose local timeline channels and direct messages using
-the existing Archipel archive and permission checks. The browser remains a REST
+the existing Archipel Server archive and permission checks. The browser remains a REST
 client of the same archive; Express also handles OIDC, account approval, application
 settings, richer channel views, and the existing ActivityPub federation.
 
@@ -17,21 +17,21 @@ settings, richer channel views, and the existing ActivityPub federation.
 | Local direct messages | Native clients and browser share history and blocks |
 | XMPP server-to-server direct messages | Certificate-authenticated TLS; instance federation and per-user send/receive grants required |
 | XEP-0045 rooms | Local timeline channels; authorized join, presence, chat, discovery |
-| Occupants from other home servers | Federated public timeline channels; s2s join, bounded join history, live messages, posting, room MAM; moderation in Archipel |
+| Occupants from other home servers | Federated public timeline channels; s2s join, bounded join history, live messages, posting, room MAM; moderation in Archipel Web |
 | Foreign XEP-0045 rooms | Native client participation; browser join/leave, subjects, speaking roles, live messages and bounded join history |
 | XEP-0313 MAM v2, XEP-0059 paging | Personal and room archives; bounded pages, timestamps, direct peer filter, before/after cursors |
 | XEP-0359 stanza IDs | Stable archive IDs; native stanza IDs and origin IDs retained |
 | XEP-0308 corrections | Timeline messages; author and room checks |
 | XEP-0054 vCard photos, XEP-0153 avatar presence | Shared profile pictures; native reads/uploads/removals and federated picture caching |
-| Room configuration, affiliations, kicks, invitations | Managed through Archipel; native management commands rejected |
+| Room configuration, affiliations, kicks, invitations | Managed through Archipel Web; native management commands rejected |
 | Offline messages | Retrieve through MAM after reconnect; no independent Prosody offline queue |
 | Topics, nested threads, attachments, OMEMO in the browser | Not exposed by this profile |
 
 This is a defined XMPP interoperability profile, not a claim that every XEP or
 every client's optional feature is supported. Remote users can exchange direct
-messages with local accounts, Archipel accounts can join foreign rooms, and
+messages with local accounts, Archipel Server accounts can join foreign rooms, and
 accounts on other home servers can join local rooms that opted into federation.
-Local-room nicknames are assigned by Archipel: the account's stable XMPP node
+Local-room nicknames are assigned by Archipel Server: the account's stable XMPP node
 for local accounts and the full bare address (`user@domain`) for occupants of
 other servers. Foreign rooms use a chosen nickname, subject to the hosting
 room's rules.
@@ -40,9 +40,9 @@ A native client finds the local timeline channels its account belongs to in its
 bookmarks (private XML storage, `storage:bookmarks`), marked to join
 automatically, beside any bookmarks the client saved itself. Clients read
 bookmarks when they sign in, so a channel joined in the browser shows up after
-the client reconnects; leaving is done in Archipel, since a bookmark removed in
-the client comes back while the membership lasts. When Archipel refuses a join or
-a message, the error the client shows carries Archipel's own reason — for
+the client reconnects; leaving is done in Archipel Web, since a bookmark removed in
+the client comes back while the membership lasts. When Archipel Server refuses a join or
+a message, the error the client shows carries Archipel Server's own reason — for
 example that the account's role does not allow posting in a federated channel.
 Attachments reach XMPP clients as written, `![name](https://…/media/…)`: the
 address opens the file.
@@ -53,7 +53,7 @@ Use the **+** beside **XMPP rooms** in the conversation sidebar (or **Channels �
 Join an XMPP room**). Enter a bare room address, such as `jdev@muc.xmpp.org`, and
 a nickname. The room appears under **XMPP rooms**, which folds, groups and
 reorders like the channel and direct-message sections; a room that is not
-currently joined shows its state beside its name. Archipel shows the room subject,
+currently joined shows its state beside its name. Archipel Web shows the room subject,
 nickname and role, and displays errors such as nickname conflicts or a required
 invitation. Use **Leave room** to stop participating; saved history stays private
 to your account. A room that drops you because either server restarted, or the
@@ -71,7 +71,7 @@ browser posts.
 Prosody maintains a separate browser resource for each subscription and rejoins
 after a restart. When the room ends a session without removing the member on
 purpose — a shutdown notice, an unreachable or restarting server, a join that goes
-unanswered — Archipel tries again after 5 seconds, doubling the wait up to ten
+unanswered — Archipel Server tries again after 5 seconds, doubling the wait up to ten
 minutes, and gives up after 200 failures in a row. A kick, a ban, loss of
 membership or a refused join (wrong nickname, invitation required) is final until
 the member joins again. Every two minutes each occupant pings its own nickname
@@ -134,7 +134,7 @@ or deleting the channel, retires the occupants made for it.
 
 ## Let other servers join a local room
 
-Two Archipel instances share a room when one hosts it and members of the other
+Two Archipel Server instances share a room when one hosts it and members of the other
 join it through **Channels → Join an XMPP room**, entering
 `channel-name@channels.<XMPP_DOMAIN>` of the hosting instance. Any standard
 XMPP client on another server can join the same way.
@@ -164,7 +164,7 @@ Foreign occupants receive up to 100 messages of join history (25 unless the
 client asks otherwise), live messages, corrections and removal notices, and can
 page the room archive with MAM. They are only sent messages whose local author
 currently holds the sending and posting federation grants; removed messages
-appear as removal notices. Their own posts are committed to the Archipel
+appear as removal notices. Their own posts are committed to the Archipel Server
 archive under the remote identity before any occupant sees them, deduplicated
 by stanza ID within the server-to-server stream, and shown in the browser with
 the full address as handle and an **XMPP** marker. Local members need the
@@ -176,8 +176,8 @@ administration from other servers are rejected. These posts are not relayed to
 ActivityPub subscribers of the same channel.
 
 Occupancy is live presence only: after the hosting Prosody restarts, or during
-an Archipel policy-service outage, foreign occupants are removed. Occupants that
-joined from another Archipel instance's browser come back by themselves once this
+an Archipel Server policy-service outage, foreign occupants are removed. Occupants that
+joined from another Archipel Server instance's browser come back by themselves once this
 instance answers again; native clients rejoin as their own software decides.
 
 ## Configure a deployment
@@ -221,10 +221,10 @@ Upgrade the image and integration together after running the real XMPP checks.
 The service has a separate `prosody-data` volume for roster, presence-related
 settings, stream state, and the projection cursor. Back up that volume alongside
 `archipel-data`, configuration, bridge secret, and certificates. Avoid changing
-`XMPP_DOMAIN`: it is an identity domain, not a cosmetic setting. Archipel refuses
+`XMPP_DOMAIN`: it is an identity domain, not a cosmetic setting. Archipel Server refuses
 to start with a different domain once the integration has been configured.
 
-For a manually configured Archipel process, set `XMPP_DOMAIN` and
+For a manually configured Archipel Server process, set `XMPP_DOMAIN` and
 `XMPP_BRIDGE_SECRET` in its environment, and configure the same secret plus
 `ARCHIPEL_API_URL` in Prosody. The supplied Lua configuration reads those values.
 Mount the supplied modules under `/etc/prosody/archipel-modules`. Optional
@@ -388,7 +388,7 @@ XMPP_SERVER_PORT=5269
 
 Both ports accept integers from 1 to 65535 and must differ. Compose publishes
 the configured ports, and Prosody listens on the same ports inside its container.
-Archipel's **Settings → XMPP clients** displays the configured client port.
+Archipel Web's **Settings → XMPP clients** displays the configured client port.
 Changing a port preserves account addresses, passwords and history.
 
 After changing the client port, update `_xmpp-client._tcp.<XMPP_DOMAIN>` to that
@@ -402,8 +402,8 @@ STARTTLS listeners; changing the port does not enable direct TLS.
 
 Pictures uploaded under **Settings → Profile** are shared with permitted remote
 contacts over XMPP vCard photos. XMPP clients can read, replace or remove their
-own photo using `vcard-temp`; the same picture appears in Archipel. Native vCard
-writes update the photo only; other vCard fields remain managed in Archipel.
+own photo using `vcard-temp`; the same picture appears in Archipel Web. Native vCard
+writes update the photo only; other vCard fields remain managed in Archipel Web.
 Available presence advertises the authoritative SHA-1 avatar hash, including an
 empty photo element after removal. Foreign photos are fetched through Prosody
 when a conversation opens, a message arrives or a changed presence hash is seen.
@@ -442,18 +442,18 @@ Prosody to assert authenticated c2s/s2s sender identities, so protect both the
 service network and secret. Browser endpoints retain OIDC sessions, Origin checks,
 CSRF, and admission checks.
 The supplied Traefik router excludes `/internal/`. Configure nginx, Caddy, or any
-other public proxy to reject that prefix rather than forwarding it to Archipel.
+other public proxy to reject that prefix rather than forwarding it to Archipel Server.
 
-Archipel is authoritative for messages and membership. Prosody commits incoming
-messages through Archipel before distribution. Browser and native writes create
+Archipel Server is authoritative for messages and membership. Prosody commits incoming
+messages through Archipel Server before distribution. Browser and native writes create
 transactional outbox references; delivery fetches current content and policy.
 Membership removal evicts occupants, channel blocks prevent posting/history,
 and personal blocks redact room messages and reject direct messages. Built-in MUC
 history, independent MAM archives, offline queues, carbons, and native room
 administration are disabled to prevent alternative writes or reads bypassing
 these controls. Join history for occupants of other servers is produced by
-Archipel under the same checks, not by Prosody. A room join may create membership in an open channel; closing a
-client's room window only leaves its live presence, retaining Archipel membership.
+Archipel Server under the same checks, not by Prosody. A room join may create membership in an open channel; closing a
+client's room window only leaves its live presence, retaining Archipel Server membership.
 
 Native remote contacts use `xmpp:user@domain` identity keys. An ActivityPub actor
 with a matching name remains a separate identity. Enter `xmpp:user@domain` in the

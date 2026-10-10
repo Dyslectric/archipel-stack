@@ -27,7 +27,7 @@ try {
   source.migrate();
   target = new PostgresDatabase(to);
   if (target.version())
-    fail("The PostgreSQL database already holds an Archipel instance. Migrate into an empty database.");
+    fail("The PostgreSQL database already holds an Archipel Server instance. Migrate into an empty database.");
   const copied = new Map<string, number>();
   copyToPostgres(source, target, (table, rows) => {
     copied.set(table, rows);

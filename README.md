@@ -1,7 +1,19 @@
-# Archipel
+# Archipel Stack
 
 A federated messenger with server-hosted identities, channels addressed as
 `#channel@instance.domain`, and timeline, topical, and nested-thread conversations.
+
+This repository holds the whole stack. Its parts have their own names and can be
+described, used and replaced separately:
+
+| Name | What it is | Where |
+| --- | --- | --- |
+| FWDXP | The Federated Web Discussion Exchange Protocol, spoken between servers | [docs/fwdxp.md](docs/fwdxp.md) |
+| Archipel Server | Identities, channels, policy, the archive, and FWDXP and XMPP federation | `src/` |
+| Archipel Web | The browser application | `client/` |
+| Archipel Stack | Archipel Server, Archipel Web and the Prosody XMPP backend, as deployed together | this repository |
+
+"Archipel" on its own is not the name of any of these.
 
 The original product brief lives in [ARCHIPEL.md](ARCHIPEL.md). The
 [architecture proposal](docs/architecture.md) and [milestones](docs/milestones.md)
@@ -65,7 +77,7 @@ usernames match. New instances start without fabricated channels or conversation
 - OIDC authorization code login with PKCE, state, nonce, signed token validation,
   and subject-matched UserInfo. Accounts use the exact issuer and subject.
 - Optional verified social disclosure and a responsive browser interface.
-- Opt-in Archipel federation: signed channel subscriptions, messages, edits,
+- Opt-in federation between instances over FWDXP: signed channel subscriptions, messages, edits,
   removals, and direct messages, with durable retries and verified author provenance.
 - Role-based control of federated sending, receiving, subscriptions, and channel
   posting, plus remote instance/actor blocks.
@@ -89,7 +101,7 @@ PostgreSQL, use `pg_dump`.
 For XMPP, supply an account domain during setup. Setup can obtain certificates
 for it and `channels.<domain>` through ACME or an existing Traefik resolver, and
 prints the DNS records to publish. Setup includes the Prosody service; users
-connect through **Settings → XMPP clients**. Archipel retains its OIDC, policy,
+connect through **Settings → XMPP clients**. Archipel Server retains its OIDC, policy,
 archive and ActivityPub services while Prosody handles XMPP streams and routing.
 
 ## Connect FedIdP or another OIDC provider
@@ -104,7 +116,7 @@ archive and ActivityPub services while Prosody handles XMPP streams and routing.
 
 No provider configuration is changed automatically. FedIdP's `openid profile`
 claims supply its permanent username and consent-selected `verified_socials`.
-Archipel also asks whether to show those socials to other members; the default
+Archipel Server also asks whether to show those socials to other members; the default
 is off. Claims omitted on a subsequent login are removed from the local profile.
 
 To appoint a production administrator, sign in once, run
@@ -198,7 +210,7 @@ access** to **Invite only**. New users still authenticate with FedIdP; their
 accounts become pending and they see a waiting page without access to channels,
 member lists, or messages. The **Membership applications** queue shows their
 provider issuer/subject and the `verified_socials` they consented to disclose to
-Archipel in FedIdP. The sign-in page explains this administrator review. Applicants
+Archipel Server in FedIdP. The sign-in page explains this administrator review. Applicants
 can change disclosure in FedIdP and sign in again to refresh those claims. No
 socials are required to apply; the queue explicitly shows when none were shared.
 These claims are provider-verified accounts, not proof of a real-world identity.
@@ -263,8 +275,9 @@ Users open **Profile → Federated conversations** to subscribe to
 `#channel@instance.domain` or send a direct message to `user@instance.domain`.
 Invited channels wait for a decision from their home owner/moderators before
 sharing history. Controls are enforced by the server and checked again before
-queued delivery. See [federation operations and protocol](docs/federation.md)
-for the permission matrix, deployment requirements, and current limits.
+queued delivery. See [federation operations](docs/federation.md) for the
+permission matrix, deployment requirements, and current limits, and
+[FWDXP](docs/fwdxp.md) for the protocol.
 
 ## Checks
 
@@ -288,6 +301,6 @@ with Python only; Compose integration checks also run when Compose is installed.
 
 ## Next
 
-The current federation profile connects Archipel instances. Lemmy/PieFed adapters,
+FWDXP, the current federation profile, connects Archipel Server instances. Lemmy/PieFed adapters,
 mirrors/rehoming, service-worker push, attachments, and Jitsi calls remain future
 work. See [milestones](docs/milestones.md).

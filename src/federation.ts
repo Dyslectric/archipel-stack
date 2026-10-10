@@ -31,19 +31,21 @@ const context = [
   "https://www.w3.org/ns/activitystreams",
   "https://w3id.org/security/v1",
   {
-    archipel: "https://archipel.invalid/ns#",
-    archipelVersion: "archipel:version",
-    channel: "archipel:channel",
-    mode: "archipel:mode",
-    admission: "archipel:admission",
-    visibility: "archipel:visibility",
-    showMembers: "archipel:showMembers",
-    hideHandles: "archipel:hideHandles",
-    optionalTitles: "archipel:optionalTitles",
-    topic: "archipel:topic",
-    topics: "archipel:topics",
-    proof: "archipel:proof",
-    emoji: "archipel:emoji",
+    fwdxp: "https://fwdxp.invalid/ns#",
+    fwdxpVersion: "fwdxp:version",
+    // The protocol's name before it was FWDXP, for instances that still ask for it.
+    archipelVersion: "fwdxp:version",
+    channel: "fwdxp:channel",
+    mode: "fwdxp:mode",
+    admission: "fwdxp:admission",
+    visibility: "fwdxp:visibility",
+    showMembers: "fwdxp:showMembers",
+    hideHandles: "fwdxp:hideHandles",
+    optionalTitles: "fwdxp:optionalTitles",
+    topic: "fwdxp:topic",
+    topics: "fwdxp:topics",
+    proof: "fwdxp:proof",
+    emoji: "fwdxp:emoji",
   },
 ];
 const flags = [
@@ -246,6 +248,7 @@ export class Federation {
     return {
       "@context": context,
       ...data,
+      fwdxpVersion: 1,
       archipelVersion: 1,
       inbox: `${this.config.baseUrl}/federation/inbox`,
       outbox: `${data.id}/outbox`,
@@ -276,7 +279,7 @@ export class Federation {
     if (
       actor.id !== id ||
       !["Person", "Group"].includes(actor.type) ||
-      actor.archipelVersion !== 1 ||
+      (actor.fwdxpVersion ?? actor.archipelVersion) !== 1 ||
       typeof actor.inbox !== "string" ||
       actor.publicKey?.owner !== id ||
       actor.publicKey?.id !== `${id}#main-key` ||
@@ -285,7 +288,7 @@ export class Federation {
     )
       throw new Problem(
         400,
-        "This actor does not support the Archipel federation profile.",
+        "This actor does not support FWDXP federation.",
       );
     if (this.allowed(actor.inbox).origin !== url.origin)
       throw new Problem(400, "An actor inbox must be on its home instance.");
@@ -722,7 +725,7 @@ export class Federation {
       !["open", "allowlist"].includes(actor.admission) ||
       !["public", "members"].includes(actor.visibility)
     )
-      throw new Problem(400, "Choose an Archipel channel actor.");
+      throw new Problem(400, "Choose an FWDXP channel actor.");
     this.require(user, "federation_subscribe");
     this.allowed(actor.id);
     return this.store.transaction(() => {

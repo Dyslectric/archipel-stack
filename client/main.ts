@@ -535,6 +535,6 @@ setInterval(() => {
   if (!document.hidden) refreshTimes();
 }, 30000);
 void boot().catch((error) => {
-  app.innerHTML = `<main class="page"><div class="card narrow"><h1>Could not reach Archipel</h1><p class="muted">${esc(error.message)}</p><button type="button" id="retry">Try again</button></div></main>`;
+  app.innerHTML = `<main class="page"><div class="card narrow"><h1>Could not reach the server</h1><p class="muted">${esc(error.message)}</p><button type="button" id="retry">Try again</button></div></main>`;
   $("#retry").addEventListener("click", () => location.reload());
 });

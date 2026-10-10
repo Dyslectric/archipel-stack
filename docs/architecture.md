@@ -1,7 +1,7 @@
 # Architecture proposal
 
 Status: evolving design, 2026-10-07. The implementation is described in
-[README.md](../README.md). Archipel-to-Archipel federation is implemented;
+[README.md](../README.md). FWDXP federation between Archipel Server instances is implemented;
 its current boundaries are documented in [federation.md](federation.md).
 The requirements come from [ARCHIPEL.md](../ARCHIPEL.md); choices marked
 "proposed" are defaults for the first implementation.
@@ -19,14 +19,14 @@ an ActivityPub object ID.
 
 OIDC accounts are keyed by the exact `(issuer, subject)` pair, never a username,
 email address, or verified social handle. An authenticated OIDC identity is
-bound to an Archipel user and its actor. Account linking and relocation need
+bound to an Archipel Server user and its actor. Account linking and relocation need
 explicit flows; a matching handle cannot grant someone another user's history
 or permissions.
 
 Local [FedIdP](../../FedIdP/README.md) already supplies a permanent
 `preferred_username` and consent-selected `verified_socials`. Request `openid
 profile` and treat the selected socials as optional profile data. Login must
-work when none are disclosed. Archipel needs its own disclosure choice before
+work when none are disclosed. Archipel Server needs its own disclosure choice before
 publishing a received social claim to other users or federating it. Refreshing
 profile data must remove claims no longer supplied; that cannot retract copies
 already delivered to peers.
@@ -106,7 +106,7 @@ ActivityPub is the server-to-server transport. Implemented mapping: users are
 `Person` actors, channels are `Group` actors, and ordinary messages/replies are
 `Note` objects. Use `Create`, `Update`, `Delete`, `Follow`, `Accept`, `Reject`,
 and `Undo` where their semantics apply. Presentation modes and topics need an
-Archipel profile; they are not standardized just by selecting these types.
+FWDXP profile; they are not standardized just by selecting these types.
 The first profile uses signed HTTP requests, author-signed embedded notes,
 home-channel distribution, and approval-controlled history. All federation
 permissions default to disabled, with separate send/receive/subscribe/post
@@ -135,7 +135,7 @@ against a local fixture before claiming compatibility.
 
 PieFed needs its own adapter and fixture. Its community behavior and private
 messaging behavior must be verified separately. Neither Lemmy nor PieFed
-compatibility should imply support for Archipel's restricted channels or mirrors.
+compatibility should imply support for Archipel Server's restricted channels or mirrors.
 
 ## Mirrors and rehoming
 
@@ -157,7 +157,7 @@ must accept the destination instance before implementing restricted replication.
 During an origin outage, users can read the mirrored history. Proposed: new
 messages on a mirror are authored there, and its moderation authority is local.
 Reconciliation, cross-mirror delivery, conflicting bans, and ordering need a
-separate Archipel protocol. Do not advertise seamless writable failover until
+separate FWDXP extension. Do not advertise seamless writable failover until
 two-instance outage tests establish those semantics.
 
 Rehoming must define who may transfer ownership, how peers verify that transfer,
@@ -178,7 +178,7 @@ number, so every way a message arrives (local, federated, bridged) notifies.
 [ConsortStack](https://github.com/ConsortChat/ConsortStack) checks membership on
 the server and issues Jitsi JWTs scoped to a conversation's derived room.
 Its [local token implementation](../../ConsortStack/zulip-server-patch/files/jitsi_token.py)
-is the integration reference. Archipel must apply its own channel and instance
+is the integration reference. Archipel Server must apply its own channel and instance
 policy before issuing a short-lived token for one room and tenant, using its
 own stable actor ID for user context. Token expiry restricts future admission;
 removing someone from an active call needs a separate enforcement mechanism.
@@ -190,8 +190,8 @@ worker, a relational database, and a browser client. Keep identity, channels,
 moderation, federation, push, and calls as modules with explicit service boundaries.
 
 Implemented: Prosody hosts XMPP streams, authentication, routing and MUC presence,
-while Archipel retains its browser frontend, policy, authoritative archive, and
-ActivityPub support. The supported profile is documented in [xmpp.md](xmpp.md).
+while Archipel Server retains policy, the authoritative archive, and ActivityPub
+support, and Archipel Web remains the browser frontend. The supported profile is documented in [xmpp.md](xmpp.md).
 The eventual distribution
 must be a single executable with its required application runtimes included.
 Proposed: that executable supervises a bundled Prosody child process; users do

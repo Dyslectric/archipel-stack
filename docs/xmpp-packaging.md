@@ -6,13 +6,13 @@ below are proposed and must be validated through prototypes.
 
 ## Product requirements
 
-Archipel should host XMPP accounts and conversations using Prosody and provide
+Archipel Stack should host XMPP accounts and conversations using Prosody and provide
 the browser frontend. Ordinary XMPP clients should be able to connect, and users
 on other XMPP servers should be able to participate in supported conversations.
 ActivityPub support remains part of the application.
 
 The eventual complete distribution should be one executable per supported
-operating system and architecture, including the required Archipel and Prosody
+operating system and architecture, including the required Archipel Server and Prosody
 runtimes and browser assets. It must not require a separately installed Node,
 Lua, Prosody, Docker, package manager, or runtime dependency download at startup.
 Configuration, databases, credentials, and certificates remain external persistent
@@ -21,10 +21,10 @@ network access, and configured authentication.
 
 ## Proposed runtime and distribution
 
-Use the Archipel executable as the entry point and supervisor. It serves the
+Use the Archipel Server executable as the entry point and supervisor. It serves the
 browser interface and application API and starts bundled Prosody in the foreground.
 Prosody handles XMPP client sessions, authentication negotiation, routing, and
-server-to-server federation. Archipel modules integrate accounts, policy, and
+server-to-server federation. Archipel Server modules integrate accounts, policy, and
 conversation data. This is one distributed executable with multiple internal
 processes; a single process is not an established requirement.
 
@@ -53,7 +53,7 @@ build-platform dependencies as well as the Lua scripts.
 The supervisor needs explicit readiness checks, useful combined diagnostics,
 bounded restart behavior, and coordinated shutdown without orphan processes.
 Unavailable policy integration must reject affected XMPP operations rather than
-bypassing Archipel's permissions. Child-process management must be implemented
+bypassing Archipel Server's permissions. Child-process management must be implemented
 and tested for each advertised operating system.
 
 Standalone platform targets have not been selected. A Linux packaging prototype
@@ -63,7 +63,7 @@ a native Windows executable, or promise Windows support before testing it.
 
 ## Identity, policy, and storage boundaries
 
-Retain Archipel's immutable user IDs and exact OIDC `(issuer, subject)` bindings.
+Retain Archipel Server's immutable user IDs and exact OIDC `(issuer, subject)` bindings.
 Bind each local XMPP bare JID explicitly to a local user; matching usernames,
 email addresses, or social handles must not link accounts automatically. Remote
 XMPP identities must retain their protocol and authenticated domain provenance.
@@ -76,11 +76,11 @@ credentials or supported token flows. Do not treat an OIDC ID token as a generic
 XMPP credential. Pending admission, suspension, and credential revocation must
 apply to existing XMPP sessions as well as new logins.
 
-Archipel must remain authoritative for its instance admission, channel policy,
+Archipel Server must remain authoritative for its instance admission, channel policy,
 delegated permissions, and federation grants. Before choosing a storage strategy,
 prove how Prosody enforces those decisions for client writes, incoming remote
 messages, room changes, and archive reads. Room administration through an ordinary
-XMPP client must not bypass Archipel's owner protections or blocks.
+XMPP client must not bypass Archipel Server's owner protections or blocks.
 
 Evaluate Prosody modules with its built-in MUC service first; an external component
 is another integration option. Prosody [components](https://prosody.im/doc/components)
@@ -89,8 +89,8 @@ accounts or accept client logins. A channel component alone is therefore not a
 complete account-hosting integration.
 
 Choose one authoritative write path per entity before exposing it over both
-interfaces. If Prosody owns a room's message archive, the Archipel view should be
-a defined projection with recovery behavior. If Archipel owns its messages,
+interfaces. If Prosody owns a room's message archive, the Archipel Server view should be
+a defined projection with recovery behavior. If Archipel Server owns its messages,
 Prosody integration must enforce that write path and expose authorized history.
 Do not create independently writable message histories or membership lists and
 rely on eventual synchronization to repair permission violations. Prosody may
@@ -107,9 +107,9 @@ Preserve stable message identifiers for replay, editing, and duplicate detection
 Test ordinary client access and real federation with a separate XMPP server.
 
 Use [reply references](https://xmpp.org/extensions/xep-0461.html) where supported
-for Archipel's nested display. Topics, titled roots, custom emoji, edits, and
+for Archipel Web's nested display. Topics, titled roots, custom emoji, edits, and
 removals need explicit supported mappings and fallbacks; basic XMPP compatibility
-does not guarantee that every client displays Archipel's full interface.
+does not guarantee that every client displays Archipel Web's full interface.
 
 Keep XMPP support and cross-protocol forwarding separately configurable. Any
 ActivityPub/XMPP bridge must preserve gateway attribution, stable ID mappings,

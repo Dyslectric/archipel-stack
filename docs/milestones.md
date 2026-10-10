@@ -1,6 +1,6 @@
 # Implementation milestones
 
-Status: the single-instance build and initial Archipel federation are implemented. [ARCHIPEL.md](../ARCHIPEL.md) remains the product
+Status: the single-instance build and initial FWDXP federation are implemented. [ARCHIPEL.md](../ARCHIPEL.md) remains the product
 brief; [architecture.md](architecture.md) records proposed technical semantics.
 Each milestone records its implementation scope and acceptance criteria.
 
@@ -15,7 +15,7 @@ Select the stack and add the application scaffold, dependency lockfile,
 configuration example, migrations, local run instructions, and checks.
 
 - Authenticate using a configured OIDC issuer, including FedIdP.
-- Bind `(issuer, subject)` to a stable Archipel identity and actor URL.
+- Bind `(issuer, subject)` to a stable Archipel Server identity and actor URL.
 - Let a user create `#channel@instance`, join an open channel, and read/post
   persistent messages from a browser timeline.
 - Support members-only visibility, identity allowlists, blocks, and delegated
@@ -33,9 +33,9 @@ member cannot read restricted history or post. A moderator cannot promote
 themselves to owner. OIDC failure paths do not create sessions, and login with
 no disclosed socials succeeds.
 
-## 2. Two Archipel instances
+## 2. Two Archipel Server instances
 
-Implemented with an Archipel ActivityStreams profile, signed HTTP requests,
+Implemented as FWDXP, an ActivityStreams profile, with signed HTTP requests,
 author proofs, database-backed delivery, restricted-channel follower approval,
 direct messaging, and four separately controlled user permissions. Tests use
 real HTTP between two and three instances, including restart recovery and
@@ -70,7 +70,7 @@ Build each adapter against real local fixtures. Start with public threaded
 channels, community follows, titled posts, and comment trees. Record supported
 activities and versions in a compatibility document.
 
-Acceptance: a fixture and Archipel exchange a post and nested reply in both
+Acceptance: a fixture and Archipel Server exchange a post and nested reply in both
 directions. Edits and deletes propagate with correct authority checks. Unsupported
 channel modes and visibility are handled explicitly rather than published with
 incorrect semantics. Record moderation differences for each peer.
@@ -107,7 +107,7 @@ token expiration.
 
 Implemented first profile: Prosody client streams, explicit account bindings,
 revocable app passwords, local timeline MUC rooms, shared direct messages,
-authorized MAM archives, and TLS XMPP direct-message federation. Archipel retains
+authorized MAM archives, and TLS XMPP direct-message federation. Archipel Server retains
 identity, admission, membership, and archive authority. See [XMPP operations and
 supported profile](xmpp.md). Remote room participation and richer channel
 mappings remain future work.
@@ -118,7 +118,7 @@ prototype. Rich conversation mappings and cross-protocol bridging follow basic
 interoperability and have explicit supported semantics.
 
 Acceptance: an ordinary XMPP client authenticates and exchanges messages with
-the Archipel browser; a user on a separate XMPP server participates in a supported
+Archipel Web; a user on a separate XMPP server participates in a supported
 room. Admission, suspension, bans, owner protections, and history permissions
 hold across interfaces, including existing sessions after revocation. Replay
 does not duplicate messages or change their provenance.

@@ -70,7 +70,7 @@ To use a PostgreSQL server you already run, leave `compose.postgres.yaml` out an
 set `DATABASE_URL=postgres://user:password@host:5432/database` for the
 application (the password can instead be given as `PGPASSWORD`; add
 `?sslmode=require` for TLS). The database must be empty and its user able to
-create tables and the `citext` extension, which Archipel uses for names that
+create tables and the `citext` extension, which Archipel Server uses for names that
 match whatever their case. When `DATABASE_URL` is set, `DATABASE_PATH` is ignored.
 
 ### Moving an instance from SQLite
@@ -101,7 +101,7 @@ of the one database is a complete backup:
 docker compose exec postgres pg_dump -U archipel -Fc archipel > archipel.dump
 ```
 
-Archipel holds one connection and runs one statement at a time on it, as it does
+Archipel Server holds one connection and runs one statement at a time on it, as it does
 with SQLite, so a small PostgreSQL is enough. Run a single application process
 per database.
 
@@ -113,7 +113,7 @@ Other proxies must not buffer or compress that response; nginx needs
 `proxy_buffering off` for it (the response also asks for this with
 `X-Accel-Buffering: no`). A comment line every 25 seconds keeps idle timeouts,
 including Cloudflare's, from closing a quiet stream. Without HTTP/2 a browser
-allows only six connections to one host; Archipel keeps a stream only for tabs
+allows only six connections to one host; Archipel Server keeps a stream only for tabs
 that are in view, so many open tabs do not use them up.
 
 ## External proxy network and trusted proxy
@@ -128,7 +128,7 @@ For a Traefik deployment, setup asks for:
 - An optional existing certificate resolver. Leave it empty when Traefik already
   supplies certificates by another means.
 
-The proxy and Archipel must share that network. Check its actual name and proxy
+The proxy and Archipel Server must share that network. Check its actual name and proxy
 address on the Docker host:
 
 ```sh
@@ -170,7 +170,7 @@ Setup selects the Compose overlays using `COMPOSE_FILE` in `.env`:
 Compose does not create an external network. It must exist before startup, as
 described in [Docker's network documentation](https://docs.docker.com/reference/compose-file/networks/#external).
 For a newly provisioned proxy network, create it deliberately and attach your
-proxy to it before starting Archipel.
+proxy to it before starting Archipel Server.
 
 Validate and start from the project directory:
 
@@ -243,7 +243,7 @@ access** to change the policy. Existing users retain their membership.
 
 In invite-only mode new FedIdP identities enter an administrator review queue.
 The queue includes only verified socials the provider actually disclosed. Make
-sure applicants can select disclosure for the Archipel OIDC client in FedIdP.
+sure applicants can select disclosure for the Archipel Server OIDC client in FedIdP.
 They can sign in with no socials and wait for a decision. Administrators named in
 `ADMIN_SUBJECTS` are automatically approved; if needed, let your administrator
 sign in pending, identify their subject with the identities command above, add
@@ -286,7 +286,7 @@ container service is needed. Preserve `BASE_URL` and the database, including its
 private signing key, to retain actor identity and queued delivery.
 
 Your proxy must route `/.well-known/webfinger`, `/actors/*`, and `/federation/*`
-to Archipel and preserve the public Host, Date, Digest, and Signature headers and
+to Archipel Server and preserve the public Host, Date, Digest, and Signature headers and
 request body. Production peers require public HTTPS endpoints. Outbound requests
 to private/reserved addresses are rejected; loopback HTTP is restricted to local
 development. See [federation.md](federation.md) for policy and transport details.

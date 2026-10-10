@@ -68,7 +68,7 @@ export function federatedWindow() {
   const allowed = s.federation_enabled && s.user?.federation_subscribe && s.user?.federation_receive;
   const dialog = openWindow("Join a federated channel", allowed
     ? `<div class="field-grid"><label for="join-address">Address</label><input id="join-address" name="address" required placeholder="#general@chat.example.org or an actor URL" autocomplete="off"></div>
-      <p class="muted">A channel hosted on another Archipel instance. The subscription is pending until its home instance accepts it.</p>`
+      <p class="muted">A channel hosted on another instance. The subscription is pending until its home instance accepts it.</p>`
     : `<p>${s.federation_enabled ? "Your role does not allow subscribing to and receiving remote channels." : "Federation is disabled on this instance."}</p>`,
     `<a href="#/settings/federation/remote" data-close-window>Your subscriptions</a><span class="grow"></span>${allowed ? `${cancel}<button>Subscribe</button>` : close}`, "narrow");
   onSubmit($("form", dialog), async (data) => {
@@ -83,7 +83,7 @@ export async function xmppWindow() {
   const dialog = openWindow("Join an XMPP room", allowed
     ? `<div class="field-grid"><label for="join-room">Room</label><input id="join-room" name="room" required maxlength="512" placeholder="jdev@muc.xmpp.org" autocomplete="off">
       <label for="join-nick">Nickname</label><input id="join-nick" name="nick" required maxlength="100" value="${esc(me.username)}" autocomplete="off"></div>
-      <p class="muted">You join as ${esc(connection.jid)}. Your nickname is displayed in the room. A channel on another Archipel instance is <code>channel-name@channels.&lt;its XMPP domain&gt;</code>.</p>`
+      <p class="muted">You join as ${esc(connection.jid)}. Your nickname is displayed in the room. A channel on another Archipel Server instance is <code>channel-name@channels.&lt;its XMPP domain&gt;</code>.</p>`
     : `<p>${connection.enabled ? "Your role does not allow joining XMPP rooms on other servers." : "XMPP is not configured on this instance. Ask your administrator to enable it."}</p>`,
     `<a href="#/xmpp" data-close-window>Your rooms</a><span class="grow"></span>${allowed ? `${cancel}<button>Join room</button>` : close}`, "narrow");
   onSubmit($("form", dialog), async (data) => {

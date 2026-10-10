@@ -14,7 +14,7 @@ import { peerRequest, peerUrl } from "./federation-net.js";
 import { hash, Problem, text, type Message, type Store, type User } from "./store.js";
 
 // Web Push: browsers that asked for notifications are told about new messages, even with no
-// Archipel tab open. A notification names the conversation and who wrote, never what was said.
+// Archipel Web tab open. A notification names the conversation and who wrote, never what was said.
 export interface Notice {
   tag: string;
   title: string;
@@ -172,7 +172,7 @@ export class Push {
     if (
       !(await this.send(mine, {
         tag: "test",
-        title: "Archipel",
+        title: "Archipel Web",
         body: "Notifications are working on this device.",
         url: "/#/settings/personal/notifications",
         test: true,

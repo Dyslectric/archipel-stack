@@ -484,7 +484,7 @@ export function copyToPostgres(
   progress?: (table: string, rows: number) => void,
 ) {
   if (to.version())
-    throw new Error("The PostgreSQL database already holds an Archipel instance.");
+    throw new Error("The PostgreSQL database already holds an Archipel Server instance.");
   const schema = from.raw
       .prepare(
         "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY rowid",

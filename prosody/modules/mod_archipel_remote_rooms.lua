@@ -38,7 +38,7 @@ end
 local function unavailable(entry)
   module:send(st.presence({ from = entry.from; to = entry.room .. "/" .. entry.nick; type = "unavailable" }));
 end
--- The room no longer holds this occupant although nobody left: Archipel schedules another join.
+-- The room no longer holds this occupant although nobody left: Archipel Server schedules another join.
 local function dropped(entry, stanza)
   receive(entry, stanza, { kind = "state"; state = "error"; condition = "dropped";
     error = "The room lost this session. Joining again." });
@@ -191,7 +191,7 @@ local runner = async.runner(function()
   for token, entry in pairs(occupants) do
     if not desired[token] then unavailable(entry); occupants[token] = nil;
     elseif not entry.joined and os.time() - entry.started > 30 then
-      receive(entry, st.presence({ from = entry.room .. "/" .. entry.nick }), { kind = "state"; state = "error"; condition = "remote-server-timeout"; error = "The room did not answer the join request. Check the address (Archipel channels are name@channels.<domain>), then try joining again." });
+      receive(entry, st.presence({ from = entry.room .. "/" .. entry.nick }), { kind = "state"; state = "error"; condition = "remote-server-timeout"; error = "The room did not answer the join request. Check the address (Archipel Server channels are name@channels.<domain>), then try joining again." });
       unavailable(entry); occupants[token] = nil;
       desired[token] = nil;
     end

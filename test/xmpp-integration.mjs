@@ -105,7 +105,7 @@ try {
   assert.equal(store.role(room.id, bob.id), "member");
   const selfPresence = await until(() => desktop.received.find(s => s.is("presence") && s.attrs.from === `${roomJid}/alice`), "assigned nick presence");
   assert.ok(selfPresence.getChild("x", "http://jabber.org/protocol/muc#user").getChildren("status").some(status => status.attrs.code === "210"), selfPresence.toString());
-  console.log("PASS MUC join creates authorized Archipel membership");
+  console.log("PASS MUC join creates authorized Archipel Server membership");
   const discovery = await phone.native.iqCaller.request(xml("iq", { type: "get", to: "channels.chat.test" }, xml("query", { xmlns: "http://jabber.org/protocol/disco#items" })));
   assert.equal(discovery.getChild("query").getChild("item").attrs.jid, roomJid);
   await desktop.native.send(xml("message", { to: roomJid, type: "groupchat", id: "native-message" }, xml("body", {}, "Hello from native XMPP")));
@@ -128,7 +128,7 @@ try {
   const directMessage = await until(() => phone.received.find(s => s.getChildText("body") === "A native direct message"), "native DM delivery");
   assert.equal(directMessage.attrs.id, "native-dm");
   assert.equal(store.directHistory(bob, `${store.baseUrl}/actors/users/${alice.id}`).messages[0].body, "A native direct message");
-  console.log("PASS corrections and direct messages use Archipel archive");
+  console.log("PASS corrections and direct messages use Archipel Server archive");
   const archive = await phone.native.iqCaller.request(xml("iq", { type: "set", to: roomJid }, xml("query", { xmlns: "urn:xmpp:mam:2", queryid: "history" }, xml("set", { xmlns: "http://jabber.org/protocol/rsm" }, xml("max", {}, "1"), xml("before")))));
   assert.equal(archive.getChild("fin", "urn:xmpp:mam:2").getChild("set").getChildText("count"), "2");
   const archived = phone.received.find(s => s.getChild("result", "urn:xmpp:mam:2")?.attrs.queryid === "history");
@@ -145,7 +145,7 @@ try {
   assert.equal(archivedDirect.attrs.id, directMessage.getChild("stanza-id", "urn:xmpp:sid:0").attrs.id);
   console.log("PASS personal XEP-0313 archive");
 
-  // Ordinary Prosody peer: no Archipel modules, shared API or application archive.
+  // Ordinary Prosody peer: no Archipel Server modules, shared API or application archive.
   const localIp = Object.values(JSON.parse(await docker("inspect", name))[0].NetworkSettings.Networks)[0].IPAddress;
   await docker("cp", `${name}:/tmp/test-certs/chat.test.key`, join(temporary, "remote.test.key"));
   writeFileSync(join(temporary, "remote.test.crt"), readFileSync(join(temporary, "ca.crt")));

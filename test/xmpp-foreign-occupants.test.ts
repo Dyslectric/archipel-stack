@@ -181,7 +181,7 @@ test("policy changes evict foreign occupants instead of treating them as session
   const f = fixture();
   const kicked = () => f.sync().kick;
   const evicted = [{ room: f.room, jid: stream }];
-  assert.deepEqual(kicked(), evicted, "An occupant Archipel never admitted is evicted");
+  assert.deepEqual(kicked(), evicted, "An occupant Archipel Server never admitted is evicted");
   f.xmpp.operation(f.from("join"));
   const id = f.remote()!.id;
   assert.deepEqual(kicked(), []);

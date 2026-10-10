@@ -1,10 +1,11 @@
-# Archipel federation
+# Federation in Archipel Server
 
-This is the initial Archipel-to-Archipel federation profile (`archipelVersion: 1`).
-It implements ActivityStreams actors and server-to-server activities with Archipel
-extensions for channel modes, topics, emoji, and origin proofs. Lemmy, PieFed,
-generic ActivityPub clients, federated mirrors, and writable failover are not
-supported yet. Local mirrors are described at the end of this document.
+Archipel Server federates with other servers over [FWDXP](fwdxp.md) version 1.
+That document describes what is exchanged; this one describes how an instance is
+set up for it, who is allowed to use it, and how Archipel Server paces and limits
+it. The settings named here are those of Archipel Web. Lemmy, PieFed, generic
+ActivityPub clients, federated mirrors, and writable failover are not supported
+yet. Local mirrors are described at the end of this document.
 
 ## Enable and grant access
 
@@ -51,57 +52,34 @@ events missed while disabled. Turning a home channel off withdraws remote
 admission; existing followers need approval again after it is re-enabled.
 Policy changes cannot erase copies that a peer already received.
 
-## Authority and conversation structure
+## Channels, members and history
 
-A channel has one authoritative home `Group`; users are `Person` actors and
-messages are plain-text `Note` objects. The home distributes channel messages
-through `Announce`. `Create`, `Update`, `Delete`, `Follow`, `Accept`, `Reject`,
-and `Undo` carry delivery, editing, removal, and membership decisions.
+Actors, activities, origin proofs and the rules of authority are those of
+[FWDXP](fwdxp.md#authority-and-conversation-structure). What follows is how
+Archipel Server applies them.
 
-The home enforces admission and blocks for both new writes and signed history
-requests. Remote users can edit/remove their own channel messages; moderation
-of other authors belongs to the home channel. Cached channel ownership grants
-no management rights. Topics are created at the home. Timeline, topical, and
-threaded messages retain channel, topic, and parent relationships.
+A channel's member list is shared across the instances it reaches. A following
+instance fetches the home's list on admission and again, at most once a minute,
+when a subscriber opens the channel; it shows it beside its own subscribers and
+applies the channel's handle setting. Remote followers are admitted and removed
+under **Federation and remote followers**, not in the member list.
 
-Actor and object URLs remain stable across restarts. Incoming activity IDs are
-deduplicated; conflicting reuse is rejected. An author's embedded RSA proof
-covers the note, so a relaying channel cannot silently replace authorship or
-message content. This proof uses this profile's JSON serialization and is an
-Archipel extension, not a general JSON-LD signature implementation.
+Admission imports up to five history pages of twenty records each. This is
+bounded initial history, not complete archival replication. History is served
+only to an accepted follower, even for a public home channel; the browser's
+normal public/member rules remain separate.
 
-A channel's member list is shared across the instances it reaches. The home
-lists its accepted remote followers beside its own members, and serves that list
-to accepted followers at `/actors/channels/<id>/members` (signed, up to 500
-entries) unless the channel keeps its member list to itself. A following
-instance fetches it on admission and again, at most once a minute, when a
-subscriber opens the channel; it shows it beside its own subscribers and applies
-the channel's handle setting. Remote followers are admitted and removed under
-**Federation and remote followers**, not in the member list.
-
-Admission imports up to five signed history pages of twenty records each.
-This is bounded initial history, not complete archival replication. History is
-linked through explicit placeholders when a parent falls outside that window;
-removed parents keep a removal marker so their surviving replies can be imported.
-An authenticated later update can fill an uncached parent without changing its ID.
-History is accessible only to an accepted follower, even for a public home channel; the
-browser's normal public/member rules remain separate. User outboxes and generic
-object fetching are not exposed publicly. Direct messages are stored on the
-participating servers and are not end-to-end encrypted.
-
-## Transport and deployment
+## Deployment and delivery
 
 Use a stable public HTTPS `BASE_URL` and preserve the SQLite database. It contains
 the signing key, actor identities, subscriptions, received objects, activity
 deduplication, delivery queue, and saved emoji. Current keys are instance-managed
 RSA-2048 keys advertised with each actor; automatic key rotation is not implemented.
 
-WebFinger resolves user and channel handles separately, with `acct:#channel@host`
-for channels. Actor requests use `Accept: application/activity+json`. The shared
-inbox is `/federation/inbox`; channel history is `/actors/channels/<id>/outbox`.
-HTTP signatures cover request target, Host, and Date, plus SHA-256 Digest for
-POST bodies. Incoming dates must be within five minutes. Keep server clocks
-synchronized. Proxies must preserve these headers and the request body.
+The shared inbox is `/federation/inbox`; a channel's actor is
+`/actors/channels/<id>`, with its history and member list beneath it. Incoming
+dates must be within five minutes, so keep server clocks synchronized. Proxies
+must preserve the Host, Date, Digest and Signature headers and the request body.
 
 Outbound requests use a fifteen-second timeout, bounded response sizes, and no
 redirect following. DNS results are checked for private/reserved addresses and
@@ -129,11 +107,8 @@ retries fail. Admins can inspect results; automatic replay of failed deliveries
 is not implemented. Inbox requests are limited to 64 KiB; peer responses and
 emoji images to 256 KiB.
 
-The transport follows the [ActivityPub server-to-server interaction model](https://www.w3.org/TR/activitypub/#server-to-server-interactions)
-and the legacy RSA HTTP signature format described by the
-[Social Web HTTP Signature guide](https://swicg.github.io/activitypub-http-signature/).
-The Archipel extensions are a development profile with compatibility limited to
-this implementation.
+Actors also carry `archipelVersion`, the protocol's earlier name, and either name
+is accepted from a peer.
 
 ## Personal and adopted emoji
 
@@ -142,7 +117,7 @@ or WebP images up to 256 KiB. Each account can save up to 200 entries, choose it
 own shortcode, and rename or remove its entries. Standard and instance emoji
 names are reserved when creating or renaming personal emoji.
 
-The same panel loads another Archipel instance's public instance emoji catalog
+The same panel loads another Archipel Server instance's public emoji catalog
 and adopts a selected image under a chosen name. The image is copied into the
 local database and survives changes or deletion at the source. Adoption can
 work while federation is disabled locally; the source must expose its catalog.

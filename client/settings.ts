@@ -165,7 +165,7 @@ const sections: Section[] = [
     group: "personal",
     key: "xmpp",
     label: "XMPP clients",
-    about: "Use your Archipel account in another messaging app.",
+    about: "Use your account on this instance in another messaging app.",
     icon: "chat",
     async draw(el, ctx) {
       const connection = await api<{
@@ -180,7 +180,7 @@ const sections: Section[] = [
       el.innerHTML = card("Connect a client", `<p>Account address: <strong>${esc(connection.jid)}</strong></p><p class="muted small">Connect to ${esc(connection.domain)} on port ${connection.port} using STARTTLS. Create a separate password for each app. Your identity-provider password is not used here.</p>
         <form class="stack narrow-form" id="xmpp-password-form"><label>App name<input name="label" maxlength="80" placeholder="My phone" required></label>${error}<button>Create app password</button></form><div id="xmpp-new-password" aria-live="polite"></div>`) +
         card("App passwords", `<ul class="member-list">${connection.credentials!.length ? connection.credentials!.map(item => `<li class="member-row"><div class="grow"><strong>${esc(item.label)}</strong><div class="muted small">Created ${when(item.created_at)}</div></div><button class="secondary" type="button" data-revoke-xmpp="${esc(item.id)}">Revoke</button></li>`).join("") : '<li class="muted">No active app passwords.</li>'}</ul>`, "Revoking a password disconnects that app. Your other apps keep their own passwords.") +
-        card("Rooms", `<ul>${connection.channels!.map(room => `<li><strong>#${esc(room.name)}</strong> · <a href="xmpp:${esc(room.jid)}?join">${esc(room.jid)}</a></li>`).join("") || '<li class="muted">No timeline channels available.</li>'}</ul>`, "Timeline channels are available as XMPP rooms. Membership and moderation are managed in Archipel. Topics and threaded channels use the browser.");
+        card("Rooms", `<ul>${connection.channels!.map(room => `<li><strong>#${esc(room.name)}</strong> · <a href="xmpp:${esc(room.jid)}?join">${esc(room.jid)}</a></li>`).join("") || '<li class="muted">No timeline channels available.</li>'}</ul>`, "Timeline channels are available as XMPP rooms. Membership and moderation are managed in Archipel Web. Topics and threaded channels use the browser.");
         onSubmit($("#xmpp-password-form", el), async data => {
           const owner = state.session.user!.id, route = location.hash;
           const credential = await api<{ password: string; jid: string }>("/xmpp/credentials", "POST", { label: data.get("label") });
@@ -287,7 +287,7 @@ const sections: Section[] = [
         }[]
       >("/prefs");
       const device = !pushSupported()
-        ? '<p class="muted">This browser cannot receive notifications. On an iPhone or iPad, add Archipel to the Home Screen from the share menu and open it from there.</p>'
+        ? '<p class="muted">This browser cannot receive notifications. On an iPhone or iPad, add Archipel Web to the Home Screen from the share menu and open it from there.</p>'
         : pushBlocked()
           ? '<p class="muted">Notifications from this site are blocked in the browser. Allow them in its site settings, then reload.</p>'
           : pushOn()
@@ -301,7 +301,7 @@ const sections: Section[] = [
         card(
           "This device",
           device,
-          "You are told when something new is said, even with Archipel closed. A notification names the conversation and who wrote, not what they said. Each browser and device is turned on by itself, and signing out turns it off.",
+          "You are told when something new is said, even with Archipel Web closed. A notification names the conversation and who wrote, not what they said. Each browser and device is turned on by itself, and signing out turns it off.",
         ) +
         card(
           "Your choices",
@@ -363,7 +363,7 @@ const sections: Section[] = [
     group: "personal",
     key: "appearance",
     label: "Appearance",
-    about: "How Archipel looks in this browser.",
+    about: "How Archipel Web looks in this browser.",
     icon: "sun",
     async draw(el) {
       el.innerHTML = card("Interface style", styleChoices(), "Applied immediately and kept for this browser. Each style supports light and dark colors.") + card("Text size", textScaleControls(), "Applied immediately to all interface styles and saved in this browser.") + card(

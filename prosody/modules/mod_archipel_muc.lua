@@ -8,7 +8,7 @@ local muc_ns = "http://jabber.org/protocol/muc";
 -- Join history for occupants of other servers, held between admission and room entry.
 local pending_history = {};
 
--- Prosody holds a room from the first time it is asked for, set up as Archipel describes it.
+-- Prosody holds a room from the first time it is asked for, set up as Archipel Server describes it.
 local function open_room(room_jid, info)
   local room = muc.get_room_from_jid(room_jid) or muc.create_room(room_jid);
   if not room then return; end
@@ -84,7 +84,7 @@ end, 100);
 
 local function deny(event)
   if event.stanza.attr.type ~= "error" and event.stanza.attr.type ~= "result" then
-    event.origin.send(st.error_reply(event.stanza, "auth", "forbidden", "Manage rooms and membership in Archipel."));
+    event.origin.send(st.error_reply(event.stanza, "auth", "forbidden", "Manage rooms and membership in Archipel Web."));
   end
   return true;
 end

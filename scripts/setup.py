@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Configure Archipel containers using only the Python standard library."""
+"""Configure Archipel Stack containers using only the Python standard library."""
 
 import argparse
 import getpass
@@ -451,7 +451,7 @@ def prompt(label, value, secret=False):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Configure Archipel with Python only; setup does not start containers or change proxy networks.")
+    parser = argparse.ArgumentParser(description="Configure Archipel Stack with Python only; setup does not start containers or change proxy networks.")
     parser.add_argument("--mode", choices=(*MODES, "local"), help="Deployment mode; local is an alias for loopback container deployment")
     parser.add_argument("--non-interactive", action="store_true", help="Use existing configuration and supplied environment variables")
     parser.add_argument("--directory", type=Path, default=Path(__file__).resolve().parent.parent, help="Existing configuration directory (defaults to the project root)")

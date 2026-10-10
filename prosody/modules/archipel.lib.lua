@@ -7,7 +7,7 @@ local uuid = require "prosody.util.uuid";
 
 local api_url = module:get_option_string("archipel_api_url");
 local secret = module:get_option_string("archipel_api_secret");
-assert(api_url and secret and #secret >= 43, "Archipel adapter configuration required");
+assert(api_url and secret and #secret >= 43, "Archipel Server adapter configuration required");
 local domain = module:get_option_string("archipel_domain");
 
 local function request(path, input)
@@ -23,7 +23,7 @@ local function request(path, input)
     status = code;
     if code == 200 then result = json.decode(body);
     elseif body then
-      -- Archipel says why it refused, in words meant for the member.
+      -- Archipel Server says why it refused, in words meant for the member.
       local ok, refusal = pcall(json.decode, body);
       if ok and type(refusal) == "table" and type(refusal.error) == "string" and #refusal.error <= 300 then reason = refusal.error; end
     end
@@ -32,7 +32,7 @@ local function request(path, input)
   module:add_timer(5, function()
     if not completed then
       completed = true; status = 0;
-      if pending and pending.cancel then pending:cancel("Archipel request timed out");
+      if pending and pending.cancel then pending:cancel("Archipel Server request timed out");
       elseif pending then http.destroy_request(pending, true); end
       done();
     end
@@ -58,7 +58,7 @@ local function operation(event, op, extras)
     local condition = status == 404 and "item-not-found" or
       status == 400 and "bad-request" or status == 409 and "conflict" or
       (status == 401 or status == 403) and "forbidden" or "service-unavailable";
-    origin.send(st.error_reply(stanza, "cancel", condition, reason or "Archipel could not authorize this operation."));
+    origin.send(st.error_reply(stanza, "cancel", condition, reason or "Archipel Server could not authorize this operation."));
   end
   return result;
 end
