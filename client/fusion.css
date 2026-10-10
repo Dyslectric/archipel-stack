@@ -379,8 +379,7 @@
   dialog.dialog form { margin-top: 14px; }
 
   /* ---- settings, menus and cards ---- */
-  .settings-layout { gap: 7px; }
-  .settings-nav { border-radius: 2px; box-shadow: none; padding: 3px 0; }
+  .settings-nav { border-radius: 2px; box-shadow: none; padding-block: 3px; }
   .settings-nav a { border-radius: 0; padding: 4px 10px; }
   .settings-nav a.on { background: var(--fusion-selection); color: #fff; }
   .settings-nav a.on .i { color: inherit; }

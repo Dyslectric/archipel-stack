@@ -599,8 +599,10 @@ ul.plain.browse-list { margin-top: 12px; background: var(--card); border: 1px so
 .browse-channel p { margin: 2px 0 0; }
 .browse-name { font-size: 1.05rem; color: var(--text); margin-right: 6px; display: inline-flex; align-items: center; gap: 5px; }
 .browse-name .i { color: var(--muted); }
-.settings-layout { display: grid; grid-template-columns: 230px minmax(0, 780px); gap: 28px; align-items: start; }
-.settings-nav { position: sticky; top: 0; max-height: calc(100dvh - var(--header-h) - 40px); overflow-y: auto; }
+.settings-layout { display: grid; grid-template-columns: 254px minmax(0, 780px); gap: 12px; align-items: start; }
+/* Its scrollbar gets a lane of its own, so the selected page's highlight never runs under it. */
+.settings-nav { position: sticky; top: 0; max-height: calc(100dvh - var(--header-h) - 40px); overflow-y: auto;
+  scrollbar-gutter: stable; padding-right: 14px; }
 .settings-nav h1 { margin: 0 8px 12px; }
 .nav-group + .nav-group { margin-top: 14px; }
 #settings-channel { width: 100%; margin: 4px 0 4px; }
@@ -669,7 +671,7 @@ dialog.share-dialog li + li { margin-top: 6px; }
   .group-body > article { padding-inline: 10px; gap: 0 10px; }
   .settings-layout { grid-template-columns: minmax(0, 1fr); }
   .settings-layout:not(.at-index) .settings-nav, .settings-layout.at-index .settings-body { display: none; }
-  .settings-nav { position: static; max-height: none; }
+  .settings-nav { position: static; max-height: none; padding-right: 0; }
   .back-link { display: inline-flex; }
   .comment { padding-left: 13px; --rail: 4.5px; --knob: 12px; }
   .comments > .comment { --rail: 8.5px; padding-left: 16px; }
