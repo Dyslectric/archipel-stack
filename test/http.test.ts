@@ -6,6 +6,7 @@ import express, { type Request } from "express";
 import { Store } from "../src/store.js";
 import { loadConfig, type Config } from "../src/config.js";
 import { createApp } from "../src/app.js";
+import { DeviceSignIn } from "../src/device.js";
 import type { Push } from "../src/push.js";
 
 test("remote avatar endpoints require membership and current federation and block permissions", async t => {
@@ -1327,4 +1328,128 @@ test("the sending pace is the administrator's to set through the API", async (t)
   assert.equal(saved.status, 200);
   assert.deepEqual((await saved.json()).sending, { batch: 5, interval: 2000 });
   assert.deepEqual((await (await alice.request("/api/admin/federation")).json()).sending, { batch: 5, interval: 2000 });
+});
+
+test("a program without a browser is signed in by its user saying yes in theirs", async (t) => {
+  const f = await application(t);
+  const program = browser(f.origin), alice = browser(f.origin);
+  // The answer comes from a form on a page, not from the application's own requests.
+  const decide = (who: ReturnType<typeof browser>, fields: Record<string, string>) =>
+    fetch(`${f.origin}/auth/device`, {
+      method: "POST",
+      headers: {
+        Origin: f.origin,
+        "Content-Type": "application/x-www-form-urlencoded",
+        Cookie: [...who.cookies].map(([key, value]) => `${key}=${value}`).join("; "),
+      },
+      body: new URLSearchParams(fields),
+    });
+  const csrfOn = (html: string) => /name="csrf" value="([^"]+)"/.exec(html)![1];
+  const begin = async () => {
+    const response = await program.request("/auth/device/code", "POST", {});
+    assert.equal(response.status, 201);
+    return (await response.json()) as { device_code: string; user_code: string; verification_uri: string; interval: number };
+  };
+  const poll = (device_code: unknown) => program.request("/auth/device/token", "POST", { device_code });
+
+  const flow = await begin();
+  assert.match(flow.user_code, /^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/);
+  assert.equal(flow.verification_uri, `${f.origin}/auth/device?code=${flow.user_code}`);
+  assert.deepEqual(await (await poll(flow.device_code)).json(), { status: "pending" });
+  // Neither the code on the page nor a guess stands in for what the program holds.
+  assert.equal((await poll(flow.user_code)).status, 404);
+  assert.equal((await poll(undefined)).status, 404);
+
+  const page = `/auth/device?code=${flow.user_code}`;
+  const signedOut = await alice.request(page);
+  assert.equal(signedOut.status, 200);
+  assert.match(await signedOut.text(), /Sign in first/);
+  assert.equal((await decide(alice, { code: flow.user_code, csrf: "", decision: "approve" })).status, 401);
+
+  await alice.login("alice");
+  const asked = await alice.request(page);
+  assert.equal(asked.headers.get("cache-control"), "no-store");
+  const html = await asked.text();
+  assert.ok(html.includes(flow.user_code) && html.includes("@alice"));
+  assert.ok(!html.includes(flow.device_code));
+  assert.equal((await decide(alice, { code: flow.user_code, csrf: "wrong", decision: "approve" })).status, 403);
+  assert.deepEqual(await (await poll(flow.device_code)).json(), { status: "pending" });
+  // A code typed without its dash, in small letters, is the same code.
+  const typed = flow.user_code.replace("-", "").toLowerCase();
+  assert.match(await (await decide(alice, { code: typed, csrf: csrfOn(html), decision: "approve" })).text(), /The program is signed in/);
+
+  const granted = await (await poll(flow.device_code)).json();
+  assert.equal(granted.status, "approved");
+  assert.equal((await poll(flow.device_code)).status, 404);
+  assert.equal((await alice.request(page)).status, 404);
+  const terminal = browser(f.origin);
+  terminal.cookies.set("archipel", granted.token);
+  assert.equal((await terminal.session()).user.username, "alice");
+  assert.equal((await terminal.session()).csrf, granted.csrf);
+  // Its session is its own: the browser signing out leaves it signed in.
+  assert.notEqual(granted.token, alice.cookies.get("archipel"));
+  await alice.session();
+  assert.equal((await alice.request("/api/logout", "POST", {})).status, 200);
+  assert.equal((await terminal.session()).user.username, "alice");
+
+  await t.test("no is an answer too, and ends the wait", async () => {
+    const bob = browser(f.origin);
+    await bob.login("bob");
+    const refused = await begin();
+    const form = await (await bob.request(`/auth/device?code=${refused.user_code}`)).text();
+    assert.match(await (await decide(bob, { code: refused.user_code, csrf: csrfOn(form), decision: "deny" })).text(), /was not signed in/);
+    assert.equal((await poll(refused.device_code)).status, 404);
+  });
+  await t.test("an account waiting for approval, or suspended since saying yes, lets nothing in", async () => {
+    const charlie = browser(f.origin);
+    const user = await charlie.login("charlie");
+    const held = await begin();
+    const form = await (await charlie.request(`/auth/device?code=${held.user_code}`)).text();
+    f.store.db.prepare("UPDATE users SET admission_status='pending' WHERE id=?").run(user.id);
+    assert.equal((await charlie.request(`/auth/device?code=${held.user_code}`)).status, 403);
+    assert.equal((await decide(charlie, { code: held.user_code, csrf: csrfOn(form), decision: "approve" })).status, 403);
+    f.store.db.prepare("UPDATE users SET admission_status='approved' WHERE id=?").run(user.id);
+    assert.equal((await decide(charlie, { code: held.user_code, csrf: csrfOn(form), decision: "approve" })).status, 200);
+    f.store.db.prepare("UPDATE users SET banned=1 WHERE id=?").run(user.id);
+    assert.equal((await poll(held.device_code)).status, 403);
+  });
+  await t.test("a sign-in waits in the database, so a restarted server still answers for it", async () => {
+    const before = new DeviceSignIn(f.store, f.origin), after = new DeviceSignIn(f.store, f.origin);
+    const kept = before.begin(), dave = f.store.user((await browser(f.origin).login("bob")).id);
+    assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM device_flows WHERE device_hash=? OR code_hash=?").get(kept.device_code, kept.user_code)?.n, 0);
+    assert.deepEqual(after.poll(kept.device_code), { status: "pending" });
+    after.decide(dave, kept.user_code, true);
+    assert.throws(() => after.decide(dave, kept.user_code, true), /no longer waiting/);
+    const session = new DeviceSignIn(f.store, f.origin).poll(kept.device_code);
+    assert.equal(session.status === "approved" && f.store.session(session.token)?.user.username, "bob");
+    assert.throws(() => before.poll(kept.device_code), /expired or was declined/);
+  });
+  await t.test("a sign-in nobody answered runs out", async () => {
+    const late = await begin();
+    t.mock.timers.enable({ apis: ["Date"], now: Date.now() + 11 * 60000 });
+    assert.equal((await poll(late.device_code)).status, 404);
+    t.mock.timers.reset();
+  });
+  assert.match(await (await alice.request("/auth/device")).text(), /Type the code/);
+  assert.match(await (await alice.request("/auth/device?code=nonsense")).text(), /not a sign-in code/);
+});
+
+test("opening a program's sign-in address signed out goes through OIDC and comes back to the question", async (t) => {
+  const idp = await provider(t);
+  const { origin } = await application(t, { oidcIssuer: idp.issuer, oidcClientId: "archipel-test" });
+  const program = browser(origin), person = browser(origin);
+  const flow = await (await program.request("/auth/device/code", "POST", {})).json();
+  const opened = await person.request(`/auth/device?code=${flow.user_code}`);
+  assert.equal(opened.status, 302);
+  assert.equal(opened.headers.get("location"), "/auth/login");
+  const login = await person.request("/auth/login");
+  const authorization = new URL(login.headers.get("location")!);
+  const back = await person.request(`/auth/callback?code=${idp.code(authorization)}&state=${authorization.searchParams.get("state")}`);
+  assert.equal(back.headers.get("location"), `/auth/device?code=${flow.user_code}`);
+  const html = await (await person.request(back.headers.get("location")!)).text();
+  assert.ok(html.includes(flow.user_code) && html.includes("@oidc-user"));
+  // An ordinary sign-in afterwards lands where it always did.
+  const again = await person.request("/auth/login");
+  const second = new URL(again.headers.get("location")!);
+  assert.equal((await person.request(`/auth/callback?code=${idp.code(second)}&state=${second.searchParams.get("state")}`)).headers.get("location"), "/");
 });

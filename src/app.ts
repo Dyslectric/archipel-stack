@@ -16,6 +16,7 @@ import { Xmpp } from "./xmpp.js";
 import { Mirrors } from "./mirrors.js";
 import { Push } from "./push.js";
 import { Events } from "./events.js";
+import { DeviceSignIn, devicePages } from "./device.js";
 
 function cookie(req: Request, name: string) {
   const value = (req.headers.cookie || "")
@@ -37,6 +38,7 @@ export function createApp(config: Config, store: Store) {
   const mirrors = new Mirrors(store, xmpp);
   const push = new Push(store, config);
   const events = new Events(store);
+  const device = new DeviceSignIn(store, config.baseUrl);
   const app = express();
   app.locals.events = events;
   app.locals.mirrors = mirrors;
@@ -225,6 +227,17 @@ export function createApp(config: Config, store: Store) {
     res.setHeader("Cache-Control", "no-store");
     next();
   });
+  // A program waiting to be signed in asks every couple of seconds, so it is paced on its own.
+  // What it asks with is a secret only it holds: no cookie is read, so no Origin is asked for.
+  app.post(
+    "/auth/device/token",
+    rateLimit({
+      windowMs: 60000,
+      limit: Math.max(60, config.rateLimitAuth * 2),
+      message: { error: "Too many requests. Please try again shortly." },
+    }),
+    (req, res) => res.json(device.poll(req.body?.device_code)),
+  );
   app.use(
     "/auth",
     rateLimit({
@@ -331,6 +344,42 @@ export function createApp(config: Config, store: Store) {
       res.json({ user: store.profile(user, true), csrf: session.csrf });
     },
   );
+  // Signing in a program without a browser (device.ts): it starts here and is told where to
+  // send its user.
+  app.post("/auth/device/code", (_req, res) => res.status(201).json(device.begin()));
+  // The page its user opens. Someone not signed in is taken through sign-in and brought back.
+  app.get("/auth/device", (req, res) => {
+    const code = device.code(req.query.code);
+    if (!code) return void res.type("html").send(devicePages.ask(req.query.code !== undefined));
+    const session = store.session(cookie(req, authCookie));
+    if (!session) {
+      if (!config.oidcIssuer) return void res.type("html").send(devicePages.signIn(code));
+      res.cookie("archipel-device", code, { ...cookieOptions, maxAge: 10 * 60000 });
+      return res.redirect("/auth/login");
+    }
+    if (session.user.admission_status !== "approved")
+      return void res.status(403).type("html").send(devicePages.said("Not yet", "Your membership of this instance is waiting for approval."));
+    if (!device.waiting(code))
+      return void res.status(404).type("html").send(devicePages.said("Nothing is waiting", "This sign-in code is not waiting for an answer. Start again from the program."));
+    res.type("html").send(devicePages.confirm(code, session.user, new URL(config.baseUrl).host, session.csrf));
+  });
+  // Their answer, from the form on that page.
+  app.post("/auth/device", express.urlencoded({ extended: false, limit: "2kb" }), (req, res) => {
+    try {
+      const session = store.session(cookie(req, authCookie));
+      if (!session) throw new Problem(401, "Sign in to continue.");
+      if (!req.body?.csrf || req.body.csrf !== session.csrf)
+        throw new Problem(403, "Your session changed. Open the sign-in address again.");
+      const approve = req.body.decision === "approve";
+      device.decide(session.user, req.body.code, approve);
+      res.type("html").send(approve
+        ? devicePages.said("Signed in", "The program is signed in. You can close this page and go back to it.")
+        : devicePages.said("Declined", "The program was not signed in."));
+    } catch (error) {
+      if (!(error instanceof Problem)) throw error;
+      res.status(error.status).type("html").send(devicePages.said("Not signed in", error.message));
+    }
+  });
   app.get("/auth/login", async (_req, res) => {
     try {
       const flow = await oidc.begin();
@@ -365,7 +414,10 @@ export function createApp(config: Config, store: Store) {
         maxAge: 7 * 86400000,
       });
       res.clearCookie("archipel-flow", cookieOptions);
-      res.redirect("/");
+      // Signing in on the way to letting a program in: back to that question.
+      const waiting = device.code(cookie(req, "archipel-device"));
+      res.clearCookie("archipel-device", cookieOptions);
+      res.redirect(waiting ? `/auth/device?code=${waiting}` : "/");
     } catch (error) {
       res.setHeader(
         "X-Request-ID",

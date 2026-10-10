@@ -24,6 +24,7 @@ const quiet = new Set([
   "auth_flows",
   "attachments",
   "channel_bridge_seen",
+  "device_flows",
   "federation_actors",
   "federation_incoming",
   "federation_keys",

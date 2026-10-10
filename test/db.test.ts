@@ -127,7 +127,7 @@ test("an instance moves from its SQLite file into PostgreSQL whole, and carries 
   again.close();
 
   const moved = new Store(target, origin);
-  assert.equal(target.version(), 20);
+  assert.equal(target.version(), 21);
   assert.deepEqual(moved.messages(moved.user(bob.id), channel.id), expected.messages);
   assert.deepEqual(moved.directHistory(moved.user(bob.id), `${origin}/actors/users/${alice.id}`), expected.dms);
   assert.deepEqual(moved.overview(moved.user(bob.id)), expected.overview);

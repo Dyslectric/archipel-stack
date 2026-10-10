@@ -125,6 +125,23 @@ the browser's Origin header. Set `TRUSTED_PROXY` to the actual proxy IP or CIDR
 to honor its forwarded headers and rate-limit clients individually. Setup can
 configure this together with the container's external proxy network.
 
+## Sign in a program without a browser
+
+A terminal client or other program signs in through its user's browser. It asks
+`POST /auth/device/code` and is given a `verification_uri` to show, with a short
+`user_code` in it, and a `device_code` it keeps to itself. The user opens the
+address, signs in through the provider if they are not signed in already, sees the
+code and who they are, and answers. The program meanwhile asks
+`POST /auth/device/token` with its `device_code` every `interval` seconds: it is
+told `pending` until the answer is yes, then given a session `token` and `csrf`
+once. It sends the token as the session cookie, the instance's address as Origin
+and the CSRF token on changes, as the browser does.
+
+That session is the program's own, and lasts as long as a browser's. A sign-in
+waits ten minutes for its answer, in the database, so restarting the server
+meanwhile does not lose it. Only an approved, unsuspended account can let a
+program in.
+
 ## Emoji, editing, and instance membership
 
 Open **Settings → Profile** to upload or remove your profile picture. PNG, JPEG,
