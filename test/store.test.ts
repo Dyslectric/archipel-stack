@@ -123,6 +123,117 @@ test("invalid compound membership changes leave policy unchanged", () => {
   assert.equal(store.rule(c.id, bob.id), null);
   store.close();
 });
+test("a channel's roles let members remove, ban and delete without being moderators", () => {
+  const { store, alice, bob, charlie } = fixture();
+  const dana = store.loginIdentity("https://id.example", "dana", "dana", []);
+  const c = store.createChannel(alice, channelInput({ show_members: false }));
+  for (const u of [bob, charlie, dana]) store.join(u, c.id);
+  const mine = (u: typeof bob) => store.listChannels(u).find((l) => l.id === c.id)!;
+  denied(() => store.createChannelRole(bob, c.id, { name: "Helper" }));
+  const helper = store.createChannelRole(alice, c.id, {
+    name: "Helper",
+    kick_members: true,
+    delete_messages: true,
+  });
+  assert.deepEqual(
+    [helper.kick_members, helper.ban_members, helper.ban_instances, helper.delete_messages, helper.members],
+    [true, false, false, true, 0],
+  );
+  denied(() => store.createChannelRole(alice, c.id, { name: "helper" }), 409);
+  denied(() => store.createChannelRole(alice, c.id, { name: "Odd", kick_members: "yes" }), 400);
+  denied(() => store.createChannelRole(alice, c.id, { name: "Odd", admin: true }), 400);
+  denied(() => store.setMember(bob, c.id, bob.id, { channel_role: helper.id }));
+  denied(() => store.setMember(alice, c.id, bob.id, { channel_role: "missing" }), 404);
+  assert.equal(mine(bob).sees_members, false);
+  store.setMember(alice, c.id, bob.id, { channel_role: helper.id });
+  assert.deepEqual(mine(bob).channel_role, { id: helper.id, name: "Helper" });
+  assert.deepEqual(mine(bob).permissions, {
+    kick_members: true,
+    ban_members: false,
+    ban_instances: false,
+    delete_messages: true,
+  });
+  assert.equal(mine(alice).permissions.ban_instances, true);
+  assert.equal(mine(charlie).permissions.kick_members, false);
+  // Whoever may remove members sees who they are, and which of them hold a role.
+  assert.equal(mine(bob).sees_members, true);
+  assert.deepEqual(
+    store.details(bob, c.id).members.find((u) => u.id === bob.id)!.channel_role,
+    { id: helper.id, name: "Helper" },
+  );
+  assert.equal(store.channelRoles(alice, c.id)[0].members, 1);
+  denied(() => store.channelRoles(bob, c.id));
+  const spam = store.post(charlie, c.id, { body: "Spam" });
+  denied(() => store.deleteMessage(dana, spam.id));
+  store.deleteMessage(bob, spam.id);
+  assert.ok(store.message(spam.id).deleted_at);
+  // The role allows removing, and nothing a moderator does besides.
+  denied(() => store.setMember(bob, c.id, charlie.id, { rule: "block" }));
+  denied(() => store.setMember(bob, c.id, charlie.id, { rule: "allow" }));
+  denied(() => store.setMember(bob, c.id, charlie.id, { remove: true, see_members: true }));
+  denied(() => store.setMember(bob, c.id, alice.id, { remove: true }));
+  denied(() => store.rules(bob, c.id));
+  store.setMember(bob, c.id, charlie.id, { remove: true });
+  assert.equal(store.role(c.id, charlie.id), null);
+  store.join(charlie, c.id);
+  // Role holders do not reach each other, or moderators.
+  store.setMember(alice, c.id, dana.id, { channel_role: helper.id });
+  denied(() => store.setMember(bob, c.id, dana.id, { remove: true }));
+  store.setMember(alice, c.id, dana.id, { role: "moderator" });
+  assert.equal(store.channelRoles(alice, c.id)[0].members, 1);
+  denied(() => store.setMember(bob, c.id, dana.id, { remove: true }));
+  denied(() => store.setMember(alice, c.id, dana.id, { channel_role: helper.id }), 409);
+  store.setMember(dana, c.id, bob.id, { remove: true });
+  store.join(bob, c.id);
+  assert.equal(store.channelRole(c.id, bob.id), undefined);
+  store.setMember(alice, c.id, bob.id, { channel_role: helper.id });
+  // Banning is its own grant, and lifting a ban goes with it.
+  store.updateChannelRole(alice, c.id, helper.id, { kick_members: false, ban_members: true });
+  denied(() => store.setMember(bob, c.id, charlie.id, { remove: true }));
+  store.setMember(bob, c.id, charlie.id, { rule: "block" });
+  denied(() => store.join(charlie, c.id));
+  store.setMember(alice, c.id, dana.id, { rule: "allow" });
+  assert.deepEqual(store.rules(bob, c.id).map((r) => r.rule), ["block"]);
+  assert.equal(store.rules(alice, c.id).length, 2);
+  denied(() => store.setMember(bob, c.id, dana.id, { rule: "clear" }));
+  store.setMember(bob, c.id, charlie.id, { rule: "clear" });
+  store.join(charlie, c.id);
+  // Without the role, or once it is deleted, they are a member like any other.
+  const other = store.post(charlie, c.id, { body: "Kept" });
+  store.setMember(alice, c.id, bob.id, { channel_role: null });
+  denied(() => store.deleteMessage(bob, other.id));
+  store.setMember(alice, c.id, bob.id, { channel_role: helper.id });
+  store.deleteChannelRole(alice, c.id, helper.id);
+  denied(() => store.deleteMessage(bob, other.id));
+  assert.equal(mine(bob).channel_role, null);
+  store.createChannelRole(alice, c.id, { name: "Helper" });
+  store.deleteChannel(alice, c.id);
+  store.close();
+});
+test("a channel bans instances and XMPP servers by address, for those its roles allow", () => {
+  const { store, alice, bob } = fixture();
+  const c = store.createChannel(alice, channelInput());
+  store.join(bob, c.id);
+  const ban = (who: typeof bob, instance: unknown, banned: unknown = true) =>
+    store.banInstance(who, c.id, { instance, banned }).map((b) => b.instance);
+  denied(() => ban(bob, "spam.example"));
+  denied(() => store.instanceBans(bob, c.id));
+  const role = store.createChannelRole(alice, c.id, { name: "Gatekeeper", ban_instances: true });
+  store.setMember(alice, c.id, bob.id, { channel_role: role.id });
+  assert.deepEqual(ban(bob, " Spam.Example "), ["https://spam.example"]);
+  assert.deepEqual(ban(bob, "https://spam.example/actors/users/1"), ["https://spam.example"]);
+  assert.deepEqual(ban(alice, "xmpp:eve@Chat.Spam.Example"), ["https://spam.example", "xmpp:chat.spam.example"]);
+  assert.equal(store.instanceBanned(c.id, "https://spam.example/actors/users/2"), true);
+  assert.equal(store.instanceBanned(c.id, "https://fine.example/actors/users/2"), false);
+  assert.equal(store.instanceBanned(c.id, "xmpp:mallory@chat.spam.example"), true);
+  assert.equal(store.instanceBanned(c.id, "xmpp:mallory@spam.example"), false);
+  denied(() => ban(alice, store.baseUrl), 400);
+  denied(() => ban(alice, "not an address"), 400);
+  denied(() => ban(alice, "spam.example", "yes"), 400);
+  assert.deepEqual(ban(bob, "spam.example", false), ["xmpp:chat.spam.example"]);
+  assert.equal(store.instanceBanned(c.id, "https://spam.example/actors/users/2"), false);
+  store.close();
+});
 test("topical messages require same-channel topics and same-topic parents", () => {
   const { store, alice } = fixture();
   const c = store.createChannel(alice, channelInput({ mode: "topical" }));
@@ -599,7 +710,7 @@ test("version-two emoji messages keep their image metadata through the federatio
     { id: "asset", name: "island", url: "/api/emojis/asset/image" },
   ]);
   assert.equal(store.user("author").federation_send, 0);
-  assert.equal(store.db.version(), 22);
+  assert.equal(store.db.version(), 23);
 });
 
 test("direct messages reach both members, and only the reader's own are news to them", () => {
@@ -735,7 +846,7 @@ test("personal blocks persist across restarts and upgrade an existing version 4 
   let store = new Store(path);
   const alice = store.loginIdentity("https://id.example", "alice", "alice", []);
   const bob = store.loginIdentity("https://id.example", "bob", "bob", []);
-  store.db.exec("DROP TABLE reaction_emojis; ALTER TABLE channels DROP COLUMN reaction_bans; DROP TABLE device_flows; DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; DROP TABLE user_blocks; PRAGMA user_version=4;");
+  store.db.exec("DROP TABLE channel_instance_bans; DROP TABLE channel_member_roles; DROP TABLE channel_roles; DROP TABLE reaction_emojis; ALTER TABLE channels DROP COLUMN reaction_bans; DROP TABLE device_flows; DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; DROP TABLE user_blocks; PRAGMA user_version=4;");
   store.close();
   store = new Store(path);
   const peer = `${store.baseUrl}/actors/users/${alice.id}`;
@@ -786,7 +897,7 @@ test("profile picture migration preserves identities and pictures survive restar
   const path = join(directory, "db.sqlite");
   let store = new Store(path);
   const alice = store.loginIdentity("https://id.example", "alice", "alice", []);
-  store.db.exec("DROP TABLE reaction_emojis; ALTER TABLE channels DROP COLUMN reaction_bans; DROP TABLE device_flows; DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; PRAGMA user_version=5;");
+  store.db.exec("DROP TABLE channel_instance_bans; DROP TABLE channel_member_roles; DROP TABLE channel_roles; DROP TABLE reaction_emojis; ALTER TABLE channels DROP COLUMN reaction_bans; DROP TABLE device_flows; DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; PRAGMA user_version=5;");
   store.close();
   store = new Store(path);
   const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
@@ -840,9 +951,9 @@ test("version 9 avatar migration preserves pictures and XMPP cursors and remote 
   const image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
   store.setAvatar(alice, image);
   store.db.prepare("INSERT INTO xmpp_events(seq,kind,object_id) VALUES(50,'Direct','old-message')").run();
-  store.db.exec("DROP TABLE reaction_emojis; ALTER TABLE channels DROP COLUMN reaction_bans; DROP TABLE device_flows; DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; PRAGMA user_version=9");
+  store.db.exec("DROP TABLE channel_instance_bans; DROP TABLE channel_member_roles; DROP TABLE channel_roles; DROP TABLE reaction_emojis; ALTER TABLE channels DROP COLUMN reaction_bans; DROP TABLE device_flows; DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; PRAGMA user_version=9");
   store.close(); store = new Store(path);
-  assert.equal(store.db.version(), 22);
+  assert.equal(store.db.version(), 23);
   assert.equal(Buffer.from(store.avatarImage(alice.id).image).toString("base64"), image);
   assert.equal(store.db.prepare("SELECT seq FROM xmpp_events WHERE object_id='old-message'").get()?.seq, 50);
   store.db.prepare("INSERT INTO xmpp_events(kind,object_id) VALUES('Profile',?)").run(alice.id);

@@ -5,6 +5,7 @@ import {
   api,
   avatar,
   canModerate,
+  channelCan,
   channelIcon,
   confirmDialog,
   emojiHtml,
@@ -63,6 +64,7 @@ interface Section {
   icon: string;
   admin?: boolean; // instance administrators only
   mod?: boolean; // the channel's moderators only
+  show?: (c: Channel) => boolean; // or whoever else the channel's page is for
   mirror?: boolean; // mirrors only
   draw: (el: HTMLElement, ctx: Ctx) => Promise<void>;
 }
@@ -112,6 +114,33 @@ const roleValues = (data: FormData) => ({
     rolePermissions.map(([flag]) => [flag, data.get(flag) === "on"]),
   ),
 });
+// What a channel's role lets a member do there.
+const channelRolePermissions = [
+  ["kick_members", "Remove members from the channel"],
+  ["ban_members", "Ban people from the channel, and lift their bans"],
+  ["ban_instances", "Ban other instances and XMPP servers from the channel"],
+  ["delete_messages", "Delete other people's messages"],
+] as const;
+type ChannelRole = {
+  id: string;
+  name: string;
+  members: number;
+} & Record<(typeof channelRolePermissions)[number][0], boolean>;
+const channelRoleBoxes = (role?: ChannelRole) =>
+  channelRolePermissions
+    .map(
+      ([flag, label]) =>
+        `<label class="check"><input type="checkbox" name="${flag}" ${role?.[flag] ? "checked" : ""}> ${label}</label>`,
+    )
+    .join("");
+const channelRoleValues = (data: FormData) => ({
+  name: data.get("name"),
+  ...Object.fromEntries(
+    channelRolePermissions.map(([flag]) => [flag, data.get(flag) === "on"]),
+  ),
+});
+const owns = (c: Channel) =>
+  !c.remote_actor && (!!state.session.user?.admin || c.role === "owner");
 const person = (u: User, note: string, controls = "") =>
   `<li class="member-row">${avatar(u)}<div class="grow">${nameButton(u, u.actor_url)}${u.username ? ` <span class="muted">@${esc(u.username)}</span>` : ""}<div class="muted small">${note}</div></div>${controls}</li>`;
 // Buttons that carry out one change and redraw the section.
@@ -690,7 +719,7 @@ const sections: Section[] = [
       el.innerHTML =
         card(
           `${channelIcon(c)} ${esc(c.name)}`,
-          `<dl class="info"><dt>Address</dt><dd><code>${esc(address)}</code></dd><dt>Description</dt><dd>${esc(c.description || "None")}</dd><dt>Conversation style</dt><dd>${modeLabel(c.mode)}${c.mode === "threaded" ? ` · titles ${c.optional_titles ? "optional" : "required"}` : ""}</dd><dt>Who can read</dt><dd>${c.visibility === "members" ? "Members only" : "Everyone on this instance"}</dd><dt>Who can join</dt><dd>${c.admission === "allowlist" ? "Invited users only" : "Anyone on this instance"}</dd><dt>Members</dt><dd><a href="#/settings/channel/members/${c.id}">${c.member_count}</a></dd><dt>Your role</dt><dd>${roleLabel(c.role)}</dd><dt>Shared with</dt><dd>${c.remote_actor ? "Hosted on another server" : c.federation_enabled ? "Members here and on other servers" : "People on this instance"}</dd></dl><p><a class="button secondary" href="#/c/${c.id}">${icon("chat")} Open channel</a></p>`,
+          `<dl class="info"><dt>Address</dt><dd><code>${esc(address)}</code></dd><dt>Description</dt><dd>${esc(c.description || "None")}</dd><dt>Conversation style</dt><dd>${modeLabel(c.mode)}${c.mode === "threaded" ? ` · titles ${c.optional_titles ? "optional" : "required"}` : ""}</dd><dt>Who can read</dt><dd>${c.visibility === "members" ? "Members only" : "Everyone on this instance"}</dd><dt>Who can join</dt><dd>${c.admission === "allowlist" ? "Invited users only" : "Anyone on this instance"}</dd><dt>Members</dt><dd><a href="#/settings/channel/members/${c.id}">${c.member_count}</a></dd><dt>Your role</dt><dd>${roleLabel(c.role, c.channel_role)}</dd><dt>Shared with</dt><dd>${c.remote_actor ? "Hosted on another server" : c.federation_enabled ? "Members here and on other servers" : "People on this instance"}</dd></dl><p><a class="button secondary" href="#/c/${c.id}">${icon("chat")} Open channel</a></p>`,
         ) +
         (c.role && c.role !== "owner"
           ? card(
@@ -825,12 +854,30 @@ const sections: Section[] = [
       const c = ctx.channel!,
         moderating = canModerate(c),
         promoting = !!state.session.user?.admin || c.role === "owner",
-        owning = !c.remote_actor && promoting;
+        owning = !c.remote_actor && promoting,
+        kicking = channelCan(c, "kick_members"),
+        banning = channelCan(c, "ban_members");
       if (!c.sees_members) {
         el.innerHTML =
           '<p class="card empty muted">This channel doesn\'t show its members.</p>';
         return;
       }
+      const roles = owning
+        ? await api<ChannelRole[]>(`/channels/${c.id}/roles`)
+        : [];
+      // A role reaches the members who hold none; moderators reach everyone but the owner.
+      const reach = (u: User) =>
+        u.role !== "owner" &&
+        (moderating ||
+          (u.role === "member" &&
+            !u.channel_role &&
+            u.id !== state.session.user?.id));
+      const roleSelect = (u: User) =>
+        roles.length &&
+        u.role === "member" &&
+        (!u.actor_url || u.actor_url.startsWith(location.origin))
+          ? `<select class="role-select" data-channel-role-for="${u.id}" aria-label="Role for ${esc(u.display_name)}" title="Role"><option value="">No role</option>${roles.map((r) => `<option value="${r.id}" ${r.id === u.channel_role?.id ? "selected" : ""}>${esc(r.name)}</option>`).join("")}</select>`
+          : "";
       // Where the channel keeps something from its members, a moderator can let one of them see it.
       const allow = (u: User, grant: "see_members" | "see_handles", what: string) =>
         `<button type="button" class="small secondary" data-member="${u.id}" data-grant="${grant}" data-allow="${u[grant] ? "" : "1"}">${u[grant] ? `Stop showing ${what}` : `Show ${what}`}</button>`;
@@ -851,17 +898,31 @@ const sections: Section[] = [
           .map((u) =>
             person(
               u,
-              `<span class="pill ${u.role === "owner" ? "kept" : u.role === "moderator" ? "new" : ""}">${roleLabel(u.role)}</span>${moderating && u.role === "member" && ((!c.show_members && u.see_members) || (c.hide_handles && u.see_handles)) ? ` <span class="pill good">Sees ${[!c.show_members && u.see_members ? "members" : "", c.hide_handles && u.see_handles ? "handles" : ""].filter(Boolean).join(" and ")}</span>` : ""}${u.verified_socials.length ? `<details class="socials"><summary>Shared socials</summary>${socialsHtml(u.verified_socials)}</details>` : ""}`,
-              moderating && u.role !== "owner" && u.held !== false
-                ? `${grants(u)}${promoting ? `<button type="button" class="small secondary" data-member="${u.id}" data-role="${u.role === "moderator" ? "member" : "moderator"}">${u.role === "moderator" ? "Make member" : "Make moderator"}</button>` : ""}<button type="button" class="small secondary bad-text" data-member="${u.id}" data-remove>Remove</button>`
+              `<span class="pill ${u.role === "owner" ? "kept" : u.role === "moderator" ? "new" : ""}">${roleLabel(u.role, u.channel_role)}</span>${moderating && u.role === "member" && ((!c.show_members && u.see_members) || (c.hide_handles && u.see_handles)) ? ` <span class="pill good">Sees ${[!c.show_members && u.see_members ? "members" : "", c.hide_handles && u.see_handles ? "handles" : ""].filter(Boolean).join(" and ")}</span>` : ""}${u.verified_socials.length ? `<details class="socials"><summary>Shared socials</summary>${socialsHtml(u.verified_socials)}</details>` : ""}`,
+              reach(u)
+                ? `${moderating && u.held !== false ? `${grants(u)}${roleSelect(u)}${promoting ? `<button type="button" class="small secondary" data-member="${u.id}" data-role="${u.role === "moderator" ? "member" : "moderator"}">${u.role === "moderator" ? "Make member" : "Make moderator"}</button>` : ""}` : ""}${kicking ? `<button type="button" class="small secondary bad-text" data-member="${u.id}" data-remove>Remove</button>` : ""}${banning ? `<button type="button" class="small secondary bad-text" data-member="${u.id}" data-ban>Ban</button>` : ""}`
                 : "",
             ),
           )
           .join("")}</ul>`,
         moderating
-          ? `Invite or block people under <a href="#/settings/channel/access/${c.id}">Access rules</a>.`
-          : "",
+          ? `Invite or block people under <a href="#/settings/channel/access/${c.id}">Access rules</a>.${owning ? ` What a role allows is set under <a href="#/settings/channel/roles/${c.id}">Roles</a>.` : ""}`
+          : banning
+            ? `Bans are listed, and lifted, under <a href="#/settings/channel/access/${c.id}">Access rules</a>.`
+            : "",
       );
+      for (const select of $$<HTMLSelectElement>("[data-channel-role-for]", el))
+        select.addEventListener("change", () =>
+          action(async () => {
+            await api(
+              `/channels/${c.id}/members/${select.dataset.channelRoleFor}`,
+              "PATCH",
+              { channel_role: select.value || null },
+            );
+            toast("Role changed.");
+            ctx.refresh();
+          }),
+        );
       if (owning)
         onSubmit($("#channel-privacy", el), async (data) => {
           await api(`/channels/${c.id}/privacy`, "PATCH", {
@@ -879,7 +940,9 @@ const sections: Section[] = [
           "PATCH",
           "remove" in button.dataset
             ? { remove: true }
-            : button.dataset.grant
+            : "ban" in button.dataset
+              ? { rule: "block" }
+              : button.dataset.grant
               ? { [button.dataset.grant]: !!button.dataset.allow }
               : { role: button.dataset.role },
         );
@@ -894,9 +957,10 @@ const sections: Section[] = [
     label: "Access rules",
     about: "Who is invited to, or blocked from, this channel.",
     icon: "lock",
-    mod: true,
+    show: (c) => canModerate(c) || channelCan(c, "ban_members"),
     async draw(el, ctx) {
-      const c = ctx.channel!;
+      const c = ctx.channel!,
+        moderating = canModerate(c);
       // Without the instance's member list, the person is named by their handle.
       const [users, rules] = await Promise.all([
         listsMembers() ? api<User[]>("/users") : null,
@@ -906,7 +970,7 @@ const sections: Section[] = [
       ]);
       el.innerHTML =
         card(
-          "Change someone's access",
+          moderating ? "Change someone's access" : "Ban someone",
           `<form class="stack narrow-form" id="access-form"><label>Person${
             users
               ? `<select name="user">${users
@@ -914,12 +978,12 @@ const sections: Section[] = [
                   .map((u) => `<option value="${u.id}">@${esc(u.username)}</option>`)
                   .join("")}</select>`
               : `<span class="input-prefix"><span>@</span><input name="handle" required maxlength="64" placeholder="handle" autocomplete="off"></span>`
-          }</label><label>Action<select name="action"><option value="allow">Allow to join</option><option value="block">Block and remove membership</option><option value="clear">Clear access rule</option><option value="remove">Remove membership</option>${state.session.user?.admin || c.role === "owner" ? '<option value="moderator">Make moderator</option><option value="member">Make member</option>' : ""}</select></label>${error}<button>Apply change</button></form>`,
+          }</label>${moderating ? `<label>Action<select name="action"><option value="allow">Allow to join</option><option value="block">Block and remove membership</option><option value="clear">Clear access rule</option><option value="remove">Remove membership</option>${state.session.user?.admin || c.role === "owner" ? '<option value="moderator">Make moderator</option><option value="member">Make member</option>' : ""}</select></label>` : '<input type="hidden" name="action" value="block">'}${error}<button>${moderating ? "Apply change" : "Ban from channel"}</button></form>`,
           `${c.visibility === "members" ? "Members-only" : "Public"} · ${c.admission === "allowlist" ? "invitation required" : "open membership"}`,
         ) +
         card(
-          "Access rules",
-          `<ul class="plain rules-list">${rules.length ? rules.map((r) => `<li class="row"><span class="grow">@${esc(r.username)}</span><span class="pill ${r.rule === "block" ? "bad" : "good"}">${esc(r.rule)}</span><button type="button" class="small secondary" data-clear="${r.user_id}">Clear</button></li>`).join("") : '<li class="muted">No individual access rules.</li>'}</ul>`,
+          moderating ? "Access rules" : "Banned",
+          `<ul class="plain rules-list">${rules.length ? rules.map((r) => `<li class="row"><span class="grow">@${esc(r.username)}</span><span class="pill ${r.rule === "block" ? "bad" : "good"}">${esc(r.rule)}</span><button type="button" class="small secondary" data-clear="${r.user_id}">${r.rule === "block" ? "Lift ban" : "Clear"}</button></li>`).join("") : `<li class="muted">${moderating ? "No individual access rules." : "Nobody is banned."}</li>`}</ul>`,
         );
       const change = async (user: unknown, selected: string) => {
         await api(
@@ -944,6 +1008,96 @@ const sections: Section[] = [
       );
       onClick(el, "[data-clear]", (button) =>
         change(button.dataset.clear, "clear"),
+      );
+    },
+  },
+  {
+    group: "channel",
+    key: "roles",
+    label: "Roles",
+    about:
+      "What some members may do here without being moderators. Give a member a role under Members.",
+    icon: "shield",
+    show: owns,
+    async draw(el, ctx) {
+      const c = ctx.channel!,
+        roles = await api<ChannelRole[]>(`/channels/${c.id}/roles`);
+      el.innerHTML =
+        roles
+          .map((role) =>
+            card(
+              `${esc(role.name)} <span class="pill">${role.members} member${role.members === 1 ? "" : "s"}</span>`,
+              `<form class="stack narrow-form role-form" data-role="${role.id}" aria-label="Role ${esc(role.name)}"><label>Role name<input name="name" required maxlength="40" value="${esc(role.name)}" autocomplete="off"></label>${channelRoleBoxes(role)}${error}<div class="row"><button>Save role</button><button type="button" class="secondary bad-text" data-delete-role="${role.id}">Delete role</button></div></form>`,
+            ),
+          )
+          .join("") +
+        card(
+          "Create a role",
+          `<form class="stack narrow-form" id="role-create"><label>New role name<input name="name" required maxlength="40" placeholder="Helper" autocomplete="off"></label>${channelRoleBoxes()}${error}<button>Create role</button></form>`,
+          "The owner and moderators can already do all of this. Someone with a role can remove or ban members who hold none, not moderators or each other.",
+        );
+      const changed = async (message: string) => {
+        state.channels = await api<Channel[]>("/channels");
+        if (chatChannel()?.id === c.id) resetChat();
+        toast(message);
+        await ctx.refresh();
+      };
+      for (const form of $$<HTMLFormElement>(".role-form", el))
+        onSubmit(form, async (data) => {
+          await api(
+            `/channels/${c.id}/roles/${form.dataset.role}`,
+            "PATCH",
+            channelRoleValues(data),
+          );
+          await changed("Role saved.");
+        });
+      onSubmit($("#role-create", el), async (data) => {
+        await api(`/channels/${c.id}/roles`, "POST", channelRoleValues(data));
+        await changed("Role created.");
+      });
+      onClick(el, "[data-delete-role]", async (button) => {
+        if (
+          !(await confirmDialog(
+            "Delete this role?",
+            "Members who have it stay in the channel without it.",
+            "Delete role",
+          ))
+        )
+          return;
+        await api(`/channels/${c.id}/roles/${button.dataset.deleteRole}`, "DELETE");
+        await changed("Role deleted.");
+      });
+    },
+  },
+  {
+    group: "channel",
+    key: "instances",
+    label: "Banned instances",
+    about: "Other instances and XMPP servers whose people this channel keeps out.",
+    icon: "shield",
+    show: (c) => channelCan(c, "ban_instances"),
+    async draw(el, ctx) {
+      const c = ctx.channel!,
+        path = `/channels/${c.id}/instance-bans`,
+        bans = await api<{ instance: string }[]>(path);
+      el.innerHTML =
+        card(
+          "Ban an instance",
+          `<form class="stack narrow-form" id="instance-ban"><label>Instance address<input name="instance" required maxlength="300" placeholder="example.org" autocomplete="off" autocapitalize="none" spellcheck="false"></label>${error}<button>Ban instance</button></form>`,
+          "Everyone following this channel from that instance is removed, and nobody there can follow it, post or react in it until the ban is lifted. Write an XMPP server as <code>xmpp:example.org</code>.",
+        ) +
+        card(
+          "Banned instances",
+          `<ul class="plain rules-list">${bans.length ? bans.map((b) => `<li class="row"><code class="grow">${esc(b.instance)}</code><button type="button" class="small secondary" data-unban-instance="${esc(b.instance)}">Lift ban</button></li>`).join("") : '<li class="muted">No instance is banned.</li>'}</ul>`,
+        );
+      const ban = async (instance: unknown, banned: boolean) => {
+        await api(path, "PUT", { instance, banned });
+        toast(banned ? "Instance banned." : "Ban lifted.");
+        ctx.refresh();
+      };
+      onSubmit($("#instance-ban", el), (data) => ban(data.get("instance"), true));
+      onClick(el, "[data-unban-instance]", (button) =>
+        ban(button.dataset.unbanInstance, false),
       );
     },
   },
@@ -1360,6 +1514,7 @@ export async function showSettings(
     (s.group !== "channel" ||
       (!!listed &&
         (!s.mod || canModerate(listed)) &&
+        (!s.show || s.show(listed)) &&
         (!s.mirror || !!listed.mirror)));
   const section = sections.find((s) => s.group === group && s.key === key);
   const href = (s: Section) =>

@@ -110,6 +110,45 @@ function channel(i: Awaited<ReturnType<typeof instance>>, extra = {}) {
   return i.store.channel(c.id);
 }
 
+test("removing or banning a follower, or banning their instance, ends the follow until it is lifted", async (t) => {
+  const a = await instance(t), b = await instance(t);
+  const home = channel(a), actor = a.fed.channelActor(home);
+  const follower = () =>
+    a.store.details(a.alice, home.id).members.find((u) => u.actor_url === b.fed.userActor(b.bob));
+  const follow = async () => {
+    const sub = await b.fed.subscribe(b.bob, actor);
+    await drain(a, b);
+    return b.store.role(sub.channel.id, b.bob.id);
+  };
+  assert.equal(await follow(), "member");
+  // Removed: the follow ends there too, and they can come back.
+  a.store.setMember(a.alice, home.id, follower()!.id, { remove: true });
+  await drain(a, b);
+  assert.equal(follower(), undefined);
+  assert.equal(b.fed.subscriptions(b.bob)[0].status, "rejected");
+  assert.equal(await follow(), "member");
+  // Banned: asking again is refused until the ban is lifted.
+  const banned = follower()!.id;
+  a.store.setMember(a.alice, home.id, banned, { rule: "block" });
+  await drain(a, b);
+  assert.equal(await follow(), null);
+  a.store.setMember(a.alice, home.id, banned, { rule: "clear" });
+  assert.equal(await follow(), "member");
+  // The whole instance: nothing more is relayed to it, and nobody there gets in.
+  a.store.post(a.alice, home.id, { body: "Queued before the ban" });
+  a.store.banInstance(a.alice, home.id, { instance: b.origin, banned: true });
+  await drain(a, b);
+  assert.equal(follower(), undefined);
+  assert.equal(b.store.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE body='Queued before the ban'").get()!.n, 0);
+  assert.equal(await follow(), null);
+  const other = await b.fed.subscribe(b.alice, actor);
+  await drain(a, b);
+  assert.equal(b.store.role(other.channel.id, b.alice.id), null);
+  assert.equal(a.store.db.prepare("SELECT COUNT(*) AS n FROM federation_follows").get()!.n, 0);
+  a.store.banInstance(a.alice, home.id, { instance: b.origin, banned: false });
+  assert.equal(await follow(), "member");
+});
+
 test("delivery honours the configured overall and per-peer send rates", async (t) => {
   const a = await instance(t, { FEDERATION_SEND_RATE: "2", FEDERATION_PEER_SEND_RATE: "3" });
   const b = await instance(t), c = await instance(t);

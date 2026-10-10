@@ -7,6 +7,7 @@ import {
   api,
   avatar,
   canModerate,
+  channelCan,
   channelIcon,
   channelShares,
   clock,
@@ -513,7 +514,7 @@ function renderHeader() {
 function openChannelOptions(button: HTMLElement) {
   const c = current!;
   const owning = !c.remote_actor && (c.role === "owner" || me().admin);
-  const panel = popup(button, `<div class="menu-section channel-menu-about"><strong>#${esc(c.name)}</strong>${c.description ? `<p class="muted small">${esc(c.description)}</p>` : ""}<p class="muted small">${roleLabel(c.role)} · ${c.remote_actor ? "Hosted on another server" : c.federation_enabled ? "Shared with other servers" : "People on this instance"}</p></div>${c.role ? prefItems("channel", c.id) : ""}<div class="menu-section" role="menu">${owning ? `<button type="button" class="menu-item" role="menuitem" data-rename-channel>${icon("pencil")}<span class="grow">Rename channel…</span></button>` : ""}<a class="menu-item" role="menuitem" href="#/settings/channel/overview/${c.id}">${icon("settings")}<span class="grow">Channel settings</span></a>${c.role && c.role !== "owner" ? `<button type="button" class="menu-item bad-text" role="menuitem" data-leave-channel>${icon("logout")}<span class="grow">Leave channel…</span></button>` : ""}</div>`);
+  const panel = popup(button, `<div class="menu-section channel-menu-about"><strong>#${esc(c.name)}</strong>${c.description ? `<p class="muted small">${esc(c.description)}</p>` : ""}<p class="muted small">${roleLabel(c.role, c.channel_role)} · ${c.remote_actor ? "Hosted on another server" : c.federation_enabled ? "Shared with other servers" : "People on this instance"}</p></div>${c.role ? prefItems("channel", c.id) : ""}<div class="menu-section" role="menu">${owning ? `<button type="button" class="menu-item" role="menuitem" data-rename-channel>${icon("pencil")}<span class="grow">Rename channel…</span></button>` : ""}<a class="menu-item" role="menuitem" href="#/settings/channel/overview/${c.id}">${icon("settings")}<span class="grow">Channel settings</span></a>${c.role && c.role !== "owner" ? `<button type="button" class="menu-item bad-text" role="menuitem" data-leave-channel>${icon("logout")}<span class="grow">Leave channel…</span></button>` : ""}</div>`);
   panel?.addEventListener("click", (e) => {
     pickPref(e, c.id, () => redrawChat(false, true));
     if ((e.target as Element).closest("[data-rename-channel]")) action(async () => {
@@ -648,7 +649,7 @@ const mine = (m: Message) =>
 const removable = (m: Message) =>
   !m.deleted_at &&
   !current!.dm &&
-  (m.author_id === me().id || canModerate(current!));
+  (m.author_id === me().id || channelCan(current!, "delete_messages"));
 // A reply links back to what it answers. Threads have their own; direct messages have none.
 const repliable = (m: Message) =>
   canPost() && !m.deleted_at && !current!.dm && !threaded();

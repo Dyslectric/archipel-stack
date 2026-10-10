@@ -112,6 +112,26 @@ const denied: Record<Permission, string> = {
   federation_subscribe: "Your role does not allow joining federated channels.",
   federation_post: "Your role does not allow posting in federated channels.",
 };
+// What a channel's role lets its members do there; the owner and moderators can do all of it.
+export const channelPermissions = [
+  "kick_members",
+  "ban_members",
+  "ban_instances",
+  "delete_messages",
+] as const;
+export type ChannelPermission = (typeof channelPermissions)[number];
+export type ChannelRole = {
+  id: string;
+  channel_id: string;
+  name: string;
+  created_at: string;
+} & Record<ChannelPermission, number>;
+// The instance an account elsewhere belongs to: a web origin, or xmpp: and a domain.
+export function instanceOf(actor: string) {
+  return actor.startsWith("xmpp:")
+    ? `xmpp:${actor.slice(actor.lastIndexOf("@") + 1).toLowerCase()}`
+    : new URL(actor).origin;
+}
 const mediaTypes: Record<string, string> = {
   "image/png": "png",
   "image/jpeg": "jpg",
@@ -175,6 +195,8 @@ export class Store {
     reactionCleared: (user: User, message: Message, emoji: string) => void;
     // Runs inside the change's transaction, while the channel's rows still exist.
     channel: (channel: Channel, change: "rename" | "privacy" | "delete") => void;
+    // Someone on another instance, or everyone on one, was put out of a channel hosted here.
+    expelled: (channel: Channel, who: { actor: string } | { instance: string }) => void;
     direct: (user: User, peer: string) => DirectAccess;
   };
   mirrorHooks?: {
@@ -1053,6 +1075,15 @@ export class Store {
     )
       throw new Problem(403, "Join this channel before posting.");
   }
+  // Whether a channel hosted here is the user's to run: its owner, a moderator, or an administrator.
+  manages(user: User, channel: Channel) {
+    if (channel.remote_actor) return false;
+    if (user.admin) return true;
+    return (
+      this.rule(channel.id, user.id) !== "block" &&
+      ["owner", "moderator"].includes(this.role(channel.id, user.id) || "")
+    );
+  }
   requireManage(user: User, channel: Channel) {
     this.active(user.id);
     if (channel.remote_actor)
@@ -1060,12 +1091,41 @@ export class Store {
         403,
         "Channel moderation belongs to its home instance.",
       );
-    if (user.admin) return;
-    if (
-      this.rule(channel.id, user.id) === "block" ||
-      !["owner", "moderator"].includes(this.role(channel.id, user.id) || "")
-    )
+    if (!this.manages(user, channel))
       throw new Problem(403, "Only channel moderators can do that.");
+  }
+  // The role a member was given in a channel; moderators and the owner need none.
+  channelRole(channelId: string, userId: string) {
+    return this.db
+      .prepare(
+        "SELECT r.* FROM channel_member_roles a JOIN channel_roles r ON r.id=a.role_id JOIN memberships m ON m.channel_id=a.channel_id AND m.user_id=a.user_id WHERE a.channel_id=? AND a.user_id=? AND m.role='member'",
+      )
+      .get(channelId, userId) as ChannelRole | undefined;
+  }
+  channelCan(user: User, channel: Channel, permission: ChannelPermission) {
+    if (this.manages(user, channel)) return true;
+    return (
+      !channel.remote_actor &&
+      this.rule(channel.id, user.id) !== "block" &&
+      !!this.channelRole(channel.id, user.id)?.[permission]
+    );
+  }
+  requireChannelPermission(
+    user: User,
+    channel: Channel,
+    permission: ChannelPermission,
+  ) {
+    this.active(user.id);
+    if (channel.remote_actor)
+      throw new Problem(
+        403,
+        "Channel moderation belongs to its home instance.",
+      );
+    if (!this.channelCan(user, channel, permission))
+      throw new Problem(
+        403,
+        "Only channel moderators, and members whose role allows it, can do that.",
+      );
   }
   // Renaming changes a channel's address and deleting ends it, so neither is delegated to moderators.
   requireOwner(user: User, channel: Channel) {
@@ -1104,6 +1164,9 @@ export class Store {
     const role = this.role(channel.id, user.id);
     if (!role) return false;
     if (!channel.remote_actor && role !== "member") return true;
+    // Whoever may remove or ban members has to see who they are.
+    const held = what === "members" && this.channelRole(channel.id, user.id);
+    if (held && (held.kick_members || held.ban_members)) return true;
     return !!(
       this.db
         .prepare(
@@ -1113,7 +1176,12 @@ export class Store {
     )?.allowed;
   }
   channelInfo(user: User, channel: Channel) {
-    const rule = this.rule(channel.id, user.id);
+    const rule = this.rule(channel.id, user.id),
+      manages = this.manages(user, channel),
+      held =
+        channel.remote_actor || rule === "block"
+          ? undefined
+          : this.channelRole(channel.id, user.id);
     return {
       ...channel,
       sees_members: this.sees(user, channel, "members"),
@@ -1121,6 +1189,10 @@ export class Store {
       actor_url:
         channel.remote_actor || `${this.baseUrl}/actors/channels/${channel.id}`,
       role: this.role(channel.id, user.id),
+      channel_role: held ? { id: held.id, name: held.name } : null,
+      permissions: Object.fromEntries(
+        channelPermissions.map((p) => [p, manages || !!held?.[p]]),
+      ) as Record<ChannelPermission, boolean>,
       reaction_bans: this.reactionBans(channel),
       bridge_room: this.bridgeRoom(channel.id),
       mirror: this.mirrorState(channel.id),
@@ -1143,13 +1215,15 @@ export class Store {
   members(id: string) {
     return this.db
       .prepare(
-        `SELECT u.*, e.role, e.held, COALESCE(g.see_members,0) AS see_members, COALESCE(g.see_handles,0) AS see_handles FROM (${everyone}) e JOIN users u ON u.id=e.user_id LEFT JOIN channel_grants g ON g.channel_id=? AND g.user_id=e.user_id ORDER BY u.username`,
+        `SELECT u.*, e.role, e.held, COALESCE(g.see_members,0) AS see_members, COALESCE(g.see_handles,0) AS see_handles, cr.id AS channel_role_id, cr.name AS channel_role_name FROM (${everyone}) e JOIN users u ON u.id=e.user_id LEFT JOIN channel_grants g ON g.channel_id=? AND g.user_id=e.user_id LEFT JOIN channel_member_roles a ON a.channel_id=? AND a.user_id=e.user_id AND e.held=1 AND e.role='member' LEFT JOIN channel_roles cr ON cr.id=a.role_id ORDER BY u.username`,
       )
-      .all(id, id, id, id) as unknown as (User & {
+      .all(id, id, id, id, id) as unknown as (User & {
       role: string;
       held: number; // a membership kept here, which this instance can change
       see_members: number;
       see_handles: number;
+      channel_role_id: string | null;
+      channel_role_name: string | null;
     })[];
   }
   listChannels(user: User) {
@@ -1306,6 +1380,9 @@ export class Store {
         "channel_roster",
         "channel_rules",
         "channel_grants",
+        "channel_member_roles",
+        "channel_roles",
+        "channel_instance_bans",
         "conversation_prefs",
       ])
         this.db.prepare(`DELETE FROM ${table} WHERE channel_id=?`).run(id);
@@ -1346,11 +1423,12 @@ export class Store {
       .run(id, user.id);
     this.dropGrants(id, user.id);
   }
-  // What a member was allowed to see ends with their membership.
+  // What a member was allowed to see, and the role they held, end with their membership.
   dropGrants(channelId: string, userId: string) {
-    this.db
-      .prepare("DELETE FROM channel_grants WHERE channel_id=? AND user_id=?")
-      .run(channelId, userId);
+    for (const table of ["channel_grants", "channel_member_roles"])
+      this.db
+        .prepare(`DELETE FROM ${table} WHERE channel_id=? AND user_id=?`)
+        .run(channelId, userId);
   }
   details(user: User, id: string) {
     const channel = this.channel(id);
@@ -1367,6 +1445,9 @@ export class Store {
         display_name: u.remote_actor ? this.contactName(user, u.remote_actor) ?? u.display_name : u.display_name,
         see_members: !!u.see_members,
         see_handles: !!u.see_handles,
+        channel_role: u.channel_role_id
+          ? { id: u.channel_role_id, name: u.channel_role_name }
+          : null,
         // Without the handle there is nothing to look the member up by.
         ...(handles || u.id === user.id
           ? {}
@@ -1404,18 +1485,70 @@ export class Store {
     input: Record<string, unknown>,
   ) {
     const channel = this.channel(channelId);
-    this.requireManage(user, channel);
-    this.user(targetId);
+    this.active(user.id);
+    if (channel.remote_actor)
+      throw new Problem(
+        403,
+        "Channel moderation belongs to its home instance.",
+      );
+    const grants = (["see_members", "see_handles"] as const).filter(
+      (key) => input[key] !== undefined,
+    );
+    // Removing someone and banning them are what a role can allow; the rest is the moderators'.
+    const banning =
+      input.rule === "block" ||
+      (input.rule === "clear" && this.rule(channelId, targetId) === "block");
+    const delegated = !this.manages(user, channel);
+    if (
+      delegated &&
+      !(
+        (input.remove === true || banning) &&
+        input.role === undefined &&
+        input.channel_role === undefined &&
+        !grants.length &&
+        (input.rule === undefined || banning) &&
+        (input.remove !== true ||
+          this.channelCan(user, channel, "kick_members")) &&
+        (!banning || this.channelCan(user, channel, "ban_members"))
+      )
+    )
+      throw new Problem(
+        403,
+        this.channelRole(channelId, user.id)
+          ? "Your role in this channel does not allow that."
+          : "Only channel moderators can do that.",
+      );
+    const target = this.user(targetId);
     if (targetId === channel.owner_id)
       throw new Problem(403, "The channel owner cannot be removed or demoted.");
     const role = this.role(channelId, targetId);
     const ownRole = this.role(channelId, user.id);
-    if (
-      !user.admin &&
-      ownRole !== "owner" &&
-      (role === "moderator" || input.role !== undefined)
-    )
+    const owning = !!user.admin || ownRole === "owner";
+    if (!owning && (role === "moderator" || input.role !== undefined))
       throw new Problem(403, "Only the owner can manage moderators.");
+    if (delegated && this.channelRole(channelId, targetId))
+      throw new Problem(
+        403,
+        "Only the owner and moderators can remove or ban someone who holds a role.",
+      );
+    if (input.channel_role !== undefined) {
+      if (!owning)
+        throw new Problem(403, "Only the owner can give members a role.");
+      if (input.channel_role !== null && typeof input.channel_role !== "string")
+        throw new Problem(400, "Choose a role.");
+      if (input.channel_role !== null) {
+        this.channelRoleRow(channelId, input.channel_role);
+        if (target.remote_actor)
+          throw new Problem(400, "Only local members can hold a channel's role.");
+        if ((input.role ?? role) !== "member")
+          throw new Problem(
+            409,
+            role
+              ? "Moderators can already do everything a role allows."
+              : "The user must join before receiving a role.",
+          );
+      }
+    }
     if (
       input.rule !== undefined &&
       !["allow", "block", "clear"].includes(input.rule as string)
@@ -1428,11 +1561,8 @@ export class Store {
       throw new Problem(400, "Invalid role.");
     if (input.role !== undefined && !role)
       throw new Problem(409, "The user must join before receiving a role.");
-    if (input.role === "moderator" && this.user(targetId).remote_actor)
+    if (input.role === "moderator" && target.remote_actor)
       throw new Problem(400, "Only local members can moderate a channel.");
-    const grants = (["see_members", "see_handles"] as const).filter(
-      (key) => input[key] !== undefined,
-    );
     if (grants.some((key) => typeof input[key] !== "boolean"))
       throw new Problem(400, "Choose whether the member is allowed to see it.");
     if (grants.length && !role)
@@ -1440,6 +1570,7 @@ export class Store {
     if (
       input.rule === undefined &&
       input.role === undefined &&
+      input.channel_role === undefined &&
       !grants.length &&
       input.remove !== true
     )
@@ -1466,12 +1597,29 @@ export class Store {
           .prepare("DELETE FROM memberships WHERE channel_id=? AND user_id=?")
           .run(channelId, targetId);
         this.dropGrants(channelId, targetId);
-      } else if (input.role)
-        this.db
-          .prepare(
-            "UPDATE memberships SET role=? WHERE channel_id=? AND user_id=?",
-          )
-          .run(input.role as string, channelId, targetId);
+        // Someone following from another instance has no membership here to take: their follow ends.
+        if (target.remote_actor && !target.remote_actor.startsWith("xmpp:"))
+          this.federationHooks?.expelled(channel, { actor: target.remote_actor });
+      } else {
+        if (input.role)
+          this.db
+            .prepare(
+              "UPDATE memberships SET role=? WHERE channel_id=? AND user_id=?",
+            )
+            .run(input.role as string, channelId, targetId);
+        if (input.channel_role === null || input.role === "moderator")
+          this.db
+            .prepare(
+              "DELETE FROM channel_member_roles WHERE channel_id=? AND user_id=?",
+            )
+            .run(channelId, targetId);
+        else if (input.channel_role)
+          this.db
+            .prepare(
+              "INSERT INTO channel_member_roles VALUES(?,?,?) ON CONFLICT(channel_id,user_id) DO UPDATE SET role_id=excluded.role_id",
+            )
+            .run(channelId, targetId, input.channel_role as string);
+      }
       this.audit(
         user.id,
         "channel.membership",
@@ -1480,12 +1628,228 @@ export class Store {
     });
   }
   rules(user: User, id: string) {
+    const channel = this.channel(id),
+      // Someone whose role lets them ban sees who is banned, not who is invited.
+      all = this.manages(user, channel);
+    if (all) this.requireManage(user, channel);
+    else this.requireChannelPermission(user, channel, "ban_members");
+    return (
+      this.db
+        .prepare(
+          "SELECT r.user_id,r.rule,u.username FROM channel_rules r JOIN users u ON u.id=r.user_id WHERE channel_id=? ORDER BY u.username",
+        )
+        .all(id) as { user_id: string; rule: string; username: string }[]
+    ).filter((r) => all || r.rule === "block");
+  }
+  // ---- channel roles: what the owner lets some members do in the channel ----
+  private channelRoleRow(channelId: string, id: string) {
+    const role = this.db
+      .prepare("SELECT * FROM channel_roles WHERE id=? AND channel_id=?")
+      .get(id, channelId) as ChannelRole | undefined;
+    if (!role) throw new Problem(404, "Role not found.");
+    return role;
+  }
+  private channelRoleView(role: ChannelRole) {
+    return {
+      id: role.id,
+      name: role.name,
+      ...(Object.fromEntries(
+        channelPermissions.map((p) => [p, !!role[p]]),
+      ) as Record<ChannelPermission, boolean>),
+      members: Number(
+        this.db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM channel_member_roles a JOIN memberships m ON m.channel_id=a.channel_id AND m.user_id=a.user_id WHERE a.role_id=? AND m.role='member'",
+          )
+          .get(role.id)?.n,
+      ),
+    };
+  }
+  channelRoles(user: User, id: string) {
     this.requireManage(user, this.channel(id));
+    return (
+      this.db
+        .prepare("SELECT * FROM channel_roles WHERE channel_id=? ORDER BY name")
+        .all(id) as unknown as ChannelRole[]
+    ).map((role) => this.channelRoleView(role));
+  }
+  private channelRoleInput(
+    channelId: string,
+    input: Record<string, unknown>,
+    current?: ChannelRole,
+  ) {
+    if (
+      Object.keys(input).some(
+        (key) =>
+          key !== "name" && !channelPermissions.includes(key as ChannelPermission),
+      )
+    )
+      throw new Problem(400, "Unknown role setting.");
+    const name =
+      input.name === undefined && current
+        ? current.name
+        : text(input.name, "Role name", 40);
+    const flags = channelPermissions.map((p) => {
+      const value = input[p];
+      if (value === undefined) return current ? current[p] : 0;
+      if (typeof value !== "boolean")
+        throw new Problem(400, "Role permissions are on or off.");
+      return Number(value);
+    });
+    if (
+      this.db
+        .prepare("SELECT 1 FROM channel_roles WHERE channel_id=? AND name=? AND id!=?")
+        .get(channelId, name, current?.id ?? "")
+    )
+      throw new Problem(409, "That role name is already used in this channel.");
+    return { name, flags };
+  }
+  createChannelRole(user: User, id: string, input: Record<string, unknown>) {
+    this.requireOwner(user, this.channel(id));
+    return this.transaction(() => {
+      const { name, flags } = this.channelRoleInput(id, input);
+      if (
+        Number(
+          this.db
+            .prepare("SELECT COUNT(*) AS n FROM channel_roles WHERE channel_id=?")
+            .get(id)?.n,
+        ) >= 20
+      )
+        throw new Problem(409, "A channel has up to 20 roles.");
+      const roleId = randomUUID();
+      this.db
+        .prepare(
+          `INSERT INTO channel_roles(id,channel_id,name,${channelPermissions.join(",")},created_at) VALUES(?,?,?,${channelPermissions.map(() => "?").join(",")},?)`,
+        )
+        .run(roleId, id, name, ...flags, now());
+      this.audit(
+        user.id,
+        "channel.role.create",
+        JSON.stringify({ channel: id, role: roleId, name }),
+      );
+      return this.channelRoleView(this.channelRoleRow(id, roleId));
+    });
+  }
+  updateChannelRole(
+    user: User,
+    id: string,
+    roleId: string,
+    input: Record<string, unknown>,
+  ) {
+    this.requireOwner(user, this.channel(id));
+    return this.transaction(() => {
+      const { name, flags } = this.channelRoleInput(
+        id,
+        input,
+        this.channelRoleRow(id, roleId),
+      );
+      this.db
+        .prepare(
+          `UPDATE channel_roles SET name=?,${channelPermissions.map((p) => `${p}=?`).join(",")} WHERE id=?`,
+        )
+        .run(name, ...flags, roleId);
+      this.audit(
+        user.id,
+        "channel.role.update",
+        JSON.stringify({ channel: id, role: roleId, ...input }),
+      );
+      return this.channelRoleView(this.channelRoleRow(id, roleId));
+    });
+  }
+  // The members who held it are members still.
+  deleteChannelRole(user: User, id: string, roleId: string) {
+    this.requireOwner(user, this.channel(id));
+    this.transaction(() => {
+      const role = this.channelRoleRow(id, roleId);
+      this.db
+        .prepare("DELETE FROM channel_member_roles WHERE role_id=?")
+        .run(roleId);
+      this.db.prepare("DELETE FROM channel_roles WHERE id=?").run(roleId);
+      this.audit(
+        user.id,
+        "channel.role.delete",
+        JSON.stringify({ channel: id, role: roleId, name: role.name }),
+      );
+    });
+  }
+  // ---- instances a channel keeps out, whoever on them asks to come in ----
+  instanceBanned(channelId: string, actor: string) {
+    return !!this.db
+      .prepare(
+        "SELECT 1 FROM channel_instance_bans WHERE channel_id=? AND instance=?",
+      )
+      .get(channelId, instanceOf(actor));
+  }
+  instanceBans(user: User, id: string) {
+    this.requireChannelPermission(user, this.channel(id), "ban_instances");
     return this.db
       .prepare(
-        "SELECT r.user_id,r.rule,u.username FROM channel_rules r JOIN users u ON u.id=r.user_id WHERE channel_id=? ORDER BY u.username",
+        "SELECT instance,created_at FROM channel_instance_bans WHERE channel_id=? ORDER BY instance",
       )
-      .all(id);
+      .all(id) as { instance: string; created_at: string }[];
+  }
+  // An instance is named by its host or any address on it; an XMPP server by xmpp: and its domain.
+  private instanceName(value: unknown) {
+    const name = text(value, "Instance", 300).toLowerCase();
+    const domain = /^xmpp:(?:[^@/\s]*@)?([a-z0-9.-]+)$/.exec(name);
+    if (domain) return `xmpp:${domain[1]}`;
+    const url = URL.parse(name.includes("://") ? name : `https://${name}`);
+    if (!url || !/^https?:$/.test(url.protocol) || !url.hostname)
+      throw new Problem(
+        400,
+        "Name the instance by its address, such as example.org, or an XMPP server as xmpp:example.org.",
+      );
+    return url.origin;
+  }
+  banInstance(user: User, id: string, input: Record<string, unknown>) {
+    const channel = this.channel(id);
+    this.requireChannelPermission(user, channel, "ban_instances");
+    if (typeof input.banned !== "boolean")
+      throw new Problem(400, "Choose whether the instance is banned.");
+    const instance = this.instanceName(input.instance);
+    if (instance === new URL(this.baseUrl).origin)
+      throw new Problem(400, "A channel cannot ban the instance it is hosted on.");
+    return this.transaction(() => {
+      if (input.banned) {
+        if (
+          Number(
+            this.db
+              .prepare(
+                "SELECT COUNT(*) AS n FROM channel_instance_bans WHERE channel_id=?",
+              )
+              .get(id)?.n,
+          ) >= 200
+        )
+          throw new Problem(409, "A channel bans up to 200 instances.");
+        this.db
+          .prepare("INSERT OR IGNORE INTO channel_instance_bans VALUES(?,?,?)")
+          .run(id, instance, now());
+        // Its people in the channel leave it: those in a room here, then those following from there.
+        for (const member of this.db
+          .prepare(
+            "SELECT u.id,u.remote_actor FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.channel_id=? AND u.remote_actor IS NOT NULL",
+          )
+          .all(id) as { id: string; remote_actor: string }[])
+          if (instanceOf(member.remote_actor) === instance) {
+            this.db
+              .prepare("DELETE FROM memberships WHERE channel_id=? AND user_id=?")
+              .run(id, member.id);
+            this.dropGrants(id, member.id);
+          }
+        this.federationHooks?.expelled(channel, { instance });
+      } else
+        this.db
+          .prepare(
+            "DELETE FROM channel_instance_bans WHERE channel_id=? AND instance=?",
+          )
+          .run(id, instance);
+      this.audit(
+        user.id,
+        input.banned ? "channel.instance.ban" : "channel.instance.unban",
+        JSON.stringify({ channel: id, instance }),
+      );
+      return this.instanceBans(user, id);
+    });
   }
   createTopic(user: User, id: string, title: unknown) {
     const channel = this.channel(id);
@@ -1939,7 +2303,7 @@ export class Store {
     const message = this.message(id),
       channel = this.channel(message.channel_id);
     if (message.author_id === user.id) this.requirePost(user, channel);
-    else this.requireManage(user, channel);
+    else this.requireChannelPermission(user, channel, "delete_messages");
     this.transaction(() => {
       this.dropMedia(message.body, message.author_id);
       this.db

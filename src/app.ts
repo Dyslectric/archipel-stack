@@ -899,6 +899,40 @@ export function createApp(config: Config, store: Store) {
   app.get("/api/channels/:id/rules", (req, res) =>
     res.json(store.rules(user(res), String(req.params.id))),
   );
+  app.get("/api/channels/:id/roles", (req, res) =>
+    res.json(store.channelRoles(user(res), String(req.params.id))),
+  );
+  app.post("/api/channels/:id/roles", (req, res) =>
+    res
+      .status(201)
+      .json(
+        store.createChannelRole(user(res), String(req.params.id), req.body || {}),
+      ),
+  );
+  app.patch("/api/channels/:id/roles/:role", (req, res) =>
+    res.json(
+      store.updateChannelRole(
+        user(res),
+        String(req.params.id),
+        String(req.params.role),
+        req.body || {},
+      ),
+    ),
+  );
+  app.delete("/api/channels/:id/roles/:role", (req, res) => {
+    store.deleteChannelRole(
+      user(res),
+      String(req.params.id),
+      String(req.params.role),
+    );
+    res.json({ ok: true });
+  });
+  app.get("/api/channels/:id/instance-bans", (req, res) =>
+    res.json(store.instanceBans(user(res), String(req.params.id))),
+  );
+  app.put("/api/channels/:id/instance-bans", (req, res) =>
+    res.json(store.banInstance(user(res), String(req.params.id), req.body || {})),
+  );
   app.patch("/api/channels/:id/members/:user", (req, res) => {
     store.setMember(
       user(res),

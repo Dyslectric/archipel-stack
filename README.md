@@ -72,6 +72,9 @@ usernames match. New instances start without fabricated channels or conversation
   behind display names, to the owner and moderators and the members they allow.
 - Public or members-only reading; open or invited membership.
 - Identity allowlists, blocks, member removal, and delegated moderators.
+- Channel roles: the owner names roles that let chosen members remove members,
+  ban people, ban whole instances, or delete messages, without making them
+  moderators. See [channel roles](#channel-roles).
 - Owner protection, backend permission checks, instance account suspension,
   administrator inspection, audited message removal, and deletion placeholders.
 - OIDC authorization code login with PKCE, state, nonce, signed token validation,
@@ -202,8 +205,9 @@ Authors can use **Edit message** on their own messages while they remain channel
 members. Thread roots can also have their title edited. Edits keep the message's
 ID, position, topic, and reply relationships and show an edited marker. If another
 edit happened while the editor was open, the save is rejected so it cannot overwrite
-that change; reopen the editor to load the current version. Administrators and
-moderators can remove other people's messages but only authors can edit them.
+that change; reopen the editor to load the current version. Administrators,
+moderators and members whose [channel role](#channel-roles) allows it can remove
+other people's messages but only authors can edit them.
 
 For approval-based admission, open **Instance administration** and set **New user
 access** to **Invite only**. New users still authenticate with FedIdP; their
@@ -259,6 +263,26 @@ The default role and new roles start with every local grant except the member
 list, and no federation grant. Upgrading keeps everyone's other access: the default role is created that way, and accounts that had federation switches of their
 own are moved to roles carrying exactly those. Deleting a role returns its accounts
 to the default one. Administrators follow their role like anyone else.
+
+## Channel roles
+
+A channel's owner and moderators can do everything in it. Its owner can let other
+members do some of it: channel settings → **Roles** names up to 20 roles, and
+**Members** gives a local member one of them. A role grants, separately:
+
+| Grant | Covers |
+| --- | --- |
+| Remove members | Taking someone out of the channel; they can join again if it lets them. A follower on another instance has their follow ended |
+| Ban people | Blocking someone from the channel, which removes them too, and lifting such bans under **Access rules** |
+| Ban instances | Channel settings → **Banned instances**: everyone following from that instance is removed and nobody there can follow, post or react until the ban is lifted. `xmpp:example.org` bans an XMPP server from the channel's room |
+| Delete messages | Removing other people's messages |
+
+Someone acting through a role reaches members who hold no role: not the owner,
+moderators or other role holders. Removing or banning members lets them see the
+member list of a channel that otherwise hides it. Roles are kept on the channel's
+home instance and do nothing for a member following from another one. Only the
+owner (or an administrator) creates, changes and gives out roles; leaving or being
+removed gives the role up, and making someone a moderator replaces it.
 
 ## Attachments
 

@@ -40,7 +40,9 @@ inferred from a handle or a social claim.
 
 Proposed: a channel has one home instance and one authoritative channel actor.
 Its creator becomes its owner. Owners can appoint moderators, who can manage
-membership and access rules but cannot replace the owner. Ownership transfer
+membership and access rules but cannot replace the owner. Owners can also name
+channel roles that let a member remove members, ban people or instances, or
+delete messages, and nothing else. Ownership transfer
 is a separate action. Instance administrators retain the inspection and
 moderation powers requested in the brief, including over restricted channels.
 

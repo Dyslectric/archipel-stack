@@ -98,6 +98,8 @@ export class Xmpp {
       throw new Problem(403, "This XMPP identity or domain is blocked.");
     if (!channel.federation_enabled || channel.visibility !== "public")
       throw new Problem(403, "This room does not admit members of other servers.");
+    if (this.store.instanceBanned(channel.id, `xmpp:${address}`))
+      throw new Problem(403, "Your server is banned from this channel.");
   }
   /** Returns the known identity, or null for a newcomer who may still join. */
   private admissible(address: string, channel: Channel) {

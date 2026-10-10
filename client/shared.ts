@@ -20,6 +20,8 @@ export interface User {
   // What a channel's owner or moderator allowed this member to see there.
   see_members?: boolean;
   see_handles?: boolean;
+  // In a member list: the role the channel's owner gave this member.
+  channel_role?: { id: string; name: string } | null;
   federation_send?: boolean;
   federation_receive?: boolean;
   federation_subscribe?: boolean;
@@ -33,6 +35,11 @@ export interface User {
   xmpp_rooms?: boolean;
   list_members?: boolean;
 }
+export type ChannelPermission =
+  | "kick_members"
+  | "ban_members"
+  | "ban_instances"
+  | "delete_messages";
 export interface Topic {
   id: string;
   title: string;
@@ -46,6 +53,9 @@ export interface Channel {
   admission: string;
   owner_id: string;
   role: string | null;
+  // The role its owner gave this reader, and what they may do there with or without one.
+  channel_role?: { id: string; name: string } | null;
+  permissions?: Record<ChannelPermission, boolean>;
   readable: boolean;
   can_join: boolean;
   member_count: number;
@@ -329,6 +339,9 @@ export const canModerate = (c: Channel) =>
   !c.remote_actor &&
   (!!state.session.user?.admin ||
     ["owner", "moderator"].includes(c.role || ""));
+// What moderators can always do, and other members where their role in the channel allows it.
+export const channelCan = (c: Channel, permission: ChannelPermission) =>
+  !!c.permissions?.[permission];
 
 const dayKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 export const sameDay = (a: string, b: string) =>
@@ -750,8 +763,8 @@ export function adoptEmojiDialog(emoji: { id: string; name: string }) {
 }
 // A small panel floating by the thing that opened it; one at a time, gone on a click elsewhere or Escape.
 let closePopup: (() => void) | null = null;
-export const roleLabel = (role: string | null | undefined) =>
-  role === "owner" ? "Owner" : role === "moderator" ? "Moderator" : role === "member" ? "Member" : "Not a member";
+export const roleLabel = (role: string | null | undefined, held?: { name: string } | null) =>
+  role === "member" && held ? esc(held.name) : role === "owner" ? "Owner" : role === "moderator" ? "Moderator" : role === "member" ? "Member" : "Not a member";
 export function popup(anchor: HTMLElement, html: string, at?: { x: number; y: number }) {
   const wasOpen = anchor.getAttribute("aria-expanded") === "true";
   closePopup?.();

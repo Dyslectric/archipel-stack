@@ -84,6 +84,7 @@ export class Federation {
     store.federationHooks = {
       profile: (user) => this.profileChanged(user),
       permissions: (user) => this.permissionsChanged(user),
+      expelled: (channel, who) => this.expelled(channel, who),
       write: (user, channel) => {
         if (this.importing) return;
         if (channel.remote_actor)
@@ -616,6 +617,26 @@ export class Federation {
         JSON.stringify({ channel: id, actor, decision }),
       );
     });
+  }
+  // Ends the follows of someone removed or banned from a home channel, or of everyone on a banned
+  // instance, and tells them. Nothing is kept of the follow, so the ban alone decides a later one.
+  private expelled(channel: Channel, who: { actor: string } | { instance: string }) {
+    const follows = (
+      this.store.db
+        .prepare(
+          "SELECT actor,follow_id FROM federation_follows WHERE channel_id=? AND status!='blocked'",
+        )
+        .all(channel.id) as { actor: string; follow_id: string }[]
+    ).filter((f) =>
+      "actor" in who ? f.actor === who.actor : new URL(f.actor).origin === who.instance,
+    );
+    for (const follow of follows) {
+      if (this.enabled() && channel.federation_enabled)
+        this.followAnswer(channel, follow.actor, follow.follow_id, false);
+      this.store.db
+        .prepare("DELETE FROM federation_follows WHERE channel_id=? AND actor=?")
+        .run(channel.id, follow.actor);
+    }
   }
   private followAnswer(
     channel: Channel,
@@ -2172,24 +2193,33 @@ export class Federation {
             "SELECT status FROM federation_follows WHERE channel_id=? AND actor=?",
           )
           .get(channel.id, sender.id) as { status: string } | undefined;
-        const blocked =
-          old?.status === "blocked" ||
-          this.store.rule(channel.id, remote.id) === "block";
+        const banned =
+            this.store.rule(channel.id, remote.id) === "block" ||
+            this.store.instanceBanned(channel.id, sender.id),
+          blocked = banned || old?.status === "blocked";
         const accept =
           !blocked &&
           (channel.admission === "open" ||
             old?.status === "accepted" ||
             this.store.rule(channel.id, remote.id) === "allow");
-        this.store.db
-          .prepare(
-            "INSERT INTO federation_follows VALUES(?,?,?,?) ON CONFLICT(channel_id,actor) DO UPDATE SET follow_id=excluded.follow_id,status=excluded.status",
-          )
-          .run(
-            channel.id,
-            sender.id,
-            activity.id,
-            blocked ? "blocked" : accept ? "accepted" : "pending",
-          );
+        // A ban answers for itself: no follow is kept, so once it is lifted they can ask again.
+        if (banned)
+          this.store.db
+            .prepare(
+              "DELETE FROM federation_follows WHERE channel_id=? AND actor=? AND status!='blocked'",
+            )
+            .run(channel.id, sender.id);
+        else
+          this.store.db
+            .prepare(
+              "INSERT INTO federation_follows VALUES(?,?,?,?) ON CONFLICT(channel_id,actor) DO UPDATE SET follow_id=excluded.follow_id,status=excluded.status",
+            )
+            .run(
+              channel.id,
+              sender.id,
+              activity.id,
+              blocked ? "blocked" : accept ? "accepted" : "pending",
+            );
         if (accept || blocked)
           this.followAnswer(channel, sender.id, activity.id, accept);
       } else if (activity.type === "Undo") {
