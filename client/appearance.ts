@@ -10,6 +10,33 @@ export const appStyle = (): AppStyle => {
   return valid(value) ? value : "default";
 };
 export const isFusion = () => appStyle() !== "default";
+let scale = 100;
+export function applyTextScale(value?: number) {
+  if (value === undefined) {
+    try { value = Number(localStorage.getItem("archipel-text-scale") || 100); }
+    catch { value = 100; }
+  }
+  scale = Number.isFinite(value) && value >= 85 && value <= 175 ? Math.round(value) : 100;
+  document.documentElement.style.setProperty("--text-scale", String(scale / 100));
+  for (const input of document.querySelectorAll<HTMLInputElement>("[data-text-scale]")) {
+    input.value = String(scale);
+    input.setAttribute("aria-valuetext", `${scale}%`);
+  }
+  for (const output of document.querySelectorAll("[data-text-scale-value]")) output.textContent = `${scale}%`;
+}
+export const textScaleControls = () => `<div class="text-scale-control"><label for="text-scale">Text size <output for="text-scale" data-text-scale-value>${scale}%</output></label><input id="text-scale" data-text-scale type="range" min="85" max="175" step="5" value="${scale}" aria-valuetext="${scale}%"><button type="button" class="secondary" data-reset-text-scale>Reset to 100%</button></div>`;
+function saveTextScale(value: number) {
+  applyTextScale(value);
+  try { localStorage.setItem("archipel-text-scale", String(scale)); } catch { /* Keep the choice for this visit. */ }
+  document.dispatchEvent(new Event("text-scale-change"));
+}
+document.addEventListener("input", event => {
+  const input = event.target as HTMLInputElement;
+  if (input.matches("[data-text-scale]")) saveTextScale(Number(input.value));
+});
+document.addEventListener("click", event => {
+  if ((event.target as Element).closest("[data-reset-text-scale]")) saveTextScale(100);
+});
 export function applyStyle(value?: string) {
   if (value === undefined) {
     try { value = localStorage.getItem("archipel-style") || "default"; }
@@ -31,6 +58,10 @@ document.addEventListener("click", event => {
   document.dispatchEvent(new Event("appearance-change"));
 });
 window.addEventListener("storage", event => {
+  if (event.key === "archipel-text-scale" || event.key === null) {
+    applyTextScale();
+    document.dispatchEvent(new Event("text-scale-change"));
+  }
   if (event.key !== "archipel-style" && event.key !== null) return;
   applyStyle();
   document.dispatchEvent(new Event("appearance-change"));

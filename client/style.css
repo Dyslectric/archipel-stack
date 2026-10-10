@@ -1,6 +1,8 @@
 /* ---- colours: the same set as ThreadBNC and fedbooru. light-dark() follows the device,
    or the theme picked in the menu ---- */
 :root {
+  --text-scale: 1;
+  font-size: calc(16px * var(--text-scale));
   color-scheme: light dark;
   --bg: light-dark(#f6f5f2, #151517); --card: light-dark(#ffffff, #1e1e21); --text: light-dark(#1d1d1f, #e8e8ea);
   --muted: light-dark(#66666b, #9d9da5); --line: light-dark(#e3e1dc, #2f2f34);
@@ -30,7 +32,7 @@
 * { box-sizing: border-box; }
 html, body { height: 100%; }
 body { margin: 0; background: var(--bg); color: var(--text);
-  font: 15px/1.5 "Twemoji", system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: calc(15px * var(--text-scale))/1.5 "Twemoji", system-ui, -apple-system, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
 a { color: var(--accent); text-decoration: none; text-underline-offset: 2px; }
 a:hover { text-decoration: underline; }
@@ -289,6 +291,9 @@ button.member-name { flex: 1; min-width: 0; font-weight: 500; overflow: hidden; 
 .side-row .channel-link { flex: 1; min-width: 0; }
 .side-row:has([data-item-menu]) .channel-link { padding-right: 42px; }
 .side-row .row-menu { position: absolute; right: 6px; }
+.topic-toggle { position: absolute; left: 5px; width: 24px; height: 24px; z-index: 1; }
+.topic-toggle .i { width: 16px; height: 16px; }
+.side-row:has(.topic-toggle) .channel-link { padding-left: 34px; }
 .side-row:hover .channel-link:not(.on), .side-row:focus-within .channel-link:not(.on),
 .side-row:has(.row-menu[aria-expanded=true]) .channel-link:not(.on) { background: var(--hover); }
 .row-menu { width: 28px; height: 28px; opacity: 0; pointer-events: none; }

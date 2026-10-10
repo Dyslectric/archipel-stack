@@ -34,7 +34,7 @@ import {
   type User,
 } from "./shared.js";
 import { chatChannel, resetChat } from "./chat.js";
-import { styleChoices } from "./appearance.js";
+import { styleChoices, textScaleControls } from "./appearance.js";
 import { renderSidebar, sidebarFrame } from "./sidebar.js";
 import { mirrorDialog } from "./mirrors.js";
 import {
@@ -365,7 +365,7 @@ const sections: Section[] = [
     about: "How Archipel looks in this browser.",
     icon: "sun",
     async draw(el) {
-      el.innerHTML = card("Interface style", styleChoices(), "Applied immediately and kept for this browser. Each style supports light and dark colors.") + card(
+      el.innerHTML = card("Interface style", styleChoices(), "Applied immediately and kept for this browser. Each style supports light and dark colors.") + card("Text size", textScaleControls(), "Applied immediately to all interface styles and saved in this browser.") + card(
         "Theme",
         themeSeg(),
         "Kept for this browser only, so each device can have its own. Device follows your system's light or dark setting.",

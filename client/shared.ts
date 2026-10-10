@@ -201,6 +201,7 @@ const paths: Record<string, string> = {
   "fusion-quote": '<path d="M10 11H6a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v6q0 4-4 5m13-7h-4a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v6q0 4-4 5"/>',
   "fusion-chevron-down": '<path class="solid" d="M4 8h16l-8 10z"/>',
   "fusion-folder": '<g transform="scale(1.5)"><path d="M3.2 3.6h2.6c.5 0 .9.2 1.2.6l.6.8c.2.2.4.3.7.3h4.5c.7 0 1.2.5 1.2 1.2v4.8c0 .7-.5 1.2-1.2 1.2H3.2c-.7 0-1.2-.5-1.2-1.2V4.8c0-.7.5-1.2 1.2-1.2z"/></g>',
+  "folder-open": '<path d="M5 20h14l3-10H8L5 20zm0 0H3V5a1 1 0 0 1 1-1h5l3 3h7a1 1 0 0 1 1 1v2"/>',
   collapse: '<path d="M12 3v6l3-3M9 6l3 3m0 12v-6l3 3m-6 0l3-3m-8-3h1m4 0h1m4 0h1m4 0h1"/>',
   "fusion-hash": '<path d="M5 9h14M5 15h14M11 4 7 20M17 4l-4 16"/>',
   "fusion-globe": '<path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0-18 0M3.6 9h16.8M3.6 15h16.8M11.5 3a17 17 0 0 0 0 18M12.5 3a17 17 0 0 1 0 18"/>',
@@ -319,9 +320,9 @@ export function dmPeer(key: string) {
 export const modeLabel = (mode: string) =>
   ({ timeline: "Timeline", topical: "Topics", threaded: "Threads" })[mode] ||
   mode;
-export const channelIcon = (c: Channel) =>
+export const channelIcon = (c: Channel, badges = true) =>
   isFusion()
-    ? icon(c.mode === "topical" ? "folder" : c.mode === "threaded" ? "needle-thread" : "hash") + (c.remote_actor ? `<span class="mode-tag" title="On another instance" aria-label="On another instance">${icon("globe")}</span>` : c.visibility === "members" ? `<span class="mode-tag" title="Members only" aria-label="Members only">${icon("lock")}</span>` : "")
+    ? icon(c.mode === "topical" ? "folder" : c.mode === "threaded" ? "needle-thread" : "hash") + (!badges ? "" : c.remote_actor ? `<span class="mode-tag" title="On another instance" aria-label="On another instance">${icon("globe")}</span>` : c.visibility === "members" ? `<span class="mode-tag" title="Members only" aria-label="Members only">${icon("lock")}</span>` : "")
     : icon(c.remote_actor ? "globe" : c.visibility === "members" ? "lock" : "hash");
 export const canModerate = (c: Channel) =>
   !c.remote_actor &&
@@ -494,13 +495,13 @@ if (typeof document !== "undefined") {
     shown = img;
     const { kind, origin, owner } = img.dataset,
       name = (img.getAttribute("alt") || "").replaceAll(":", ""),
-      what = kind === "personal" ? "Personal emoji" : "Instance emoji",
+      what = kind === "personal" ? "Personal emoji" : kind === "instance" ? "Instance emoji" : "Custom emoji",
       where = origin ? ` on ${esc(origin)}` : "",
       id = adoptable(img),
       picture = `<img src="${esc(img.getAttribute("src") || "")}" alt="">`;
     card = document.createElement("div");
     card.className = "emoji-card";
-    card.innerHTML = `${id ? `<button type="button" class="ec-keep" aria-label="Keep :${esc(name)}:" title="Keep this emoji">${picture}</button>` : picture}<div class="ec-text"><strong>:${esc(name)}:</strong><span class="ec-kind">${what}</span><span class="ec-kind">${kind === "personal" && owner ? `From ${esc(owner)}${where}` : `From ${esc(origin || "this instance")}`}</span>${id ? `<span class="ec-hint">${fingers ? "Tap" : "Click"} the picture to keep it</span>` : ""}</div>`;
+    card.innerHTML = `${id ? `<button type="button" class="ec-keep" aria-label="Keep :${esc(name)}:" title="Keep this emoji">${picture}</button>` : picture}<div class="ec-text"><strong>:${esc(name)}:</strong><span class="ec-kind">${what}</span>${kind || origin ? `<span class="ec-kind">${kind === "personal" && owner ? `From ${esc(owner)}${where}` : `From ${esc(origin || "this instance")}`}</span>` : ""}${id ? `<span class="ec-hint">${fingers ? "Tap" : "Click"} the picture to keep it</span>` : ""}</div>`;
     document.body.append(card);
     card.addEventListener("mouseenter", () => clearTimeout(leaving));
     card.addEventListener("mouseleave", leave);
@@ -510,10 +511,10 @@ if (typeof document !== "undefined") {
     });
     place(img.getBoundingClientRect());
   };
-  const emoji = "img.custom-emoji[data-kind], span.emoji";
+  const emoji = "img.custom-emoji, span.emoji";
   // Only where an emoji was used: not where one is being chosen, listed or summarised.
   const used = (at: Element | null) => {
-    const img = at?.closest?.<HTMLElement>(emoji);
+    const img = at?.closest?.(".reaction")?.querySelector<HTMLElement>(emoji) || at?.closest?.<HTMLElement>(emoji);
     return img && !img.closest(".emoji-picker, .emoji-suggest, .emoji-sample, .reply-context, dialog") ? img : null;
   };
   document.addEventListener("mouseover", (e) => {
@@ -528,6 +529,20 @@ if (typeof document !== "undefined") {
     const img = fingers ? used(e.target as Element) : null;
     if (img && !img.closest(".reaction")) show(img);
   });
+  document.addEventListener("focusin", e => {
+    if (!fingers && (e.target as Element).closest?.(".reaction")) {
+      const img = used(e.target as Element);
+      if (img) show(img);
+    }
+  });
+  document.addEventListener("focusout", e => {
+    if ((e.target as Element).closest?.(".reaction") && !card?.contains(e.relatedTarget as Node | null)) leave();
+  });
+  document.addEventListener("contextmenu", e => {
+    if (!(e.target as Element).closest?.(".reaction")) return;
+    const img = used(e.target as Element);
+    if (img) { e.preventDefault(); e.stopPropagation(); show(img); }
+  }, true);
   // A reaction held for a moment shows its card; the tap that lifting would make is dropped.
   let holding = 0,
     held = false;

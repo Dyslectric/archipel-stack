@@ -812,6 +812,17 @@ test("two browser instances federate a channel and a direct message with admin-c
   await expect(
     page.locator(".message-body").filter({ hasText: "Remote greeting." }),
   ).toBeVisible();
+  await bob.locator("[data-nav=settings]").click();
+  await section(bob, "Appearance");
+  for (const name of ["Fusion Compact", "Fusion Cozy"]) {
+    await bob.getByRole("button", { name: new RegExp(`^${name}`) }).click();
+    const remoteRow = bob.locator(".side-row").filter({ has: bob.locator(".channel-link").filter({ hasText: "federated-lounge" }) });
+    await remoteRow.hover();
+    const globe = await remoteRow.locator(".remote-marker").boundingBox();
+    const menu = await remoteRow.locator(".row-menu").boundingBox();
+    expect(globe!.x + globe!.width).toBeLessThanOrEqual(menu!.x);
+  }
+  await bob.getByRole("button", { name: /^Default/ }).click();
   await openFederated(bob, "Messages to other servers");
   await bob
     .getByLabel("Remote user address", { exact: true })

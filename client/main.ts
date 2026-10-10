@@ -1,6 +1,6 @@
 import "./style.css";
 import "./fusion.css";
-import { applyStyle } from "./appearance.js";
+import { applyStyle, applyTextScale } from "./appearance.js";
 import "./emoji-scale.js";
 import {
   $,
@@ -52,6 +52,10 @@ import { showXmppRooms, tickXmppRooms } from "./xmpp-rooms.js";
 
 applyTheme();
 applyStyle();
+applyTextScale();
+document.addEventListener("text-scale-change", () => {
+  document.querySelector("#message-body")?.dispatchEvent(new Event("input"));
+});
 document.addEventListener("appearance-change", () => {
   redrawChat(false, true);
   renderSidebar();

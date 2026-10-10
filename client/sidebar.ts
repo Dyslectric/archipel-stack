@@ -19,7 +19,9 @@ import {
   type SideKind,
   type SideSection,
   type XmppRoom,
+  type Topic,
 } from "./shared.js";
+import { isFusion } from "./appearance.js";
 import {
   chatChannel,
   chatTopic,
@@ -41,6 +43,24 @@ const kinds = Object.keys(titles) as SideKind[];
 let html = "",
   saving = 0;
 let drag: { type: "item" | "group"; kind: SideKind; id: string } | null = null;
+const topicExpansion = new Map<string, boolean>();
+const topicCache = new Map<string, Topic[]>();
+const topicLoading = new Set<string>();
+async function toggleTopics(id: string) {
+  const c = state.channels.find(c => c.id === id);
+  if (!c || c.mode !== "topical" || !c.readable) return;
+  const open = !(topicExpansion.get(id) ?? chatChannel()?.id === id);
+  topicExpansion.set(id, open);
+  if (!open || chatChannel()?.id === id) return renderSidebar();
+  topicLoading.add(id); renderSidebar();
+  try {
+    const detail = await api<Channel>(`/channels/${id}`);
+    topicCache.set(id, detail.topics || []);
+  } catch (error) {
+    topicExpansion.set(id, false);
+    throw error;
+  } finally { topicLoading.delete(id); renderSidebar(); }
+}
 
 const kindOf = (id: string): SideKind =>
   id.startsWith("dm:") ? "dms" : id.startsWith("xmpp:") ? "xmpp" : "channels";
@@ -207,18 +227,19 @@ function channelRow(c: Channel) {
   const topic = (t: { id: string; title: string }) =>
     `<a class="topic-link${narrow === t.id ? " on" : ""}" href="#/c/${c.id}/t/${t.id}"${narrow === t.id ? ' aria-current="page"' : ""}>${esc(t.title)}</a>`;
   // Hidden topics are folded away under the others; the one being read stays in sight.
-  const all = on && c.mode === "topical" ? sortedTopics() : [],
+  const expanded = c.mode === "topical" && c.readable && (topicExpansion.get(c.id) ?? on);
+  const all = expanded ? (on ? sortedTopics() : topicCache.get(c.id) || c.topics || []) : [],
     away = all.filter((t) => isHidden(`topic:${t.id}`) && narrow !== t.id);
-  const topics = all.length
+  const topics = expanded
     ? `<div class="topic-list">${all
         .filter((t) => !away.includes(t))
         .map(topic)
-        .join("")}${away.length ? `<details class="hidden-topics"><summary class="topic-link">${icon("eye-off")} ${away.length} hidden</summary>${away.map(topic).join("")}</details>` : ""}</div>`
+        .join("")}${away.length ? `<details class="hidden-topics"><summary class="topic-link">${icon("eye-off")} ${away.length} hidden</summary>${away.map(topic).join("")}</details>` : ""}${!all.length ? `<span class="topic-link muted topic-placeholder">${topicLoading.has(c.id) ? "Loading topics…" : "No topics yet."}</span>` : ""}</div>`
     : "";
   return {
     name: `#${c.name}`,
     extra: topics,
-    link: `<a class="channel-link${on && !narrow ? " on" : ""}" draggable="false" href="#/c/${c.id}"${on && !narrow ? ' aria-current="page"' : ""} data-channel="${c.id}">${channelIcon(c)}<span class="grow">${esc(c.name)}</span>${c.mode !== "timeline" ? `<span class="mode-tag">${modeLabel(c.mode)}</span>` : ""}${silenced(c.id)}${count(unread(c.id))}</a>`,
+    link: `${c.mode === "topical" && c.readable ? `<button type="button" class="icon-button topic-toggle" data-expand-topics="${esc(c.id)}" aria-expanded="${expanded}" aria-label="${expanded ? "Collapse" : "Expand"} topics in ${esc(c.name)}">${icon(expanded ? "folder-open" : "folder")}</button>` : ""}<a class="channel-link${on && !narrow ? " on" : ""}" draggable="false" href="#/c/${c.id}"${on && !narrow ? ' aria-current="page"' : ""} data-channel="${c.id}">${c.mode === "topical" && c.readable ? "" : channelIcon({ ...c, remote_actor: null }, false)}<span class="grow">${esc(c.name)}</span>${c.mode !== "timeline" ? `<span class="mode-tag">${modeLabel(c.mode)}</span>` : ""}${silenced(c.id)}${c.remote_actor ? `<span class="mode-tag remote-marker" title="On another instance" aria-label="On another instance">${icon("globe")}</span>` : isFusion() && c.visibility === "members" ? `<span class="mode-tag" title="Members only">${icon("lock")}</span>` : ""}${count(unread(c.id))}</a>`,
   };
 }
 function dmRow(c: Conversation) {
@@ -487,7 +508,10 @@ export function wireSidebar(list: HTMLElement) {
   list.addEventListener("click", (e) => {
     const at = e.target as Element;
     let hit: HTMLElement | null;
-    if ((hit = at.closest<HTMLElement>("[data-fold]")))
+    if ((hit = at.closest<HTMLElement>("[data-expand-topics]"))) {
+      e.preventDefault();
+      action(() => toggleTopics(hit!.dataset.expandTopics!));
+    } else if ((hit = at.closest<HTMLElement>("[data-fold]")))
       fold(sectionOf(hit)!, hit.dataset.fold!);
     else if ((hit = at.closest<HTMLElement>("[data-section-menu]")))
       sectionMenu(hit, sectionOf(hit)!);
