@@ -96,7 +96,7 @@
   .account-menu > summary { padding: 2px 6px; gap: 7px; min-height: 0; border: 1px solid transparent; border-radius: 3px;
     font-size: var(--fusion-font); }
   .account-menu > summary:hover, .account-menu[open] > summary { border-color: var(--line); background: var(--bg); }
-  .account-menu > summary .avatar { border-radius: 3px; width: 20px; height: 20px; font-size: .78rem; }
+  .account-menu > summary .avatar { border-radius: 3px; width: 1.25rem; height: 1.25rem; font-size: .78rem; }
   .account-menu > summary .chev { width: 10px; height: 10px; color: var(--text); }
 
   /* ---- the command strip ---- */
@@ -252,7 +252,7 @@
   .fusion-thread[open] > .thread-heading .chev { transform: none; }
   .thread-heading > strong { font-weight: 600; overflow-wrap: anywhere; }
   .fusion-thread:not([open]) > .thread-heading > strong { font-weight: 400; }
-  .thread-heading .avatar { width: 20px; height: 20px; font-size: .78rem; }
+  .thread-heading .avatar { width: 1.25rem; height: 1.25rem; font-size: .78rem; }
   .thread-meta { color: var(--muted); white-space: nowrap; }
   .hidden-thread > .thread-heading > strong { color: var(--muted); }
   .thread-body { padding: 0; }
@@ -415,42 +415,42 @@
 
 /* ---- Cozy: a picture beside each message, the name and time above it ---- */
 :root[data-style="fusion-cozy"] {
-  .group-body > article { grid-template-columns: 32px minmax(0, 1fr); gap: 0 10px; padding: 7px 12px; }
-  .msg-gutter .avatar, .post .thread-avatar .avatar { width: 32px; height: 32px; font-size: 1rem; }
+  .group-body > article { grid-template-columns: 2rem minmax(0, 1fr); gap: 0 10px; padding: 7px 12px; }
+  .msg-gutter .avatar, .post .thread-avatar .avatar { width: 2rem; height: 2rem; font-size: 1rem; }
   .group-body .message-meta { font-size: 1em; line-height: 1.25; }
   .group-body .message-meta :is(time, .handle), .thread-clock { font-size: var(--fusion-small); }
   .group-body .message-meta .handle:not(:has(+ time)), .group-body .message-meta .handle { display: none; }
-  .member-rows .avatar, .dm-link .avatar { width: 24px; height: 24px; font-size: .82rem; }
+  .member-rows .avatar, .dm-link .avatar { width: 1.5rem; height: 1.5rem; font-size: .82rem; }
   ul.plain.member-rows > li { padding-block: 4px; }
   .fusion-thread[open] > .thread-heading :is(.avatar, .thread-starter) { display: none; }
   .thread-body { padding-bottom: 6px; }
   .thread-avatar { line-height: 0; }
-  .thread-avatar .avatar { width: 26px; height: 26px; font-size: .86rem; }
+  .thread-avatar .avatar { width: 1.625rem; height: 1.625rem; font-size: .86rem; }
   .byline { display: flex; align-items: baseline; gap: 8px; line-height: 1.25; }
-  /* The picture sits level with the middle of the name and the first two lines under it (one, when
-     that line is large emoji), however long the message runs. Each message is a grid for that: the
-     name and the text are its rows, and the picture spans them, no taller than those lines. */
-  --fusion-lead: 4.05em; /* a name's line and two of text */
+  /* The picture sits level with the middle of the name and the first line under it (the top half of
+     that line, when it is large emoji), however long the message runs. Each message is a grid for
+     that: the name and the text are its rows, and the picture spans them, no taller than those lines. */
+  --fusion-lead: 2.65em; /* a name's line and one of text */
   .group-body > article > .message-content, .thread-row > .row-main, .row-main > .row-text { display: contents; }
   .thread-row { display: grid; align-items: start; column-gap: 10px; }
-  .post > .thread-row { grid-template-columns: 32px minmax(0, 1fr) auto; padding: 9px 12px 6px; }
-  .comment > summary.thread-row, .comments > .comment > summary.thread-row { display: grid; grid-template-columns: auto 26px minmax(0, 1fr); column-gap: 0; }
+  .post > .thread-row { grid-template-columns: 2rem minmax(0, 1fr) auto; padding: 9px 12px 6px; }
+  .comment > summary.thread-row, .comments > .comment > summary.thread-row { display: grid; grid-template-columns: auto 1.625rem minmax(0, 1fr); column-gap: 0; }
   .group-body > article > .message-content > *, .post > .thread-row :is(.byline, .row-text > *) { grid-column: 2; min-width: 0; }
   .comment > summary :is(.byline, .row-text > *) { grid-column: 3; min-width: 0; margin-left: 10px; }
   .group-body .reply-context { justify-self: start; }
   .msg-gutter, .thread-avatar, .comment > summary .fold { grid-row: 1 / span 2; align-self: stretch; display: flex; align-items: center;
     max-height: var(--fusion-lead); }
   .msg-gutter { grid-column: 1; }
-  :is(article, .thread-row):has(.emoji-only) :is(.msg-gutter, .thread-avatar, .fold) { max-height: calc(1.25em + 3.6rem); }
+  :is(article, .thread-row):has(.emoji-only) :is(.msg-gutter, .thread-avatar, .fold) { max-height: calc(1.25em + 1.8rem); }
   article:has(.reply-context) > .msg-gutter { grid-row: 1 / span 3; max-height: calc(var(--fusion-lead) + 1.4em); }
   .thread-row > .pref-button { grid-column: 3; grid-row: 1; }
   .comments { margin-left: 26px; border-left: 1px solid var(--fusion-rule); }
   .comments:empty { display: none; }
   .comment > summary { padding: 6px 12px 6px 0; }
-  .comment > summary .fold { grid-column: 1; height: auto; min-height: 26px; }
+  .comment > summary .fold { grid-column: 1; height: auto; min-height: 1.625rem; }
   .comment > summary .thread-avatar { grid-column: 2; }
   .replies { margin-left: 9px; }
-  .post > .inline-form, .comment > .content > .inline-form, .obj-actions:has(details.reply-box[open]) { margin-left: 54px; }
+  .post > .inline-form, .comment > .content > .inline-form, .obj-actions:has(details.reply-box[open]) { margin-left: calc(2rem + 22px); }
 }
 
 /* ---- by touch, and on a phone: full-size targets, panes as drawers ---- */
@@ -466,7 +466,7 @@
     .nav-item .label { display: inline; }
     .account-menu { flex: none; }
     .account-menu > summary { min-height: 44px; margin: 0; width: auto; }
-    .account-menu > summary .avatar { display: inline-grid; width: 24px; height: 24px; }
+    .account-menu > summary .avatar { display: inline-grid; width: 1.5rem; height: 1.5rem; }
     .fusion-toolbar { min-height: 45px; height: 45px; padding: 0 4px; }
     .fusion-tool-group { height: 44px; flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; gap: 0; }
     .fusion-toolbar :is(button, a) { width: 44px; height: 44px; min-width: 44px; justify-content: center; padding: 8px; font-size: 0; }
