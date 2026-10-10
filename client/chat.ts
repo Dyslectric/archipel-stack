@@ -80,6 +80,7 @@ let showHidden = false, // hidden threads are on the page for now
   lastPrefs = "";
 let selectedMessage: string | null = null, messageSearch = "";
 let quoteParts: QuotePart[] = [], quoteEditing = false;
+let threadTitleDraft = "";
 function startQuote(message: Message | null) {
   const body = document.querySelector<HTMLTextAreaElement>("#message-body");
   const answers = quote ? quoteParts.map(part => part.answer).filter(text => text.trim()) : [];
@@ -114,15 +115,24 @@ export function updateFusionToolbar() {
   search.placeholder = c?.mode === "threaded" ? "Search threads" : "Search messages";
   const status = document.querySelector("#fusion-status-place");
   const view = document.querySelector<HTMLElement>(".app")?.dataset.view;
+  const threads = c?.mode === "threaded" && olderCursor === null ? messages.filter(m => !m.parent_id).length : 0;
   if (status) status.textContent = active && c
-    ? `${c.name}, ${c.member_count} member${c.member_count === 1 ? "" : "s"}`
-    : view === "channels" ? "Channel directory" : view === "settings" ? "Settings"
+    ? threads ? `${c.name}, ${threads} thread${threads === 1 ? "" : "s"}` : `${c.name}, ${c.member_count} member${c.member_count === 1 ? "" : "s"}`
+    : view === "channels" ? document.querySelector<HTMLElement>("#channel-table-body")?.dataset.summary || "Channel directory" : view === "settings" ? "Settings"
     : view === "xmpp" ? "XMPP rooms" : state.session?.instance || "";
+  const hint = document.querySelector("#fusion-status-hint");
+  if (hint) hint.textContent = view === "channels" ? "Double-click a channel to open it" : active && c && canPost() ? "Enter sends, Shift+Enter starts a new line" : "";
 }
 function selectFusionMessage(id: string | null) {
+  const changed = selectedMessage !== id;
   selectedMessage = id;
   for (const row of $$(".message[id]")) row.classList.toggle("selected-message", row.id === `m-${id}`);
   updateFusionToolbar();
+  // In threads the selected message is the one the composer answers, as its label says.
+  if (!changed || !isFusion() || !threaded() || !document.querySelector("#composer")) return;
+  const m = messages.find(m => m.id === id);
+  const target = m && canPost() && !m.deleted_at && !m.queued ? m : null;
+  if (target?.id !== reply?.id) { reply = target; renderComposer(); }
 }
 document.addEventListener("click", event => {
   const command = (event.target as Element).closest<HTMLElement>("[data-fusion-action]")?.dataset.fusionAction;
@@ -131,7 +141,7 @@ document.addEventListener("click", event => {
   if (command === "members" && current) toggleMembers();
   else if (command === "new") {
     if (!current || !canPost()) return go("#/channels");
-    reply = null; startQuote(null); renderComposer();
+    reply = null; startQuote(null); selectFusionMessage(null); renderComposer();
     (document.querySelector<HTMLElement>("#thread-title") || document.querySelector<HTMLElement>("#message-body"))?.focus();
   } else if (command === "collapse") {
     const nodes = $$<HTMLDetailsElement>("details.fusion-thread", $("#rows"));
@@ -779,7 +789,7 @@ function threadActions(m: Message) {
   return parts ? `<div class="obj-actions small picker-host">${parts}</div>` : "";
 }
 const byline = (m: Message) => isFusion()
-  ? `${appStyle() === "fusion-compact" ? `<time class="thread-clock" datetime="${esc(m.created_at)}">${esc(clock(m.created_at))}</time> ` : ""}${author(m)}${appStyle() === "fusion-cozy" ? ` <time class="thread-clock" datetime="${esc(m.created_at)}">${esc(clock(m.created_at))}</time>` : ""}${edited(m)}`
+  ? `${author(m)}<time class="thread-clock" datetime="${esc(m.created_at)}" title="${esc(full(m.created_at))}">${esc(clock(m.created_at))}</time>${edited(m)}`
   : `${author(m)} ${handleTag(m.username)} ·${when(m.created_at)}${edited(m) ? ` · ${edited(m)}` : ""}`;
 function threadNodes(list: Message[]): Node[] {
   const ids = new Set(list.map((m) => m.id)),
@@ -790,11 +800,21 @@ function threadNodes(list: Message[]): Node[] {
   const count = (m: Message): number =>
     (children.get(m.id) || []).reduce((n, child) => n + 1 + count(child), 0);
   const replies = (n: number) => `${n} repl${n === 1 ? "y" : "ies"}`;
+  // In Fusion a message is one row: its summary, which selects it; only the chevron folds its replies.
+  const fusionRow = (m: Message, extra = "") =>
+    `<span class="thread-avatar">${avatar(m)}</span><div class="row-main"><div class="byline">${byline(m)}${extra}</div>${editing === m.id ? "" : `<div class="row-text">${bodyHtml(m, "md")}</div>`}</div>`;
   const comment = (m: Message, depth: number): Node => {
     const n = count(m);
+    if (isFusion())
+      return {
+        key: m.id,
+        html: `<details open class="comment message${n ? " has-replies" : ""}${queuedClass(m)}" id="m-${m.id}" data-depth="${depth}"><summary class="thread-row"><span class="fold" aria-hidden="true">${icon("chevron-down")}</span>${fusionRow(m, `<span class="collapsed-note">${replies(n)} hidden</span>`)}</summary>
+          <div class="content">${editing === m.id ? bodyHtml(m, "md") : ""}${threadActions(m)}<div class="replies" data-kids></div></div></details>`,
+        kids: (children.get(m.id) || []).map((child) => comment(child, depth + 1)),
+      };
     return {
       key: m.id,
-      html: `<details open class="comment message d${depth % 8}${queuedClass(m)}" id="m-${m.id}" data-depth="${depth}">${isFusion() ? `<span class="thread-avatar">${avatar(m)}</span>` : ""}<summary class="meta small message-meta"><span class="fold" aria-hidden="true">${icon("chevron-down")}</span>${byline(m)}<span class="collapsed-note">${n ? `${replies(n)} hidden` : "collapsed"}</span></summary>
+      html: `<details open class="comment message d${depth % 8}${queuedClass(m)}" id="m-${m.id}" data-depth="${depth}"><summary class="meta small message-meta"><span class="fold" aria-hidden="true">${icon("chevron-down")}</span>${byline(m)}<span class="collapsed-note">${n ? `${replies(n)} hidden` : "collapsed"}</span></summary>
         <button type="button" class="bar" title="Collapse this thread" aria-label="Collapse this thread"></button>
         <div class="content">${bodyHtml(m, "md")}${threadActions(m)}<div class="replies" data-kids></div></div></details>`,
       kids: (children.get(m.id) || []).map((child) => comment(child, depth + 1)),
@@ -811,12 +831,17 @@ function threadNodes(list: Message[]): Node[] {
         };
       // The post and everything said under it share one card; the replies fold away together.
       const n = count(m);
-      const post = `<article class="post message${queuedClass(m)}" id="m-${m.id}">${isFusion() ? `<span class="thread-avatar">${avatar(m)}</span>` : ""}${m.title && editing !== m.id ? `<h2 class="thread-title">${emojiHtml(m.title, m.emojis || [])}</h2>` : ""}<div class="meta small message-meta post-meta"><span class="grow">${byline(m)}${isHidden(`thread:${m.id}`) ? ' · <span class="pill warn">Hidden</span>' : ""}</span>${current!.role && !m.queued ? prefButton("thread", `thread:${m.id}`, m.title || "this thread") : ""}</div>${bodyHtml(m, "md")}${threadActions(m)}</article>${n ? `<details open class="thread-replies" data-key="r-${m.id}"><summary title="Show or hide every reply in this thread">${icon("chevron-down", "chev")}<span>${replies(n)}</span></summary><div class="comments" data-kids></div></details>` : '<div class="comments" data-kids></div>'}`;
+      const hiddenPill = isHidden(`thread:${m.id}`) ? ' <span class="pill warn">Hidden</span>' : "";
+      if (isFusion())
+        return {
+          key: `t-${m.id}`,
+          html: `<details open class="thread fusion-thread${hiddenPill ? " hidden-thread" : ""}"><summary class="thread-heading">${icon("chevron-down", "chev")}${avatar(m, "small")}<strong class="grow">${emojiHtml(m.title || "Untitled thread", m.emojis || [])}</strong><span class="thread-meta"><span class="thread-starter">${esc(m.display_name)} · </span>${n ? replies(n) : "no replies"} · ${esc(dayLabel(m.created_at))}</span></summary><div class="thread-body"><article class="post message${queuedClass(m)}" id="m-${m.id}"><div class="thread-row">${fusionRow(m, hiddenPill)}${current!.role && !m.queued ? prefButton("thread", `thread:${m.id}`, m.title || "this thread") : ""}</div>${editing === m.id ? bodyHtml(m, "md") : ""}${threadActions(m)}</article><div class="comments" data-kids></div></div></details>`,
+          kids: (children.get(m.id) || []).map((child) => comment(child, 0)),
+        };
+      const post = `<article class="post message${queuedClass(m)}" id="m-${m.id}">${m.title && editing !== m.id ? `<h2 class="thread-title">${emojiHtml(m.title, m.emojis || [])}</h2>` : ""}<div class="meta small message-meta post-meta"><span class="grow">${byline(m)}${isHidden(`thread:${m.id}`) ? ' · <span class="pill warn">Hidden</span>' : ""}</span>${current!.role && !m.queued ? prefButton("thread", `thread:${m.id}`, m.title || "this thread") : ""}</div>${bodyHtml(m, "md")}${threadActions(m)}</article>${n ? `<details open class="thread-replies" data-key="r-${m.id}"><summary title="Show or hide every reply in this thread">${icon("chevron-down", "chev")}<span>${replies(n)}</span></summary><div class="comments" data-kids></div></details>` : '<div class="comments" data-kids></div>'}`;
       return {
         key: `t-${m.id}`,
-        html: isFusion()
-          ? `<details open class="thread card fusion-thread${isHidden(`thread:${m.id}`) ? " hidden-thread" : ""}"><summary class="thread-heading">${icon("chevron-down", "chev")}${appStyle() === "fusion-cozy" ? avatar(m, "small") : ""}<strong class="grow">${emojiHtml(m.title || "Untitled thread", m.emojis || [])}</strong><span class="thread-starter">${esc(m.display_name)}</span><span>${replies(n)}</span><span>${esc(dayLabel(m.created_at))}</span></summary><div class="thread-body">${post}</div></details>`
-          : `<section class="thread card${isHidden(`thread:${m.id}`) ? " hidden-thread" : ""}">${post}</section>`,
+        html: `<section class="thread card${isHidden(`thread:${m.id}`) ? " hidden-thread" : ""}">${post}</section>`,
         kids: (children.get(m.id) || []).map((child) => comment(child, 0)),
       };
     });
@@ -1115,6 +1140,7 @@ function wireFeed() {
     if (isFusion()) {
       const row = at.closest<HTMLElement>(".message[id]");
       if (row) selectFusionMessage(row.id.slice(2));
+      if (at.closest("summary.thread-row") && !at.closest(".fold, a, button, input, textarea")) e.preventDefault();
     }
     const on = <T extends HTMLElement = HTMLElement>(selector: string) =>
       at.closest<T>(selector);
@@ -1253,8 +1279,12 @@ function renderComposer(keepDraft = true) {
     keepDraft
       ? document.querySelector<HTMLInputElement>(selector)?.value || ""
       : "";
+  // The title of a thread being started outlives a look at replying to another.
+  const titleField = document.querySelector<HTMLInputElement>("#thread-title");
+  if (!keepDraft) threadTitleDraft = "";
+  else if (titleField) threadTitleDraft = titleField.value;
   const draft = value("#message-body"),
-    title = value("#thread-title"),
+    title = threadTitleDraft,
     hadFocus = document.activeElement?.id === "message-body";
   let topic = value("#compose-topic");
   if (reply?.topic_id) topic = topicOf(reply.topic_id)?.title || topic;
@@ -1267,15 +1297,18 @@ function renderComposer(keepDraft = true) {
             ?.topic_id ||
           null,
       )?.title || "";
-  const place =
-    reply ? `Reply to ${reply.display_name}…` : c.mode === "threaded"
+  const place = isFusion()
+    ? reply ? "Write a reply" : c.mode === "threaded" ? "Start the thread" : "Write a message"
+    : reply ? `Reply to ${reply.display_name}…` : c.mode === "threaded"
       ? "Start the thread…"
       : `Message ${c.dm ? "" : "#"}${c.name}…`;
+  let thread = reply;
+  while (thread?.parent_id) thread = messages.find((m) => m.id === thread!.parent_id) || null;
   area.innerHTML = `<div class="composer-wrap picker-host"><form id="composer" class="composer">
-    <span class="fusion-compose-label">${reply ? `Reply to <strong>${esc(reply.display_name)}</strong>` : `To <strong>${esc(c.name)}</strong>`}${topic ? ` › ${esc(topic)}` : ""}</span>
+    <span class="fusion-compose-label">To <strong>${esc(c.name)}</strong></span>
     ${c.mode === "topical" ? `<div class="compose-to">${channelIcon(c)}<span class="compose-channel">${esc(c.name)}</span>${icon("chevron-right", "sep")}<input id="compose-topic" list="topic-options" maxlength="100" placeholder="Topic" aria-label="Topic" autocomplete="off" required value="${esc(topic)}"><datalist id="topic-options"></datalist></div>` : ""}
     ${c.mode === "threaded" && !reply ? `<input id="thread-title" class="thread-input" maxlength="160" placeholder="New thread title${c.optional_titles ? " (optional)" : ""}" aria-label="Thread title" ${c.optional_titles ? "" : "required"} value="${esc(title)}">` : ""}
-    ${reply ? `<div class="reply-banner small">${icon("reply")}<span>Replying to <strong>${esc(reply.display_name)}</strong></span><button type="button" id="cancel-reply" class="icon-button" aria-label="Cancel reply">${icon("x")}</button></div>` : ""}
+    ${reply ? `<div class="reply-banner small">${icon("reply")}<span>Replying to <strong>${esc(reply.display_name)}</strong>${thread?.title ? `<span class="reply-thread"> in <strong>${emojiHtml(thread.title, thread.emojis || [])}</strong></span>` : ""}</span><button type="button" id="cancel-reply" class="icon-button" aria-label="Cancel reply">${icon("x")}</button></div>` : ""}
     ${quotePreview()}
     <textarea id="message-body" maxlength="8000" rows="1" placeholder="${esc(place)}" aria-label="Message" required>${esc(draft)}</textarea>
     <div class="composer-bar"><button type="button" id="choose-emoji" class="icon-button" aria-label="Choose emoji" title="Emoji" aria-expanded="false">${icon("smile")}</button>${attachButton('id="attach-file"')}<span class="muted small composer-hint-keys" title="Shift + Enter for a new line"><kbd>Enter</kbd> to send</span><button id="send-message" type="submit" aria-label="Send message">${icon("send")}<span>${c.mode === "threaded" && !reply ? "Post thread" : "Send"}</span></button></div></form></div>`;
@@ -1392,6 +1425,8 @@ function renderComposer(keepDraft = true) {
         if (generation !== token) return;
         body.value = "";
         if (titleInput) titleInput.value = "";
+        // A sent reply leaves the Fusion composer free to start a thread again.
+        if (reply && threaded() && isFusion()) selectedMessage = null;
         reply = null;
         quote = null;
         if (message.queued) pending = [...pending, message];

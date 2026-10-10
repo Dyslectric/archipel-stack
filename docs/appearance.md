@@ -12,6 +12,13 @@ author and message columns without avatars; Cozy shows avatars beside messages,
 members, posts and nested replies. Both have collapsible thread headers, a channel
 directory table and a channel creation dialog. Touch controls keep 44px targets.
 
+In a threaded channel each post and reply is one row, indented under the message it
+answers; the chevron beside a reply folds what is under it. Selecting a row makes it
+the message the composer answers, as the composer's label says; New thread goes back
+to starting a thread, keeping a title you had begun. In the channel directory, select
+a row and double-click it to open or join that channel; section headings fold. The
+status strip shows the connection, the conversation or directory on screen, and a hint.
+
 Fusion quotes preview the original message above the composer. Remove the quote
 without changing the draft, or send it as Markdown with a reply link to the
 original channel message. In threads, Quote replies to the selected post or reply.

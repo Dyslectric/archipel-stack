@@ -101,7 +101,7 @@ function renderShell() {
         <a class="menu-item" href="#/settings">${icon("settings")}<span class="grow">All settings</span></a></div>
       <div class="menu-section"><div class="menu-label">Theme</div>${themeSeg()}</div>
       <div class="menu-section"><button type="button" class="menu-item" id="sign-out-menu">${icon("logout")}<span class="grow">Sign out</span></button></div>
-    </div></details></div></header>${fusionToolbarHtml()}<div id="view"></div><footer class="fusion-status"><span class="fusion-connection"><span class="status-dot"></span><span id="fusion-connection-label">Connected</span></span><span id="fusion-status-place">${instance}</span><span class="grow">Enter sends, Shift+Enter starts a new line</span></footer></div>`;
+    </div></details></div></header>${fusionToolbarHtml()}<div id="view"></div><footer class="fusion-status"><span class="fusion-connection"><span class="status-dot"></span><span id="fusion-connection-label">Connected</span></span><span id="fusion-status-place">${instance}</span><span class="grow" id="fusion-status-hint"></span></footer></div>`;
   renderAccount();
   $("#mobile-menu").addEventListener("click", toggleSidebar);
   $("#sign-out-menu").addEventListener("click", () => action(hooks.signOut));

@@ -22,6 +22,7 @@ import {
 } from "./shared.js";
 import { sidebarFrame } from "./sidebar.js";
 import { isFusion } from "./appearance.js";
+import { updateFusionToolbar } from "./chat.js";
 
 interface FeaturedChannel { id: string; name: string; description: string; mode: string; address: string; joined: boolean; }
 
@@ -76,8 +77,8 @@ export function showChannels(view: HTMLElement, create: boolean) {
   document.querySelector("#fusion-directory-tools")?.replaceChildren();
   const workspace = sidebarFrame(view);
   workspace.insertAdjacentHTML("beforeend", `<div class="page"><div class="page-inner directory"><div class="feed-head"><div><h1>Channels</h1><p class="muted small">Everything you can see on ${esc(state.session.instance)}. Find <a href="#/settings/federation/remote">channels on other servers</a>.</p></div></div>
-    <div class="directory-toolbar fusion-only">${state.session.user!.create_channels ? `<button type="button" class="secondary" id="open-create-channel">${icon("plus")} Create channel</button>` : ""}<a class="button secondary" href="#/settings/federation/remote">${icon("globe")} Join a federated channel</a><a class="button secondary" href="#/xmpp">${icon("xmpp")} Join an XMPP room</a></div>
-    <div class="layout"><section><label class="search-field">${icon("search")}<input type="search" id="channel-search" placeholder="Search channels" aria-label="Search channels"></label><section id="featured-list" class="default-only" hidden></section><ul class="plain browse-list" id="browse-list"></ul><div class="channel-table-wrap"><table class="channel-table"><thead><tr><th>Name</th><th class="channel-description">Description</th><th>Style</th><th>Members</th><th>Status</th></tr></thead><tbody id="channel-table-body"></tbody></table></div></section>
+    <div class="directory-toolbar fusion-only">${state.session.user!.create_channels ? `<button type="button" class="secondary" id="open-create-channel">${icon("plus")} New channel</button>` : ""}<a class="button secondary" href="#/settings/federation/remote">${icon("globe")} Join a federated channel</a><a class="button secondary" href="#/xmpp">${icon("xmpp")} Join an XMPP room</a></div>
+    <div class="layout"><section><label class="search-field">${icon("search")}<input type="search" id="channel-search" placeholder="Search channels" aria-label="Search channels"></label><section id="featured-list" class="default-only" hidden></section><ul class="plain browse-list" id="browse-list"></ul><div class="channel-table-wrap"><table class="channel-table"><thead><tr><th>Name</th><th class="channel-description">Description</th><th>Style</th><th>Members</th><th>Status</th><th class="directory-action"><span class="visually-hidden">Action</span></th></tr></thead><tbody id="channel-table-body"></tbody></table></div></section>
     <aside><section class="card"><h2>Federated channels</h2><p class="muted">Follow a channel hosted on another Archipel instance.</p><a class="button secondary" href="#/settings/federation/remote">Join a federated channel</a></section><section class="card"><h2>XMPP rooms</h2><p class="muted">Join a conversation hosted on another XMPP server.</p><a class="button secondary" href="#/xmpp">Join an XMPP room</a></section>${state.session.user!.create_channels ? "" : '<section class="card"><h2>Create a channel</h2><p class="muted">Your role does not allow creating channels.</p></section>'}<section class="card" id="new-channel" ${state.session.user!.create_channels ? "" : "hidden"}><h2>Create a channel</h2><form class="stack">
       <label>Channel name<span class="input-prefix"><span>#</span><input name="name" required minlength="2" maxlength="40" pattern="[a-zA-Z0-9][a-zA-Z0-9_\\-]{1,39}" placeholder="general" autocomplete="off"></span></label>
       <p class="muted small" id="create-summary">A running conversation anyone on this instance can read and join.</p>
@@ -96,6 +97,15 @@ export function showChannels(view: HTMLElement, create: boolean) {
   $(".directory-toolbar").insertAdjacentHTML("afterend", '<span id="directory-toolbar-home" hidden></span>');
   $(".search-field").insertAdjacentHTML("afterend", '<span id="directory-search-home" hidden></span>');
   let featured: FeaturedChannel[] = [];
+  // The Fusion table: sections fold, and a row is selected before it is opened.
+  const folded = new Set<string>();
+  let picked = "";
+  const plural = (n: number) => `${n} channel${n === 1 ? "" : "s"}`;
+  const section = (key: string, title: string, note: string, rows: string[]) => rows.length
+    ? `<tr class="table-section"><th colspan="6"><div class="table-section-row"><button type="button" class="section-toggle" data-directory-section="${key}" aria-expanded="${!folded.has(key)}">${icon("chevron-down", "chev")}<strong>${title}</strong></button><span class="muted grow">${note}</span><span class="muted">${plural(rows.length)}</span></div></th></tr>${folded.has(key) ? "" : rows.join("")}`
+    : "";
+  const row = (id: string, cells: string, status: string, joined: boolean, control: string) =>
+    `<tr class="directory-row${picked === id ? " selected-row" : ""}" data-directory-row="${esc(id)}">${cells}<td class="${joined ? "" : "muted"}">${status}</td><td class="directory-action">${control}</td></tr>`;
   function draw() {
     const query = search.value.trim().toLowerCase();
     const visible = state.channels.filter(
@@ -114,13 +124,19 @@ export function showChannels(view: HTMLElement, create: boolean) {
       : `<li class="muted">${query ? "No channels match." : "No channels yet. Create the first one."}</li>`;
     if (list.dataset.html !== html) list.innerHTML = list.dataset.html = html;
     const picks = featured.filter(c => `${c.name} ${c.description} ${c.address}`.toLowerCase().includes(query));
-    const featuredRows = picks.map(c => `<tr><td><span class="directory-name">${icon("globe")}<strong>${esc(c.name)}</strong></span><div class="muted small">${esc(new URL(c.address).host)}</div></td><td class="channel-description">${esc(c.description)}</td><td>${esc(modeLabel(c.mode))}</td><td>—</td><td>${c.joined ? `<a class="button secondary small" href="#/c/${c.id}">Open</a>` : `<button type="button" class="secondary small" data-featured-join="${esc(c.address)}" ${state.session.federation_enabled && state.session.user?.federation_subscribe && state.session.user?.federation_receive ? "" : 'disabled title="Your role must allow subscribing to and receiving federated channels"'}>Subscribe</button>`}</td></tr>`).join("");
+    const mayFollow = state.session.federation_enabled && state.session.user?.federation_subscribe && state.session.user?.federation_receive;
+    const featuredRows = picks.map(c => row(`featured:${c.id}`, `<td><span class="directory-name">${icon("globe")}<strong>${esc(c.name)}</strong><span class="muted">@${esc(new URL(c.address).host)}</span></span></td><td class="channel-description">${esc(c.description)}</td><td>${esc(modeLabel(c.mode))}</td><td class="muted">n/a</td>`, c.joined ? "Joined" : "Not joined", c.joined,
+      c.joined ? `<a class="button secondary small" href="#/c/${c.id}">Open</a>` : `<button type="button" class="secondary small" data-featured-join="${esc(c.address)}" ${mayFollow ? "" : 'disabled title="Your role must allow subscribing to and receiving federated channels"'}>Join</button>`));
     const recommended = $("#featured-list");
     recommended.hidden = !picks.length;
     recommended.innerHTML = picks.length ? `<h2>Featured from other servers</h2><ul class="plain">${picks.map(c => `<li class="row">${icon("globe")}<div class="grow"><strong>${esc(c.name)}</strong><p class="muted small">${esc(c.description)} · ${esc(new URL(c.address).host)}</p></div>${c.joined ? `<a class="button secondary small" href="#/c/${c.id}">Open</a>` : `<button type="button" class="secondary small" data-featured-join="${esc(c.address)}" ${state.session.federation_enabled && state.session.user?.federation_subscribe && state.session.user?.federation_receive ? "" : "disabled"}>Subscribe</button>`}</li>`).join("")}</ul>` : "";
-    const rows = visible.filter(c => !picks.some(p => p.id === c.id)).map(c => `<tr><td><a class="directory-name" href="#/c/${c.id}" data-id="${c.id}">${channelIcon(c)}<strong>${esc(c.name)}</strong></a></td><td class="channel-description">${esc(c.description)}</td><td>${modeLabel(c.mode)}</td><td>${c.member_count}</td><td>${c.role ? `<a class="button secondary small" href="#/c/${c.id}">Open</a>` : c.can_join ? `<button type="button" class="secondary small" data-directory-join="${c.id}">Join</button>` : c.readable ? `<a class="button secondary small" href="#/c/${c.id}">View</a>` : '<span class="muted">Invitation required</span>'}</td></tr>`).join("");
+    const rows = visible.filter(c => !picks.some(p => p.id === c.id)).map(c => row(c.id, `<td><a class="directory-name" href="#/c/${c.id}" data-id="${c.id}">${channelIcon(c, false)}<strong>${esc(c.name)}</strong></a></td><td class="channel-description${c.description ? "" : " muted"}">${esc(c.description || "No description.")}</td><td>${modeLabel(c.mode)}</td><td>${c.member_count}</td>`,
+      c.role ? "Joined" : c.can_join && c.admission === "allowlist" ? "Invited" : c.can_join || c.readable ? "Not joined" : "Invitation required", !!c.role || (c.can_join && c.admission === "allowlist"),
+      c.role ? `<a class="button secondary small" href="#/c/${c.id}">Open</a>` : c.can_join ? `<button type="button" class="secondary small" data-directory-join="${c.id}">Join</button>` : c.readable ? `<a class="button secondary small" href="#/c/${c.id}">View</a>` : ""));
     const table = $("#channel-table-body");
-    const tableHtml = `${featuredRows ? '<tr class="table-section"><th colspan="5">Featured from other servers</th></tr>' + featuredRows : ""}${rows ? '<tr class="table-section"><th colspan="5">Channels</th></tr>' + rows : ""}${!rows && !featuredRows ? '<tr><td colspan="5">No channels match.</td></tr>' : ""}`;
+    const tableHtml = `${section("featured", "Featured from other servers", "Chosen by this instance's administrators", featuredRows)}${section("local", "On this instance", "", rows)}${!rows.length && !featuredRows.length ? '<tr><td colspan="6">No channels match.</td></tr>' : ""}`;
+    table.dataset.summary = `${plural(rows.length)} here${featuredRows.length ? `, ${featuredRows.length} featured` : ""}`;
+    updateFusionToolbar();
     if (table.dataset.html !== tableHtml) table.innerHTML = table.dataset.html = tableHtml;
   }
   draw();
@@ -129,6 +145,17 @@ export function showChannels(view: HTMLElement, create: boolean) {
   search.addEventListener("input", draw);
   $(".directory").addEventListener("click", event => {
     const target = event.target as Element;
+    const fold = target.closest<HTMLElement>("[data-directory-section]");
+    if (fold) {
+      const key = fold.dataset.directorySection!;
+      if (!folded.delete(key)) folded.add(key);
+      return draw();
+    }
+    const chosen = target.closest<HTMLElement>("[data-directory-row]");
+    if (chosen) {
+      picked = chosen.dataset.directoryRow!;
+      for (const el of $$("[data-directory-row]", $("#channel-table-body"))) el.classList.toggle("selected-row", el === chosen);
+    }
     const join = target.closest<HTMLElement>("[data-directory-join]");
     const external = target.closest<HTMLElement>("[data-featured-join]");
     if (join) action(async () => {
@@ -155,6 +182,11 @@ export function showChannels(view: HTMLElement, create: boolean) {
         go(`#/c/${c.id}`);
       });
     }
+  });
+  $(".directory").addEventListener("dblclick", event => {
+    const target = event.target as Element;
+    if (target.closest("a, button")) return;
+    target.closest("[data-directory-row]")?.querySelector<HTMLElement>(".directory-action :is(a, button)")?.click();
   });
   // An invitation makes a members-only channel readable once it's accepted, so opening it joins.
   list.addEventListener("click", (e) => {

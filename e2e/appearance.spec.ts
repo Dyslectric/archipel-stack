@@ -175,7 +175,8 @@ test("Fusion directory has a working table, create dialog and administrator feat
   await create(page, "fusion-directory", "topical");
   await page.locator("#browse").click();
   await expect(page.locator(".channel-table")).toBeVisible();
-  await expect(page.locator("#fusion-status-place")).toHaveText("Channel directory");
+  await expect(page.locator("#fusion-status-place")).toHaveText(/^\d+ channels? here$/);
+  await expect(page.locator("#fusion-status-hint")).toHaveText("Double-click a channel to open it");
   await expect(page.locator(".channel-table").getByRole("link", { name: "fusion-directory", exact: true })).toBeVisible();
   await page.getByLabel("Search channels").fill("no-such-channel");
   await expect(page.locator("#channel-table-body")).toHaveText("No channels match.");
