@@ -39,6 +39,7 @@ import {
   type Message,
   type Reaction,
   type Topic,
+  type User,
 } from "./shared.js";
 import { closePicker, suggestShortcodes, togglePicker } from "./picker.js";
 import { renderSidebar, sidebarFrame } from "./sidebar.js";
@@ -261,6 +262,22 @@ export function chatFrame(view: HTMLElement) {
   });
   $("#member-panel").addEventListener("click", (e) => {
     if ((e.target as Element).closest("[data-close-members]")) toggleMembers();
+    const act = (e.target as Element).closest<HTMLElement>("[data-ban-member],[data-kick-member]"),
+      c = current,
+      ban = !!act?.dataset.banMember,
+      who = c?.members?.find((u) => u.id === (act?.dataset.banMember || act?.dataset.kickMember));
+    if (act && c && who)
+      action(async () => {
+        if (
+          !(await (ban
+            ? confirmDialog(`Ban ${who.display_name} from #${c.name}?`, "They are removed from the channel and cannot come back until the ban is lifted under Access rules, in the channel's settings.", "Ban from channel")
+            : confirmDialog(`Remove ${who.display_name} from #${c.name}?`, "They leave the channel, and can join it again where it lets them.", "Remove from channel")))
+        )
+          return;
+        await api(`/channels/${c.id}/members/${who.id}`, "PATCH", ban ? { rule: "block" } : { remove: true });
+        toast(ban ? `${who.display_name} is banned from #${c.name}.` : `${who.display_name} is removed from #${c.name}.`);
+        await refreshCurrent();
+      });
   });
 }
 export async function showChat(
@@ -436,12 +453,22 @@ function renderMembers() {
   frame.hidden = !show;
   if (!show) return;
   const members = c.members || [];
+  // Whoever may remove or ban can do it from here: moderators anyone but the owner (and only the owner
+  // another moderator), someone whose role allows it the members who hold no role.
+  const kicking = channelCan(c, "kick_members"),
+    banning = channelCan(c, "ban_members"),
+    owning = me().admin || c.role === "owner";
+  const ban = (u: User) =>
+    u.role !== "owner" && u.id !== me().id && (u.role !== "moderator" || owning) && (canModerate(c) || !u.channel_role)
+      ? (kicking ? `<button type="button" class="icon-button member-act" data-kick-member="${u.id}" aria-label="Remove ${esc(u.display_name)} from this channel" title="Remove from this channel">${icon("logout")}</button>` : "") +
+        (banning ? `<button type="button" class="icon-button member-act" data-ban-member="${u.id}" aria-label="Ban ${esc(u.display_name)} from this channel" title="Ban from this channel">${icon("block")}</button>` : "")
+      : "";
   const html = `<div class="panel-head"><h2 class="grow">Members <span class="muted">${members.length}</span></h2><a class="icon-button" href="#/settings/channel/members/${c.id}" aria-label="Manage members" title="Roles, invitations and removal">${icon("settings")}</a><button type="button" class="icon-button" data-close-members aria-label="Hide members" title="Hide members">${icon("x")}</button></div>
     <div class="panel-body">${ranks
       .map(([role, label]) => {
         const list = members.filter((u) => u.role === role);
         return list.length
-          ? `<h3 class="side-label">${label}${role === "owner" ? "" : ` · ${list.length}`}</h3><ul class="plain member-rows">${list.map((u) => `<li>${avatar(u, "small")}${nameButton(u, u.actor_url, "member-name")}${u.actor_url?.startsWith("xmpp:") ? `<span class="mode-tag" title="XMPP" aria-label="XMPP">${icon("xmpp")}</span>` : u.actor_url && !u.actor_url.startsWith(location.origin) ? `<span class="mode-tag" title="On another instance">${icon("globe")}</span>` : ""}</li>`).join("")}</ul>`
+          ? `<h3 class="side-label">${label}${role === "owner" ? "" : ` · ${list.length}`}</h3><ul class="plain member-rows">${list.map((u) => `<li>${avatar(u, "small")}${nameButton(u, u.actor_url, "member-name")}${u.actor_url?.startsWith("xmpp:") ? `<span class="mode-tag" title="XMPP" aria-label="XMPP">${icon("xmpp")}</span>` : u.actor_url && !u.actor_url.startsWith(location.origin) ? `<span class="mode-tag" title="On another instance">${icon("globe")}</span>` : ""}${ban(u)}</li>`).join("")}</ul>`
           : "";
       })
       .join("")}</div>`;

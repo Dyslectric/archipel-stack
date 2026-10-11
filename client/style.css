@@ -267,13 +267,24 @@ main.page { padding: 0 16px; }
 .panel-head h2 { margin: 0; font-size: 1rem; }
 .panel-head h2 .muted { font-weight: 400; }
 .panel-body { flex: 1; overflow-y: auto; padding: 0 8px 12px; }
-/* A heading is as tall as a member's row, so it is as far from the name under it as one name is from the next. */
-.panel-body h3.side-label { display: flex; align-items: center; height: calc(1.8rem + 8px); margin: 0; padding: 0 8px; }
-ul.plain.member-rows > li { display: flex; align-items: center; gap: 12px; padding: 4px 8px; border: none; border-radius: 7px; }
+/* A heading's letters are as far under the picture above them, and as far over the picture under them, as one
+   picture is from the next. The ems are about what a line this tight leaves over its capitals and under its letters. */
+.panel-body h3.side-label { margin: 0; padding: calc(10px - .17em) 8px calc(10px - .1em); line-height: 1; }
+.panel-body h3.side-label:first-child { margin-top: 10px; }
+ul.plain.member-rows > li { display: flex; align-items: center; gap: 12px; padding: 10px 8px; border: none; border-radius: 7px; }
 ul.plain.member-rows > li:hover { background: var(--hover); }
+/* Removing and banning from the list: buttons at the end of a row, there when the row is pointed at or one has
+   the keyboard. */
+.member-act { flex: none; width: 26px; height: 26px; margin-block: -4px; color: var(--bad); opacity: 0; }
+.member-act + .member-act { margin-left: -8px; }
+.member-rows > li:is(:hover, :focus-within) .member-act, .touch .member-act { opacity: 1; }
+.role-holders-title { margin: 16px 0 4px; font-size: 1em; }
+.role-give { margin-top: 8px; }
 button.member-name { flex: 1; min-width: 0; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #members[aria-pressed=true] { background: var(--hover); color: var(--text); }
-.side-section + .side-section { margin-top: 6px; padding-top: 4px; border-top: 1px solid var(--line); }
+/* The room under a section's last row ends at the line before the next one, whose heading follows it at once. */
+.side-section + .side-section { margin-top: 6px; border-top: 1px solid var(--line); }
+.side-section + .side-section > .side-head { padding-top: 0; }
 .side-head, .group-head { display: flex; align-items: center; }
 .side-head { padding: 4px 0 2px; cursor: grab; }
 .side-head h2, .side-label { margin: 0; font-size: 0.75em; font-weight: 650; text-transform: uppercase; letter-spacing: .05em;

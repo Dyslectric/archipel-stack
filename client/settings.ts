@@ -1016,18 +1016,31 @@ const sections: Section[] = [
     key: "roles",
     label: "Roles",
     about:
-      "What some members may do here without being moderators. Give a member a role under Members.",
+      "What some members may do here without being moderators. Give a member a role here, or under Members.",
     icon: "shield",
     show: owns,
     async draw(el, ctx) {
       const c = ctx.channel!,
         roles = await api<ChannelRole[]>(`/channels/${c.id}/roles`);
+      // A role is held by local members who are not moderators, one role each.
+      const local = (c.members || []).filter(
+        (u) => u.role === "member" && (!u.actor_url || u.actor_url.startsWith(location.origin)),
+      );
+      const holders = (role: ChannelRole) => {
+        const has = local.filter((u) => u.channel_role?.id === role.id),
+          rest = local.filter((u) => u.channel_role?.id !== role.id);
+        return `<h3 class="role-holders-title">Members with this role</h3><ul class="plain member-list role-holders">${has.length ? has.map((u) => person(u, "", `<button type="button" class="small secondary" data-unrole="${u.id}">Take role away</button>`)).join("") : '<li class="muted">Nobody holds this role yet.</li>'}</ul>${
+          rest.length
+            ? `<form class="stack narrow-form role-give" data-give-role="${role.id}" aria-label="Give ${esc(role.name)} to a member"><label>Give this role to<select name="user">${rest.map((u) => `<option value="${u.id}">${esc(u.display_name)}${u.username ? ` (@${esc(u.username)})` : ""}${u.channel_role ? ` · now ${esc(u.channel_role.name)}` : ""}</option>`).join("")}</select></label>${error}<button class="secondary">Give role</button></form>`
+            : `<p class="muted small">${local.length ? "Every member who can hold a role has this one." : "There are no members to give it to yet."}</p>`
+        }`;
+      };
       el.innerHTML =
         roles
           .map((role) =>
             card(
               `${esc(role.name)} <span class="pill">${role.members} member${role.members === 1 ? "" : "s"}</span>`,
-              `<form class="stack narrow-form role-form" data-role="${role.id}" aria-label="Role ${esc(role.name)}"><label>Role name<input name="name" required maxlength="40" value="${esc(role.name)}" autocomplete="off"></label>${channelRoleBoxes(role)}${error}<div class="row"><button>Save role</button><button type="button" class="secondary bad-text" data-delete-role="${role.id}">Delete role</button></div></form>`,
+              `<form class="stack narrow-form role-form" data-role="${role.id}" aria-label="Role ${esc(role.name)}"><label>Role name<input name="name" required maxlength="40" value="${esc(role.name)}" autocomplete="off"></label>${channelRoleBoxes(role)}${error}<div class="row"><button>Save role</button><button type="button" class="secondary bad-text" data-delete-role="${role.id}">Delete role</button></div></form>${holders(role)}`,
             ),
           )
           .join("") +
@@ -1054,6 +1067,15 @@ const sections: Section[] = [
       onSubmit($("#role-create", el), async (data) => {
         await api(`/channels/${c.id}/roles`, "POST", channelRoleValues(data));
         await changed("Role created.");
+      });
+      for (const form of $$<HTMLFormElement>(".role-give", el))
+        onSubmit(form, async (data) => {
+          await api(`/channels/${c.id}/members/${data.get("user")}`, "PATCH", { channel_role: form.dataset.giveRole });
+          await changed("Role given.");
+        });
+      onClick(el, "[data-unrole]", async (button) => {
+        await api(`/channels/${c.id}/members/${button.dataset.unrole}`, "PATCH", { channel_role: null });
+        await changed("Role taken away.");
       });
       onClick(el, "[data-delete-role]", async (button) => {
         if (

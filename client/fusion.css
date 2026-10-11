@@ -136,7 +136,7 @@
   /* the sidebar: a tree of plain rows */
   #channel-list { padding: 4px 0; }
   .side-foot, .side-empty { display: none; }
-  .side-section + .side-section { border: 0; margin-top: 0; padding-top: 7px; }
+  .side-section + .side-section { border: 0; margin-top: 0; }
   .side-head { padding: 0; }
   .side-head h2 { font-size: 1em; font-weight: 600; text-transform: none; letter-spacing: 0; color: var(--text); }
   .side-toggle { padding: 3px 6px 3px 9px; gap: 7px; color: var(--text); border-radius: 0; }
@@ -180,7 +180,8 @@
   .panel-head .icon-button { width: 22px; height: 22px; color: var(--text); }
   .panel-head .icon-button .i { width: 12px; height: 12px; }
   .panel-body { padding: 0 0 8px; }
-  .panel-body h3.side-label { height: calc(1.4em + 6px); padding: 0 10px; font-size: 1em; font-weight: 400; text-transform: none; letter-spacing: 0; }
+  .panel-body h3.side-label { display: flex; align-items: center; height: calc(1.4em + 6px); padding: 0 10px; line-height: inherit; font-size: 1em; font-weight: 400; text-transform: none; letter-spacing: 0; }
+  .panel-body h3.side-label:first-child { margin-top: 0; }
   ul.plain.member-rows > li { padding: 3px 10px; border-radius: 0; gap: 12px; }
   ul.plain.member-rows > li:nth-child(even):not(:hover) { background: var(--fusion-stripe); }
   button.member-name { font-weight: 400; }
@@ -472,8 +473,9 @@
   .group-body .message-meta :is(time, .handle), .thread-clock { font-size: var(--fusion-small); }
   .group-body .message-meta .handle:not(:has(+ time)), .group-body .message-meta .handle { display: none; }
   .member-rows .avatar, .dm-link .avatar { width: 1.8rem; height: 1.8rem; font-size: .95rem; }
-  ul.plain.member-rows > li { padding-block: 4px; }
-  .panel-body h3.side-label { height: calc(1.8rem + 8px); }
+  ul.plain.member-rows > li { padding-block: 10px; }
+  .panel-body h3.side-label { display: block; height: auto; padding-block: calc(10px - .13em); line-height: 1; }
+  .panel-body h3.side-label:first-child { margin-top: 10px; }
   --side-x: calc(26px + (1.8rem - 1.125rem) / 2); --side-icon: 1.125rem; --side-gap: 8px;
   .channel-link { padding-block: 6px; }
   /* A direct message's picture starts where an icon would, moved left by half of what it is wider by. */
@@ -550,7 +552,6 @@
     .side-row .row-menu { right: 0; }
     .side-row:has([data-item-menu]) .channel-link { padding-right: 48px; }
     .topic-toggle { left: calc(var(--side-x) + var(--side-icon) / 2 - 22px); width: 44px; height: 44px; }
-    .side-section + .side-section { padding-top: 3px; }
     .channel-header { min-height: 34px; }
     #channel-options { opacity: 1; width: 30px; height: 30px; }
     .recipient-bar .pref-button, .thread-row .pref-button { opacity: 1; width: 44px; height: 44px; margin: -10px -6px; }
