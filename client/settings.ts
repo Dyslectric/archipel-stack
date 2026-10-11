@@ -45,6 +45,7 @@ import {
   pushBlocked,
   pushFound,
   pushOn,
+  pushSettled,
   pushSupported,
   testPush,
 } from "./notify.js";
@@ -316,6 +317,7 @@ const sections: Section[] = [
           title: string | null;
         }[]
       >("/prefs");
+      await pushSettled();
       const device = !pushSupported()
         ? '<p class="muted">This browser cannot receive notifications. On an iPhone or iPad, add Archipel Web to the Home Screen from the share menu and open it from there.</p>'
         : pushBlocked()

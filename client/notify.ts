@@ -47,6 +47,9 @@ const subscribe = (worker: ServiceWorkerRegistration, key: string) =>
 async function register(sub: PushSubscription) {
   const { endpoint, keys } = sub.toJSON();
   await api("/push", "PUT", { endpoint, keys });
+  // Asked of the browser so it keeps the worker and its subscription; granted without a question
+  // where notifications are allowed.
+  void navigator.storage?.persist?.().catch(() => {});
   on = true;
   remember(state.session.user!.id);
 }
@@ -77,7 +80,16 @@ export async function disablePush() {
 }
 // On start: a browser where this account turned notifications on keeps them through a new
 // session; one left subscribed by someone else is let go.
-export async function syncPush() {
+// The page that says how notifications stand waits for the look on start, so it does not offer
+// to turn on what is on.
+let settled: Promise<void> = Promise.resolve();
+export const pushSettled = () => settled;
+export function syncPush() {
+  const look = sync();
+  settled = look.catch(() => {});
+  return look;
+}
+async function sync() {
   on = false;
   found = "";
   if (!pushSupported()) return;
@@ -99,8 +111,10 @@ export async function syncPush() {
       "/push",
     );
     void worker.update().catch(() => {});
-    if (sub && current(sub, status.public_key) && status.endpoint === sub.endpoint)
+    if (sub && current(sub, status.public_key) && status.endpoint === sub.endpoint) {
+      void navigator.storage?.persist?.().catch(() => {});
       return void (on = true);
+    }
     found = `${!sub ? "The browser held no subscription" : !current(sub, status.public_key) ? "The browser's subscription was made with another instance key" : "The browser held a subscription"}; the instance held ${!status.endpoint ? "none" : status.endpoint === sub?.endpoint ? "the same one" : "a different one"} for this session.`;
     // The browser let its subscription go, or the instance holds none for this session: it is
     // new, or the push service refused what was sent. A subscription made now is one that works.
