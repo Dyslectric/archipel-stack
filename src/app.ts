@@ -8,7 +8,7 @@ import { rateLimit, ipKeyGenerator } from "express-rate-limit";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { Config } from "./config.js";
-import { Problem, Store, text, type User } from "./store.js";
+import { Problem, SESSION_LIFE, Store, text, type User } from "./store.js";
 import { Federation } from "./federation.js";
 import { createOidc, OidcFailure, type OidcStage } from "./oidc.js";
 import { logSignInFailure } from "./auth-log.js";
@@ -343,7 +343,7 @@ export function createApp(config: Config, store: Store) {
       const session = store.createSession(user.id);
       res.cookie(authCookie, session.token, {
         ...cookieOptions,
-        maxAge: 7 * 86400000,
+        maxAge: SESSION_LIFE,
       });
       res.json({ user: store.profile(user, true), csrf: session.csrf });
     },
@@ -415,7 +415,7 @@ export function createApp(config: Config, store: Store) {
       const session = store.createSession(user.id);
       res.cookie(authCookie, session.token, {
         ...cookieOptions,
-        maxAge: 7 * 86400000,
+        maxAge: SESSION_LIFE,
       });
       res.clearCookie("archipel-flow", cookieOptions);
       // Signing in on the way to letting a program in: back to that question.
@@ -443,6 +443,10 @@ export function createApp(config: Config, store: Store) {
     const session = store.session(cookie(req, authCookie));
     if (!session) return next(new Problem(401, "Sign in to continue."));
     res.locals.user = session.user;
+    // Using a session keeps it, and the notifications that go with it, for another week.
+    const token = cookie(req, authCookie);
+    if (store.renewSession(token))
+      res.cookie(authCookie, token, { ...cookieOptions, maxAge: SESSION_LIFE });
     if (
       !["GET", "HEAD"].includes(req.method) &&
       req.headers["x-csrf-token"] !== session.csrf

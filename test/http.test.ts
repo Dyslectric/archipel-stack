@@ -1223,6 +1223,24 @@ test("browsers that subscribed are notified of new messages until they sign out 
   assert.equal((await (await bob.request("/api/push")).json()).endpoint, null);
 });
 
+test("a session in use lasts, and one left a week ends", async t => {
+  const f = await application(t);
+  const bob = browser(f.origin);
+  await bob.login("bob");
+  const age = (left: number) => f.store.db.prepare("UPDATE sessions SET expires_at=?").run(Date.now() + left);
+  const left = () => Number(f.store.db.prepare("SELECT expires_at FROM sessions").get()!.expires_at) - Date.now();
+  // Used the same day, it is left as it was; days later, it is good for a week again.
+  assert.equal((await bob.request("/api/channels")).headers.getSetCookie().length, 0);
+  age(2 * 86400000);
+  const renewed = await bob.request("/api/channels");
+  assert.match(renewed.headers.getSetCookie()[0], /Max-Age=604800/);
+  assert.ok(left() > 6.9 * 86400000);
+  assert.equal((await bob.request("/api/channels")).status, 200);
+  age(-1);
+  assert.equal((await bob.request("/api/channels")).status, 401);
+  assert.ok(left() < 0);
+});
+
 test("request limits follow the configured per-minute rates", async (t) => {
   const { origin } = await application(t, { rateLimitFederation: 2, rateLimitApi: 3 });
   const statuses = async (path: string, count: number) => {

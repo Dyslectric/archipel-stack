@@ -144,6 +144,8 @@ export const hash = (value: string) =>
   createHash("sha256").update(value).digest("hex");
 export const randomToken = () => randomBytes(32).toString("base64url");
 const now = () => new Date().toISOString();
+// How long a session lasts after it was last used.
+export const SESSION_LIFE = 7 * 86400000;
 
 export function text(value: unknown, label: string, max: number): string {
   if (typeof value !== "string" || !value.trim() || value.trim().length > max)
@@ -342,8 +344,18 @@ export class Store {
     this.db.prepare("DELETE FROM sessions WHERE expires_at<=?").run(Date.now());
     this.db
       .prepare("INSERT INTO sessions VALUES(?,?,?,?)")
-      .run(hash(token), id, csrf, Date.now() + 7 * 86400000);
+      .run(hash(token), id, csrf, Date.now() + SESSION_LIFE);
     return { token, csrf };
+  }
+  // A session in use lasts: on a day it is used, it is good for that long again. True when it
+  // was put off, at most once a day.
+  renewSession(token: string) {
+    const until = Date.now() + SESSION_LIFE;
+    return !!this.db
+      .prepare(
+        "UPDATE sessions SET expires_at=? WHERE token_hash=? AND expires_at>? AND expires_at<?",
+      )
+      .run(until, hash(token), Date.now(), until - 86400000).changes;
   }
   session(token: string) {
     const session = this.db
