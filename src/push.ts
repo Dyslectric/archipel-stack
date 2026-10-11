@@ -207,7 +207,8 @@ export class Push {
           "content-type": "application/octet-stream",
           "content-length": String(body.length),
           ttl: "86400",
-          urgency: "normal",
+          // Anything less waits for a sleeping phone to be picked up again.
+          urgency: "high",
           // A later notification for the same conversation replaces one still waiting for the device.
           topic: hash(notice.tag).slice(0, 32),
         },
