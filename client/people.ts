@@ -20,17 +20,17 @@ import {
 // People: a click on someone's name offers to write to or block them, and "New direct message" finds
 // someone to write to. Whether a message can be delivered is only known once it's tried —
 // the conversation says why not when it can't.
-document.addEventListener("click", (e) => {
-  const at = e.target as Element,
-    name = at.closest<HTMLElement>("[data-user]");
-  if (name) {
-    e.preventDefault();
+// Someone's menu, under their name or where the pointer asked for it.
+function userMenu(name: HTMLElement, at?: { x: number; y: number }) {
+  {
     const { user: actor = "", username = "", name: shown = "", avatar: picture = "" } = name.dataset,
       self = actor === state.session.user!.actor_url,
       remote = actor.startsWith("xmpp:") || !actor.startsWith(state.session.user!.actor_url!.slice(0, state.session.user!.actor_url!.lastIndexOf("/") + 1)),
       blocked = state.userBlocks.includes(actor),
       // Someone in an XMPP room that hides its members' addresses: xmpp:room@host/nickname.
       occupant = /^xmpp:[^/]+\/./.test(actor);
+    // In a channel, whoever may remove or ban them can do it from here.
+    const member = self ? "" : hooks.memberItems({ actor });
     const panel = popup(
       name,
       `<div class="user-card">${avatar({ username, display_name: shown, avatar_url: picture }, "large")}<div class="grow"><strong>${esc(shown)}</strong><div class="handle">${occupant ? `In ${esc(username.split("/")[0])}` : `@${esc(username)}`}</div></div></div>
@@ -43,8 +43,11 @@ document.addEventListener("click", (e) => {
           : `<a class="menu-item" href="${esc(dmHref(actor))}">${icon("chat")}<span class="grow">${blocked ? "Open direct conversation" : "Send a direct message"}</span></a>
              ${remote ? `<button type="button" class="menu-item" data-contact-name>${icon("pencil")}<span class="grow">Set display name</span></button>` : ""}
              <button type="button" class="menu-item${blocked ? "" : " bad-text"}" data-user-block>${icon(blocked ? "check" : "block")}<span class="grow">${blocked ? "Unblock user" : "Block user"}</span></button>`
-      }</div>`,
+      }</div>${member ? `<div class="menu-section" role="menu">${member}</div>` : ""}`,
+      at,
     );
+    for (const item of panel?.querySelectorAll<HTMLElement>("[data-member-act]") || [])
+      item.addEventListener("click", () => hooks.memberAct({ actor }, item.dataset.memberAct!));
     panel?.querySelector("[data-contact-name]")?.addEventListener("click", () =>
       action(() => editContactName(actor)),
     );
@@ -55,7 +58,26 @@ document.addEventListener("click", (e) => {
         toast(`${shown} ${blocked ? "unblocked" : "blocked"}.`);
       }),
     );
+  }
+}
+document.addEventListener("click", (e) => {
+  const at = e.target as Element,
+    name = at.closest<HTMLElement>("[data-user]");
+  if (name) {
+    e.preventDefault();
+    userMenu(name);
   } else if (at.closest("[data-new-dm]")) newDirectMessage();
+});
+// A right click on someone's name, or anywhere on their row in a list of members, opens the same menu
+// there. A message keeps its own, which has what can be done to whoever wrote it.
+document.addEventListener("contextmenu", (e) => {
+  const at = e.target as Element;
+  if (at.closest(".message, input, textarea, a")) return;
+  const name = at.closest<HTMLElement>("[data-user]") || at.closest(".member-rows > li")?.querySelector<HTMLElement>("[data-user]");
+  if (!name) return;
+  e.preventDefault();
+  if (name.getAttribute("aria-expanded") === "true") name.removeAttribute("aria-expanded");
+  userMenu(name, { x: e.clientX, y: e.clientY });
 });
 
 async function editContactName(peer: string) {

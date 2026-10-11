@@ -12,6 +12,7 @@ import {
   channelShares,
   clock,
   confirmDialog,
+  hooks,
   dayLabel,
   dmHref,
   emojiHtml,
@@ -262,22 +263,8 @@ export function chatFrame(view: HTMLElement) {
   });
   $("#member-panel").addEventListener("click", (e) => {
     if ((e.target as Element).closest("[data-close-members]")) toggleMembers();
-    const act = (e.target as Element).closest<HTMLElement>("[data-ban-member],[data-kick-member]"),
-      c = current,
-      ban = !!act?.dataset.banMember,
-      who = c?.members?.find((u) => u.id === (act?.dataset.banMember || act?.dataset.kickMember));
-    if (act && c && who)
-      action(async () => {
-        if (
-          !(await (ban
-            ? confirmDialog(`Ban ${who.display_name} from #${c.name}?`, "They are removed from the channel and cannot come back until the ban is lifted under Access rules, in the channel's settings.", "Ban from channel")
-            : confirmDialog(`Remove ${who.display_name} from #${c.name}?`, "They leave the channel, and can join it again where it lets them.", "Remove from channel")))
-        )
-          return;
-        await api(`/channels/${c.id}/members/${who.id}`, "PATCH", ban ? { rule: "block" } : { remove: true });
-        toast(ban ? `${who.display_name} is banned from #${c.name}.` : `${who.display_name} is removed from #${c.name}.`);
-        await refreshCurrent();
-      });
+    const act = (e.target as Element).closest<HTMLElement>("[data-ban-member],[data-kick-member]");
+    if (act) hooks.memberAct({ id: act.dataset.banMember || act.dataset.kickMember }, act.dataset.banMember ? "ban" : "kick");
   });
 }
 export async function showChat(
@@ -444,6 +431,43 @@ function wireMembersResize() {
     save();
   });
 }
+// Whoever may remove or ban can do it from a member's row, their menu or a message of theirs:
+// moderators anyone but the owner (and only the owner another moderator), someone whose role allows
+// it the members who hold no role.
+function memberReach(u: User | undefined) {
+  const c = current;
+  const within = !!c && !c.dm && !!u && u.role !== "owner" && u.id !== me().id &&
+    (u.role !== "moderator" || me().admin || c.role === "owner") && (canModerate(c) || !u.channel_role);
+  return { kick: within && channelCan(c!, "kick_members"), ban: within && channelCan(c!, "ban_members") };
+}
+// Someone in the conversation that is open, by their address or by who they are here.
+const memberOf = (who: { actor?: string; id?: string }) =>
+  document.querySelector("#message-list")
+    ? current?.members?.find((u) => (who.id ? u.id === who.id : !!who.actor && u.actor_url === who.actor))
+    : undefined;
+hooks.memberItems = (who) => {
+  const u = memberOf(who),
+    may = memberReach(u);
+  const item = (act: string, label: string, ico: string) => `<button type="button" class="menu-item bad-text" role="menuitem" data-member-act="${act}">${icon(ico)}<span class="grow">${label}</span></button>`;
+  return (may.kick ? item("kick", `Remove from #${esc(current!.name)}`, "logout") : "") + (may.ban ? item("ban", `Ban from #${esc(current!.name)}`, "block") : "");
+};
+hooks.memberAct = (who, act) => {
+  const c = current,
+    u = memberOf(who),
+    ban = act === "ban";
+  if (!c || !u || !memberReach(u)[ban ? "ban" : "kick"]) return;
+  action(async () => {
+    if (
+      !(await (ban
+        ? confirmDialog(`Ban ${u.display_name} from #${c.name}?`, "They are removed from the channel and cannot come back until the ban is lifted under Access rules, in the channel's settings.", "Ban from channel")
+        : confirmDialog(`Remove ${u.display_name} from #${c.name}?`, "They leave the channel, and can join it again where it lets them.", "Remove from channel")))
+    )
+      return;
+    await api(`/channels/${c.id}/members/${u.id}`, "PATCH", ban ? { rule: "block" } : { remove: true });
+    toast(ban ? `${u.display_name} is banned from #${c.name}.` : `${u.display_name} is removed from #${c.name}.`);
+    await refreshCurrent();
+  });
+};
 function renderMembers() {
   const frame = document.querySelector<HTMLElement>("#member-panel"),
     panel = document.querySelector<HTMLElement>("#member-list");
@@ -453,22 +477,17 @@ function renderMembers() {
   frame.hidden = !show;
   if (!show) return;
   const members = c.members || [];
-  // Whoever may remove or ban can do it from here: moderators anyone but the owner (and only the owner
-  // another moderator), someone whose role allows it the members who hold no role.
-  const kicking = channelCan(c, "kick_members"),
-    banning = channelCan(c, "ban_members"),
-    owning = me().admin || c.role === "owner";
-  const ban = (u: User) =>
-    u.role !== "owner" && u.id !== me().id && (u.role !== "moderator" || owning) && (canModerate(c) || !u.channel_role)
-      ? (kicking ? `<button type="button" class="icon-button member-act" data-kick-member="${u.id}" aria-label="Remove ${esc(u.display_name)} from this channel" title="Remove from this channel">${icon("logout")}</button>` : "") +
-        (banning ? `<button type="button" class="icon-button member-act" data-ban-member="${u.id}" aria-label="Ban ${esc(u.display_name)} from this channel" title="Ban from this channel">${icon("block")}</button>` : "")
-      : "";
+  const ban = (u: User) => {
+    const may = memberReach(u);
+    return (may.kick ? `<button type="button" class="icon-button member-act" data-kick-member="${u.id}" aria-label="Remove ${esc(u.display_name)} from this channel" title="Remove from this channel">${icon("logout")}</button>` : "") +
+      (may.ban ? `<button type="button" class="icon-button member-act" data-ban-member="${u.id}" aria-label="Ban ${esc(u.display_name)} from this channel" title="Ban from this channel">${icon("block")}</button>` : "");
+  };
   const html = `<div class="panel-head"><h2 class="grow">Members <span class="muted">${members.length}</span></h2><a class="icon-button" href="#/settings/channel/members/${c.id}" aria-label="Manage members" title="Roles, invitations and removal">${icon("settings")}</a><button type="button" class="icon-button" data-close-members aria-label="Hide members" title="Hide members">${icon("x")}</button></div>
     <div class="panel-body">${ranks
       .map(([role, label]) => {
         const list = members.filter((u) => u.role === role);
         return list.length
-          ? `<h3 class="side-label">${label}${role === "owner" ? "" : ` · ${list.length}`}</h3><ul class="plain member-rows">${list.map((u) => `<li>${avatar(u, "small")}${nameButton(u, u.actor_url, "member-name")}${u.actor_url?.startsWith("xmpp:") ? `<span class="mode-tag" title="XMPP" aria-label="XMPP">${icon("xmpp")}</span>` : u.actor_url && !u.actor_url.startsWith(location.origin) ? `<span class="mode-tag" title="On another instance">${icon("globe")}</span>` : ""}${ban(u)}</li>`).join("")}</ul>`
+          ? `<h3 class="side-label">${label}${role === "owner" ? "" : ` · ${list.length}`}</h3><ul class="plain member-rows">${list.map((u) => `<li>${avatar(u, "small")}${nameButton(u, u.actor_url, "member-name")}${ban(u)}${u.actor_url?.startsWith("xmpp:") ? `<span class="mode-tag" title="XMPP" aria-label="XMPP">${icon("xmpp")}</span>` : u.actor_url && !u.actor_url.startsWith(location.origin) ? `<span class="mode-tag" title="On another instance">${icon("globe")}</span>` : ""}</li>`).join("")}</ul>`
           : "";
       })
       .join("")}</div>`;
@@ -704,10 +723,14 @@ function messageMenu(button: HTMLElement, id = button.dataset.messageMenu, at?: 
   if (!m || m.queued || m.deleted_at) return;
   const token = generation;
   const item = (key: string, label: string, ico: string) => `<button type="button" class="menu-item" role="menuitem" data-message-action="${key}">${icon(ico)}<span class="grow">${label}</span></button>`;
-  const panel = popup(button, `<div class="menu-section" role="menu">${item("copy", "Copy text", "quote")}${mine(m) ? item("edit", "Edit message", "pencil") : ""}${removable(m) ? item("remove", "Remove message", "trash") : ""}</div>`, at);
+  // Whoever wrote it can be removed or banned from here, by someone who may.
+  const author = hooks.memberItems({ id: m.author_id });
+  const panel = popup(button, `<div class="menu-section" role="menu">${item("copy", "Copy text", "quote")}${mine(m) ? item("edit", "Edit message", "pencil") : ""}${removable(m) ? item("remove", "Remove message", "trash") : ""}</div>${author ? `<div class="menu-section" role="menu"><div class="menu-label">${esc(m.display_name)}</div>${author}</div>` : ""}`, at);
   panel?.addEventListener("click", (e) => {
     if (generation !== token) return;
     const name = (e.target as Element).closest<HTMLElement>("[data-message-action]")?.dataset.messageAction;
+    const member = (e.target as Element).closest<HTMLElement>("[data-member-act]")?.dataset.memberAct;
+    if (member) return hooks.memberAct({ id: m.author_id }, member);
     if (name === "edit") editMessage(m.id);
     else if (name === "remove") removeMessage(m.id);
     else if (name === "copy") action(async () => {
@@ -1084,9 +1107,16 @@ function wireFeed() {
     true,
   );
   list.addEventListener("contextmenu", (e) => {
-    if (!isFusion() || (e.target as Element).closest("input, textarea, a")) return;
+  // A right click on a message or a post opens its menu, in every style. Outside Fusion, where text is
+  // selected the browser keeps its own menu, to copy it by.
+    if ((e.target as Element).closest("input, textarea, a") || (!isFusion() && !getSelection()?.isCollapsed)) return;
     const row = (e.target as Element).closest<HTMLElement>(".message[id]");
-    if (row) { e.preventDefault(); selectFusionMessage(row.id.slice(2)); messageMenu(row, row.id.slice(2), { x: e.clientX, y: e.clientY }); }
+    if (!row) return;
+    const m = messages.find((m) => m.id === row.id.slice(2));
+    if (!m || m.queued || m.deleted_at) return;
+    e.preventDefault();
+    if (isFusion()) selectFusionMessage(m.id);
+    messageMenu(row, m.id, { x: e.clientX, y: e.clientY });
   });
   list.addEventListener("keydown", (e) => {
     if (isFusion() && (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10"))) {

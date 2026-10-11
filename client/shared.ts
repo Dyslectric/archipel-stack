@@ -177,11 +177,14 @@ export const state = {
   prefs: {} as Record<string, Pref>,
 };
 // Set by main.ts: start over from the session (after sign-in or a lost session), sign out,
-// and redraw the account button after a profile change.
+// and redraw the account button after a profile change. Set by chat.ts: what the viewer may do to
+// someone in the conversation that is open, as items for a menu, and doing one of them.
 export const hooks = {
   boot: async () => {},
   signOut: async () => {},
   account: () => {},
+  memberItems: (_who: { actor?: string; id?: string }) => "",
+  memberAct: (_who: { actor?: string; id?: string }, _act: string) => {},
 };
 
 export const esc = (value: unknown) =>
