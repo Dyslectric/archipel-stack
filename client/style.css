@@ -282,9 +282,9 @@ ul.plain.member-rows > li:hover { background: var(--hover); }
 .role-give { margin-top: 8px; }
 button.member-name { flex: 1; min-width: 0; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #members[aria-pressed=true] { background: var(--hover); color: var(--text); }
-/* The room under a section's last row ends at the line before the next one, whose heading follows it at once. */
-.side-section + .side-section { margin-top: 6px; border-top: 1px solid var(--line); }
-.side-section + .side-section > .side-head { padding-top: 0; }
+/* The room under a section's last row ends at the line before the next one, whose heading is as far under that
+   line as the first section's is under the bar over the list. */
+.side-section + .side-section { margin-top: 6px; padding-top: 4px; border-top: 1px solid var(--line); }
 .side-head, .group-head { display: flex; align-items: center; }
 .side-head { padding: 4px 0 2px; cursor: grab; }
 .side-head h2, .side-label { margin: 0; font-size: 0.75em; font-weight: 650; text-transform: uppercase; letter-spacing: .05em;

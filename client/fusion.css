@@ -136,7 +136,7 @@
   /* the sidebar: a tree of plain rows */
   #channel-list { padding: 4px 0; }
   .side-foot, .side-empty { display: none; }
-  .side-section + .side-section { border: 0; margin-top: 0; }
+  .side-section + .side-section { border: 0; margin-top: 0; padding-top: 0; }
   .side-head { padding: 0; }
   .side-head h2 { font-size: 1em; font-weight: 600; text-transform: none; letter-spacing: 0; color: var(--text); }
   .side-toggle { padding: 3px 6px 3px 9px; gap: 7px; color: var(--text); border-radius: 0; }
