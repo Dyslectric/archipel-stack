@@ -23,7 +23,8 @@ status strip shows the connection, the conversation or directory on screen, and 
 
 New channel, Join a federated channel and Join an XMPP room in the directory's command
 strip each open a window over it. Joining still asks you to acknowledge what it shares.
-Drag any window or dialog by its title bar to move it; it returns to the middle the next
+Channel settings, from a channel's menu or its members panel, open as a window over the
+conversation, with the channel's pages as tabs; the Settings page has them too. Drag any window or dialog by its title bar to move it; it returns to the middle the next
 time it opens.
 
 Quote puts the selected message into the composer as quoted text, with the cursor under

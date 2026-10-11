@@ -34,8 +34,8 @@ import {
   type Session,
   type User,
 } from "./shared.js";
-import { chatChannel, resetChat } from "./chat.js";
-import { hourChoices, styleChoices, textScaleControls } from "./appearance.js";
+import { chatChannel, refreshCurrent, resetChat } from "./chat.js";
+import { hourChoices, isFusion, styleChoices, textScaleControls } from "./appearance.js";
 import { renderSidebar, sidebarFrame } from "./sidebar.js";
 import { mirrorDialog } from "./mirrors.js";
 import { subscribeRemote } from "./join.js";
@@ -50,8 +50,8 @@ import {
 import type { Pref } from "./shared.js";
 
 // Settings are pages you can move between from the list on the left: yours, federation,
-// a channel's, and the instance's. Each section draws itself into the page and redraws
-// (ctx.refresh) after a change.
+// a channel's (one row: the channel and its pages are chosen on the page), and the instance's.
+// Each section draws itself into the page and redraws (ctx.refresh) after a change.
 interface Ctx {
   channel: Channel | null;
   refresh: () => Promise<void>;
@@ -1244,9 +1244,10 @@ const sections: Section[] = [
     mod: true,
     async draw(el, ctx) {
       const c = ctx.channel!;
-      const followers = await api<{ actor: string; status: string }[]>(
-        `/channels/${c.id}/followers`,
-      );
+      // A follower is known here by the handle their instance gave, at that instance.
+      const followers = await api<
+        { actor: string; status: string; username: string | null }[]
+      >(`/channels/${c.id}/followers`);
       el.innerHTML =
         card(
           "Federation",
@@ -1255,7 +1256,7 @@ const sections: Section[] = [
         ) +
         card(
           "Remote followers",
-          `<ul class="plain remote-followers">${followers.length ? followers.map((f) => `<li class="row"><code class="grow">${esc(f.actor)}</code><span class="pill ${f.status === "accepted" ? "good" : f.status === "blocked" ? "bad" : "warn"}">${esc(f.status)}</span>${f.status !== "accepted" ? `<button type="button" class="small" data-follower="${esc(f.actor)}" data-decision="accepted">Accept follower</button>` : ""}${f.status !== "blocked" ? `<button type="button" class="small secondary bad-text" data-follower="${esc(f.actor)}" data-decision="blocked">Block follower</button>` : ""}</li>`).join("") : '<li class="muted">No remote follows yet.</li>'}</ul>`,
+          `<ul class="plain remote-followers">${followers.length ? followers.map((f) => `<li class="row">${f.username ? `<span class="grow" title="${esc(f.actor)}">@${esc(f.username)}</span>` : `<code class="grow">${esc(f.actor)}</code>`}<span class="pill ${f.status === "accepted" ? "good" : f.status === "blocked" ? "bad" : "warn"}">${esc(f.status)}</span>${f.status !== "accepted" ? `<button type="button" class="small" data-follower="${esc(f.actor)}" data-decision="accepted">Accept follower</button>` : ""}${f.status !== "blocked" ? `<button type="button" class="small secondary bad-text" data-follower="${esc(f.actor)}" data-decision="blocked">Block follower</button>` : ""}</li>`).join("") : '<li class="muted">No remote follows yet.</li>'}</ul>`,
         );
       onSubmit($("#channel-federation", el), async (data) => {
         await api(`/channels/${c.id}/federation`, "PATCH", {
@@ -1491,6 +1492,23 @@ const sections: Section[] = [
   },
 ];
 
+const allowed = (s: Section, c?: Channel | null) =>
+  (!s.admin || !!state.session.user?.admin) &&
+  (s.group !== "channel" ||
+    (!!c &&
+      (!s.mod || canModerate(c)) &&
+      (!s.show || s.show(c)) &&
+      (!s.mirror || !!c.mirror)));
+// A channel's pages are a row of their own, over the one that is open.
+const channelTabs = (c: Channel, on: Section) =>
+  `<nav class="settings-tabs" aria-label="Channel settings">${sections
+    .filter((s) => s.group === "channel" && allowed(s, c))
+    .map(
+      (s) =>
+        `<a class="${s === on ? "on" : ""}" href="#/settings/channel/${s.key}/${c.id}"${s === on ? ' aria-current="page"' : ""}>${icon(s.icon)}${s.label}</a>`,
+    )
+    .join("")}</nav>`;
+
 let token = 0;
 export async function showSettings(
   view: HTMLElement,
@@ -1509,18 +1527,11 @@ export async function showSettings(
     state.channels.find((c) => c.id === id && c.readable) ||
     channels.find((c) => c.id === chatChannel()?.id) ||
     channels[0];
-  const allowed = (s: Section) =>
-    (!s.admin || admin) &&
-    (s.group !== "channel" ||
-      (!!listed &&
-        (!s.mod || canModerate(listed)) &&
-        (!s.show || s.show(listed)) &&
-        (!s.mirror || !!listed.mirror)));
   const section = sections.find((s) => s.group === group && s.key === key);
   const href = (s: Section) =>
     `#/settings/${s.group}/${s.key}${s.group === "channel" ? `/${listed!.id}` : ""}`;
-  if (group && (!section || !allowed(section))) {
-    const fallback = sections.find((s) => s.group === group && allowed(s));
+  if (group && (!section || !allowed(section, listed))) {
+    const fallback = sections.find((s) => s.group === group && allowed(s, listed));
     return go(fallback ? href(fallback) : "#/settings");
   }
   // On a wide screen there's always a section open; on a phone the list comes first.
@@ -1530,15 +1541,19 @@ export async function showSettings(
     return go(href(section));
   const nav = (Object.keys(groups) as Section["group"][])
     .map((g) => {
-      const links = sections
-        .filter((s) => s.group === g && allowed(s))
-        .map(
-          (s) =>
-            `<a class="menu-item${s === section ? " on" : ""}" href="${href(s)}"${s === section ? ' aria-current="page"' : ""}>${icon(s.icon)}<span class="grow">${s.label}</span></a>`,
-        )
-        .join("");
-      if (g === "channel")
-        return `<div class="nav-group"><div class="menu-label">Channel</div>${channels.length || listed ? `<select id="settings-channel" aria-label="Channel">${[...new Set([...(listed ? [listed] : []), ...channels])].map((c) => `<option value="${c.id}" ${c.id === listed!.id ? "selected" : ""}>#${esc(c.name)}</option>`).join("")}</select>${links}` : '<p class="muted small menu-note">Join a channel to see its settings.</p>'}</div>`;
+      // A channel's settings are one row here: which channel, and which of its pages, is chosen on the page.
+      const links =
+        g === "channel"
+          ? listed
+            ? `<a class="menu-item${section?.group === g ? " on" : ""}" href="#/settings/channel/overview/${listed.id}"${section?.group === g ? ' aria-current="page"' : ""}>${icon("hash")}<span class="grow">Channel settings</span></a>`
+            : '<p class="muted small menu-note">Join a channel to see its settings.</p>'
+          : sections
+              .filter((s) => s.group === g && allowed(s))
+              .map(
+                (s) =>
+                  `<a class="menu-item${s === section ? " on" : ""}" href="${href(s)}"${s === section ? ' aria-current="page"' : ""}>${icon(s.icon)}<span class="grow">${s.label}</span></a>`,
+              )
+              .join("");
       return links
         ? `<div class="nav-group"><div class="menu-label">${groups[g]}</div>${links}</div>`
         : "";
@@ -1551,7 +1566,7 @@ export async function showSettings(
     const workspace = sidebarFrame(view);
     workspace.insertAdjacentHTML("beforeend", `<div class="page settings-page"><div class="page-inner settings-layout"><nav class="settings-nav" aria-label="Settings"></nav><section class="settings-body"></section></div></div>`);
     page = $(".page", view);
-    $(".settings-nav", view).addEventListener("change", (e) => {
+    $(".settings-body", view).addEventListener("change", (e) => {
       const select = e.target as HTMLSelectElement,
         [, at, was] = location.hash.split("/").slice(1);
       if (select.id === "settings-channel")
@@ -1575,33 +1590,121 @@ export async function showSettings(
     body.innerHTML = "";
     return;
   }
-  const show = (content: HTMLElement, detail: Channel | null) => {
-    const scrolled = same ? page.scrollTop : 0;
-    body.innerHTML = `<a class="back-link" href="#/settings">${icon("chevron-left")} Settings</a><div class="feed-head"><div><p class="muted small crumb">${groups[section.group]}${detail ? ` · #${esc(detail.name)}` : ""}</p><h1>${section.label}</h1><p class="muted">${section.about}</p></div></div>`;
+  const show = (content: HTMLElement) => {
+    const scrolled = same ? page.scrollTop : 0,
+      choosing = document.activeElement?.id === "settings-channel";
+    body.innerHTML = `<a class="back-link" href="#/settings">${icon("chevron-left")} Settings</a>${
+      section.group === "channel"
+        ? `<label class="settings-channel">Channel<select id="settings-channel">${[...new Set([listed!, ...channels])].map((c) => `<option value="${c.id}" ${c === listed ? "selected" : ""}>#${esc(c.name)}</option>`).join("")}</select></label>${channelTabs(listed!, section)}`
+        : ""
+    }<div class="feed-head"><div>${section.group === "channel" ? "" : `<p class="muted small crumb">${groups[section.group]}</p>`}<h1>${section.label}</h1><p class="muted">${section.about}</p></div></div>`;
     content.id = "section";
     body.append(content);
     refreshTimes(content);
     page.dataset.at = location.hash;
     page.scrollTop = scrolled;
+    // Choosing another channel leaves the keyboard on the list it was chosen from.
+    if (choosing) body.querySelector<HTMLElement>("#settings-channel")?.focus();
   };
   const content = document.createElement("div");
-  let detail: Channel | null = null;
   try {
-    if (section.group === "channel")
-      detail = await api<Channel>(`/channels/${listed!.id}`);
+    const detail =
+      section.group === "channel"
+        ? await api<Channel>(`/channels/${listed!.id}`)
+        : null;
     if (mine !== token) return;
     await section.draw(content, {
       channel: detail,
       refresh: () => showSettings(view, group, key, id),
     });
     if (mine !== token) return;
-    show(content, detail);
+    show(content);
   } catch (e) {
     if (mine !== token) return;
     content.innerHTML = `<p class="flash error">${esc((e as Error).message)}</p>`;
-    show(content, detail);
+    show(content);
   }
 }
+
+// In Fusion a channel's settings are a window over the conversation: its pages in a row of tabs,
+// one open at a time. There is one such window, and asking for another channel's turns it to that.
+let turnWindow: ((id: string, key: string) => Promise<void>) | null = null;
+export function openChannelSettings(id: string, key = "overview") {
+  if (!isFusion() || document.querySelector(".settings-page"))
+    return go(`#/settings/channel/${key}/${id}`);
+  if (turnWindow) return void turnWindow(id, key);
+  const dialog = document.createElement("dialog");
+  dialog.className = "fusion-window channel-settings";
+  dialog.setAttribute("aria-labelledby", "channel-settings-title");
+  dialog.innerHTML = `<div class="dialog-heading"><h2 id="channel-settings-title">Channel settings</h2><button type="button" class="icon-button" data-close-window aria-label="Close channel settings">${icon("x")}</button></div><div class="window-tabs"></div><div class="window-body"></div><div class="window-actions"><button type="button" class="secondary" data-close-window>Close</button></div>`;
+  document.body.append(dialog);
+  const body = $(".window-body", dialog),
+    was = chatChannel()?.id;
+  let turn = 0,
+    at = "",
+    leaving = false;
+  const closed = () => {
+    removeEventListener("hashchange", leave);
+    dialog.remove();
+    turnWindow = null;
+    renderSidebar();
+    // What was changed shows in the conversation underneath.
+    if (leaving) return;
+    if (chatChannel()?.id === was) void refreshCurrent();
+    else go(location.hash);
+  };
+  const close = () => (dialog.open ? dialog.close() : closed());
+  const leave = () => {
+    leaving = true;
+    close();
+  };
+  dialog.addEventListener("close", closed);
+  // Going anywhere else, by a link in the window or because the channel is gone, closes it.
+  addEventListener("hashchange", leave);
+  dialog.addEventListener("click", (e) => {
+    const link = (e.target as Element).closest<HTMLAnchorElement>('a[href^="#/"]');
+    if (link && !link.hash.startsWith("#/settings/channel/")) leave();
+  });
+  turnWindow = async (id, key) => {
+    const mine = ++turn,
+      listed = state.channels.find((c) => c.id === id);
+    const section =
+      sections.find((s) => s.group === "channel" && s.key === key && allowed(s, listed)) ||
+      sections.find((s) => s.group === "channel" && allowed(s, listed));
+    if (!listed || !section) return close();
+    const content = document.createElement("div");
+    try {
+      const detail = await api<Channel>(`/channels/${id}`);
+      if (mine !== turn) return;
+      await section.draw(content, {
+        channel: detail,
+        refresh: () => turnWindow!(id, section.key),
+      });
+    } catch (e) {
+      content.innerHTML = `<p class="flash error">${esc((e as Error).message)}</p>`;
+    }
+    if (mine !== turn || !dialog.isConnected) return;
+    const here = `${id}/${section.key}`,
+      scrolled = at === here ? body.scrollTop : 0;
+    at = here;
+    $("h2", dialog).textContent = `Channel settings · #${listed.name}`;
+    $(".window-tabs", dialog).innerHTML = channelTabs(listed, section);
+    body.innerHTML = `<p class="muted">${section.about}</p>`;
+    body.append(content);
+    refreshTimes(content);
+    if (!dialog.open) dialog.showModal();
+    body.scrollTop = scrolled;
+  };
+  void turnWindow(id, key);
+}
+document.addEventListener("click", (event) => {
+  const link = (event.target as Element).closest<HTMLAnchorElement>('a[href^="#/settings/channel/"]');
+  if (!link || !isFusion() || link.closest(".settings-page") || event.button || event.ctrlKey || event.metaKey || event.shiftKey) return;
+  const [key, id] = link.hash.split("/").slice(3);
+  if (!id) return;
+  event.preventDefault();
+  openChannelSettings(id, key);
+});
 export async function tickSettings() {
   await drawDirectMessages();
   const section = document.querySelector("#section");

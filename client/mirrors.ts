@@ -1,4 +1,5 @@
-import { $, api, esc, go, onSubmit, state, type Channel } from "./shared.js";
+import { $, api, esc, onSubmit, state, type Channel } from "./shared.js";
+import { openChannelSettings } from "./settings.js";
 
 // Mirroring starts from the thing mirrored: a channel followed from another instance, or a joined
 // XMPP room, becomes a source of a mirror the reader owns. Channels hosted here are never offered.
@@ -54,7 +55,7 @@ export function mirrorDialog(
     await api(`/channels/${id}/mirror/sources`, "POST", { kind, source });
     state.channels = await api<Channel[]>("/channels");
     dialog.close();
-    go(`#/settings/channel/mirror/${id}`);
+    openChannelSettings(id, "mirror");
   });
   dialog.showModal();
 }

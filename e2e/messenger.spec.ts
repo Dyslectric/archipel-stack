@@ -48,7 +48,16 @@ const section = (page: Page, name: string) =>
 async function channelSettings(page: Page, name: string) {
   await page.getByRole("button", { name: "Channel options" }).click();
   await page.getByRole("menuitem", { name: "Channel settings" }).click();
-  await section(page, name);
+  // One row of the list is the channel's: which channel and which of its pages are chosen on the page.
+  await expect(
+    page.locator(".settings-nav").getByRole("link", { name: "Channel settings", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
+  await expect(page.locator(".settings-body > :nth-child(2)")).toHaveClass("settings-channel");
+  await expect(page.getByRole("combobox", { name: "Channel", exact: true })).toBeVisible();
+  await page
+    .locator(".settings-tabs")
+    .getByRole("link", { name, exact: true })
+    .click();
 }
 async function send(page: Page, value: string) {
   await page.getByRole("textbox", { name: "Message", exact: true }).fill(value);
@@ -799,6 +808,9 @@ test("two browser instances federate a channel and a direct message with admin-c
   const remotePicture = bob.locator(".message").filter({ hasText: "Home greeting." }).locator(".avatar img");
   await expect(remotePicture).toHaveAttribute("src", /^\/api\/remote-avatars\//);
   await expect.poll(() => remotePicture.evaluate(img => (img as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+  // The follower is listed by handle and instance, not by the address of their actor.
+  await channelSettings(page, "Federation");
+  await expect(page.locator(".remote-followers li")).toContainText("@bob@127.0.0.1:8791");
   await page.goto("/#/settings/personal/profile");
   await page.getByRole("button", { name: "Remove picture", exact: true }).click();
   await expect(remotePicture).toHaveCount(0);

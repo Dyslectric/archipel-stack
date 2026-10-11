@@ -64,6 +64,30 @@ async function send(page: Page, text: string) {
   await expect(page.locator(".message-body").filter({ hasText: text.split("\n")[0] })).toBeVisible();
 }
 
+test("Fusion opens a channel's settings in a window over the conversation", async ({ page }) => {
+  await login(page); await style(page, "fusion-compact");
+  await create(page, "fusion-window-settings");
+  const address = page.url();
+  await page.getByRole("button", { name: "Channel options" }).click();
+  await page.getByRole("menuitem", { name: "Channel settings" }).click();
+  const win = page.locator("dialog.channel-settings");
+  await expect(win).toBeVisible();
+  await expect(win.locator(".dialog-heading h2")).toHaveText("Channel settings · #fusion-window-settings");
+  expect(page.url()).toBe(address);
+  await win.getByRole("link", { name: "Members", exact: true }).click();
+  await expect(win.getByRole("link", { name: "Members", exact: true })).toHaveAttribute("aria-current", "page");
+  await expect(win.locator(".member-list")).toContainText("@alice");
+  await win.getByRole("link", { name: "Overview", exact: true }).click();
+  await win.getByLabel("Channel name").fill("fusion-window-renamed");
+  await win.getByRole("button", { name: "Rename channel", exact: true }).click();
+  await expect(win.locator(".dialog-heading h2")).toHaveText("Channel settings · #fusion-window-renamed");
+  await expect(page.locator("#toast")).toContainText("Channel renamed.");
+  expect(page.url()).toBe(address);
+  await win.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(win).toHaveCount(0);
+  await expect(page.locator("#channel-heading strong")).toHaveText("fusion-window-renamed");
+});
+
 test("settings select independent persistent styles and color schemes", async ({ page }) => {
   await login(page);
   await page.goto("/#/settings/personal/appearance");

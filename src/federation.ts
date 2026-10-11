@@ -579,7 +579,7 @@ export class Federation {
     this.store.requireManage(user, this.store.channel(id));
     return this.store.db
       .prepare(
-        "SELECT * FROM federation_follows WHERE channel_id=? ORDER BY actor",
+        "SELECT f.*, u.username FROM federation_follows f LEFT JOIN users u ON u.remote_actor=f.actor WHERE f.channel_id=? ORDER BY f.actor",
       )
       .all(id);
   }

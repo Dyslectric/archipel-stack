@@ -110,7 +110,7 @@ channels or the personal direct-message archive, except through a bridge.
 ## Bridge a channel with a foreign room
 
 The owner of a local timeline channel (or an administrator) can bridge it with
-one room on another server under **Settings → Channel → XMPP bridge**. The
+one room on another server under **Settings → Channel settings → XMPP bridge**. The
 owner needs the send, receive, subscribe and post grants, and joins the room as
 the bridge's first occupant.
 

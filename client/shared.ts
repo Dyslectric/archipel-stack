@@ -390,7 +390,14 @@ export function toast(message: string, error = false) {
   const el = document.createElement("div");
   el.className = `toast${error ? " error" : ""}`;
   el.innerHTML = `<span>${esc(message)}</span><button type="button" class="link toast-close" aria-label="Dismiss">×</button>`;
-  $("#toast").append(el);
+  const box = $("#toast");
+  box.append(el);
+  // Said while a window is open, it is raised over the window.
+  if (document.querySelector("dialog:modal")) {
+    box.popover = "manual";
+    box.hidePopover();
+    box.showPopover();
+  }
   $("button", el).addEventListener("click", () => el.remove());
   setTimeout(() => el.remove(), 6000);
 }
@@ -772,7 +779,8 @@ export function popup(anchor: HTMLElement, html: string, at?: { x: number; y: nu
   const panel = document.createElement("div");
   panel.className = "menu-panel popup";
   panel.innerHTML = html;
-  document.body.append(panel);
+  // Opened from a window, it goes in the window: the page under one is out of reach.
+  (anchor.closest("dialog[open]") || document.body).append(panel);
   anchor.setAttribute("aria-expanded", "true");
   const box = anchor.getBoundingClientRect(),
     width = panel.offsetWidth,
