@@ -82,7 +82,7 @@ test("upgrading version seven preserves the archive and contact names survive re
     .run("saved", alice.id, peer, new Date().toISOString());
   store.db.exec("DROP TABLE channel_held_roles; DROP TABLE channel_instance_bans; DROP TABLE channel_member_roles; DROP TABLE channel_roles; DROP TABLE reaction_emojis; ALTER TABLE channels DROP COLUMN reaction_bans; DROP TABLE device_flows; DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; PRAGMA user_version=7"); store.close();
   store = new Store(path);
-  assert.equal(store.db.version(), 24);
+  assert.equal(store.db.version(), 25);
   store.setContactName(alice, peer, "Saved name"); store.close();
   store = new Store(path);
   try {

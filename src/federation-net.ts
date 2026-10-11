@@ -91,6 +91,7 @@ export async function peerRequest(
   body?: string | Buffer,
   maxBytes = 262144,
   timeoutMs = 15000,
+  method?: "GET" | "HEAD",
 ) {
   peerUrl(url.href, config);
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
@@ -109,12 +110,12 @@ export async function peerRequest(
       "Federation DNS resolved to a private or reserved address.",
     );
   const address = addresses[0];
-  return await new Promise<{ body: Buffer; type: string }>(
+  return await new Promise<{ body: Buffer; type: string; status: number; headers: import("node:http").IncomingHttpHeaders }>(
     (resolve, reject) => {
       const request = (url.protocol === "https:" ? httpsRequest : httpRequest)(
         url,
         {
-          method: body === undefined ? "GET" : "POST",
+          method: method || (body === undefined ? "GET" : "POST"),
           headers,
           agent: false,
           family: address.family,
@@ -126,7 +127,7 @@ export async function peerRequest(
           if (
             !response.statusCode ||
             response.statusCode < 200 ||
-            response.statusCode >= 300
+            (response.statusCode >= 300 && !(method && response.statusCode === 416))
           ) {
             response.resume();
             reject(
@@ -150,6 +151,8 @@ export async function peerRequest(
             resolve({
               body: Buffer.concat(chunks),
               type: String(response.headers["content-type"] || ""),
+              status: response.statusCode!,
+              headers: response.headers,
             }),
           );
           response.on("error", reject);

@@ -911,6 +911,11 @@ test("two browser instances federate a channel and a direct message with admin-c
     await sender.getByRole("button", { name: "Send message" }).click();
     const body = recipient.locator(".message-body").filter({ hasText: label });
     await expect(body).toBeVisible();
+    if (new URL(image.url).origin !== new URL(recipient.url()).origin) {
+      await expect(body.locator(".attachment img")).toHaveAttribute("src", /\/api\/media\?url=/);
+      await expect(body.locator(".attachment video")).toHaveAttribute("src", /\/api\/media\?url=/);
+      expect((await recipient.request.get(image.url)).status()).toBe(401);
+    }
     await expect.poll(() => body.locator(".attachment img").evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(1);
     await expect.poll(() => body.locator(".attachment video").evaluate((el: HTMLVideoElement) => el.readyState)).toBeGreaterThanOrEqual(1);
     await expect(body.locator(".attachment.file")).toHaveText(file.name);

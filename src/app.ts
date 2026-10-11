@@ -10,6 +10,7 @@ import { existsSync } from "node:fs";
 import { Config } from "./config.js";
 import { Problem, SESSION_LIFE, Store, text, type User } from "./store.js";
 import { Federation } from "./federation.js";
+import { Media } from "./media.js";
 import { createOidc, OidcFailure, type OidcStage } from "./oidc.js";
 import { logSignInFailure } from "./auth-log.js";
 import { Xmpp } from "./xmpp.js";
@@ -34,6 +35,7 @@ export function createApp(config: Config, store: Store) {
   );
   store.initializeRegistration(config.registrationMode);
   const federation = new Federation(store, config);
+  const media = new Media(store, federation, config);
   const xmpp = new Xmpp(store, config);
   const mirrors = new Mirrors(store, xmpp);
   const push = new Push(store, config);
@@ -185,6 +187,15 @@ export function createApp(config: Config, store: Store) {
         })),
     });
   });
+  app.get("/federation/media-access", async (req, res) => {
+    const signer = await federation.authenticate(req);
+    if (typeof req.query.channel !== "string") throw new Problem(400, "Use a channel URL.");
+    const channel = federation.allowed(req.query.channel);
+    const prefix = `${config.baseUrl}/actors/channels/`;
+    if (!channel.href.startsWith(prefix) || channel.search || channel.hash)
+      throw new Problem(400, "Use a channel on this instance.");
+    res.json(media.channelAccess(signer, channel.href.slice(prefix.length), req.query.viewer, req.query.url));
+  });
   app.get("/federation/emojis/:id/image", (req, res) => {
     federation.ensureEnabled();
     // Only emoji owned here are exported; received cache entries stay local.
@@ -269,8 +280,7 @@ export function createApp(config: Config, store: Store) {
     next();
   });
   app.get("/health", (_req, res) => res.json({ status: "ok" }));
-  // Attachments are fetched by address alone: the unguessable name in a message is the permission,
-  // so the same link works for readers on other servers. Nothing served here can run as a page.
+  // Browsers authenticate locally; home instances sign on behalf of their own users.
   app.get(
     "/media/:file",
     rateLimit({
@@ -278,39 +288,14 @@ export function createApp(config: Config, store: Store) {
       limit: config.rateLimitMedia,
       message: { error: "Too many requests. Please try again shortly." },
     }),
-    (req, res) => {
+    async (req, res) => {
+      res.setHeader("Cache-Control", "private, no-store");
+      const session = store.session(cookie(req, authCookie));
+      if (!session && !req.headers.signature) throw new Problem(401, "Sign in to access media.");
+      const viewer = session?.user || await federation.authenticate(req);
       const file = store.attachment(String(req.params.file));
-      res.setHeader("Accept-Ranges", "bytes");
-      res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
-      res.setHeader("Cache-Control", "private, max-age=31536000, immutable");
-      res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
-      res.setHeader(
-        "Content-Disposition",
-        `${file.mime === "application/octet-stream" || req.query.download === "1" ? "attachment" : "inline"}; filename*=UTF-8''${encodeURIComponent(file.name)}`,
-      );
-      res.type(file.mime);
-      let start = 0,
-        end = file.size - 1;
-      const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || "");
-      if (range && (range[1] || range[2])) {
-        if (range[1]) {
-          start = Number(range[1]);
-          if (range[2]) end = Math.min(end, Number(range[2]));
-        } else start = Math.max(0, file.size - Number(range[2]));
-        if (start > end || start >= file.size) {
-          res.setHeader("Content-Range", `bytes */${file.size}`);
-          res.status(416).end();
-          return;
-        }
-        res.status(206);
-        res.setHeader("Content-Range", `bytes ${start}-${end}/${file.size}`);
-      }
-      res.setHeader("Content-Length", end - start + 1);
-      if (req.method === "HEAD") {
-        res.end();
-        return;
-      }
-      res.end(store.attachmentBytes(file.id, start, end - start + 1));
+      await media.authorize(file, viewer, !session);
+      media.serve(req, res, file);
     },
   );
   app.get("/api/session", (req, res) => {
@@ -484,6 +469,10 @@ export function createApp(config: Config, store: Store) {
   app.get("/api/emojis", (_req, res) =>
     res.json(store.labelledEmojis(user(res))),
   );
+  app.get("/api/media", rateLimit({
+    windowMs: 60000, limit: config.rateLimitMedia,
+    message: { error: "Too many requests. Please try again shortly." },
+  }), async (req, res) => media.proxy(req, res, user(res)));
   // The file itself is the request body; its name travels beside it.
   app.post(
     "/api/attachments",

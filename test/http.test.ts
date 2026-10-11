@@ -1055,10 +1055,11 @@ test("channel rename and delete APIs enforce CSRF and ownership", async (t) => {
   assert.deepEqual(await (await charlie.request("/api/channels")).json(), []);
 });
 
-test("attachments upload by role, serve by unguessable address with ranges, and leave with their message", async t => {
+test("attachments upload by role, require authentication and subscription with ranges, and leave with their message", async t => {
   const f = await application(t);
   const alice = browser(f.origin), bob = browser(f.origin);
   const admin = await alice.login("alice"); await bob.login("bob");
+  const read = (url: string, headers: Record<string, string> = {}) => bob.request(url.slice(f.origin.length), "GET", undefined, headers);
   const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC1lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=", "base64");
   const upload = async (who: ReturnType<typeof browser>, data: Buffer, name: string, type = "image/png", csrf = true) => fetch(`${f.origin}/api/attachments`, {
     method: "POST", body: new Uint8Array(data),
@@ -1076,7 +1077,7 @@ test("attachments upload by role, serve by unguessable address with ranges, and 
     const other = await (await upload(bob, data, name, type)).json();
     assert.deepEqual([other.mime, other.name], ["application/octet-stream", name]);
     assert.match(other.url, /\.bin$/);
-    const back = await fetch(other.url);
+    const back = await read(other.url);
     assert.deepEqual([back.headers.get("content-type"), back.headers.get("content-disposition"), back.headers.get("x-content-type-options"), back.headers.get("content-security-policy")],
       ["application/octet-stream", `attachment; filename*=UTF-8''${name}`, "nosniff", "default-src 'none'; sandbox"]);
     assert.deepEqual(Buffer.from(await back.arrayBuffer()), data);
@@ -1086,7 +1087,7 @@ test("attachments upload by role, serve by unguessable address with ranges, and 
   assert.equal(jsonResponse.status, 201);
   const jsonFile = await jsonResponse.json();
   assert.equal(jsonFile.mime, "application/octet-stream");
-  assert.deepEqual(Buffer.from(await (await fetch(jsonFile.url)).arrayBuffer()), jsonBytes);
+  assert.deepEqual(Buffer.from(await (await read(jsonFile.url)).arrayBuffer()), jsonBytes);
   const sent = await upload(bob, png, 'my [cat](x) "1".png', "text/html");
   assert.equal(sent.status, 201);
   const file = await sent.json();
@@ -1095,31 +1096,34 @@ test("attachments upload by role, serve by unguessable address with ranges, and 
   const mp4 = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypisom"), Buffer.alloc(16)]);
   const video = await (await upload(bob, mp4, "clip.mp4", "video/mp4")).json();
   assert.equal(video.mime, "video/mp4");
-  // Anyone holding the address reads it, signed in or not; it can never act as a page.
-  const got = await fetch(file.url);
+  // Unsent uploads are private to their uploader; knowing the URL grants nothing.
+  assert.equal((await fetch(file.url)).status, 401);
+  assert.equal((await alice.request(file.url.slice(f.origin.length))).status, 403);
+  const got = await read(file.url);
   assert.equal(got.status, 200);
   assert.equal(got.headers.get("content-type"), "image/png");
   assert.match(got.headers.get("content-disposition")!, /^inline;/);
-  const savedImage = await fetch(`${file.url}?download=1`);
+  const savedImage = await read(`${file.url}?download=1`);
   assert.match(savedImage.headers.get("content-disposition")!, /^attachment;/);
   assert.equal(savedImage.headers.get("content-type"), "image/png");
   assert.deepEqual(Buffer.from(await savedImage.arrayBuffer()), png);
   assert.equal(got.headers.get("content-security-policy"), "default-src 'none'; sandbox");
   assert.equal(got.headers.get("x-content-type-options"), "nosniff");
-  assert.equal(got.headers.get("cross-origin-resource-policy"), "cross-origin");
+  assert.equal(got.headers.get("cross-origin-resource-policy"), "same-origin");
+  assert.equal(got.headers.get("cache-control"), "private, no-store");
   const csp = (await fetch(f.origin)).headers.get("content-security-policy")!;
   assert.match(csp, /img-src 'self' data: http: https:/);
   assert.match(csp, /media-src 'self' http: https:/);
   assert.deepEqual(Buffer.from(await got.arrayBuffer()), png);
-  const part = await fetch(file.url, { headers: { Range: "bytes=1-3" } });
+  const part = await read(file.url, { Range: "bytes=1-3" });
   assert.equal(part.status, 206);
   assert.equal(part.headers.get("content-range"), `bytes 1-3/${png.length}`);
   assert.deepEqual(Buffer.from(await part.arrayBuffer()), png.subarray(1, 4));
-  const tail = await fetch(file.url, { headers: { Range: "bytes=-4" } });
+  const tail = await read(file.url, { Range: "bytes=-4" });
   assert.deepEqual(Buffer.from(await tail.arrayBuffer()), png.subarray(png.length - 4));
-  assert.equal((await fetch(file.url, { headers: { Range: `bytes=${png.length}-` } })).status, 416);
-  assert.equal((await fetch(file.url.replace(/\.png$/, ".mp4"))).status, 404);
-  assert.equal((await fetch(`${f.origin}/media/${"a".repeat(43)}.png`)).status, 404);
+  assert.equal((await read(file.url, { Range: `bytes=${png.length}-` })).status, 416);
+  assert.equal((await read(file.url.replace(/\.png$/, ".mp4"))).status, 404);
+  assert.equal((await read(`${f.origin}/media/${"a".repeat(43)}.png`)).status, 404);
   // Removing the message removes what its author attached to it, and nobody else's copy of the address.
   const channel = await (await bob.request("/api/channels", "POST", { name: "pictures", description: "", mode: "timeline", visibility: "public", admission: "open" })).json();
   await alice.session();
@@ -1127,11 +1131,20 @@ test("attachments upload by role, serve by unguessable address with ranges, and 
   const theirs = await (await alice.request(`/api/channels/${channel.id}/messages`, "POST", { body: `Reposting ![cat](${video.url})` })).json();
   await bob.session();
   const mine = await (await bob.request(`/api/channels/${channel.id}/messages`, "POST", { body: `Look ![cat](${file.url}) and ![clip](${video.url})` })).json();
+  const path = file.url.slice(f.origin.length);
+  assert.equal((await alice.request(path)).status, 200);
+  assert.equal((await alice.request(`/api/channels/${channel.id}/leave`, "POST", {})).status, 200);
+  // Public message reading and administrator status do not substitute for a subscription.
+  assert.equal((await alice.request(path)).status, 403);
+  assert.equal((await alice.request(path, "HEAD")).status, 403);
+  assert.equal((await alice.request(path + "?download=1")).status, 403);
+  assert.equal((await alice.request(path, "GET", undefined, { Range: "bytes=0-1" })).status, 403);
+  assert.equal((await alice.request(`/api/channels/${channel.id}/join`, "POST", {})).status, 200);
   assert.equal((await alice.request(`/api/messages/${theirs.id}`, "DELETE")).status, 200);
-  assert.equal((await fetch(video.url)).status, 200);
+  assert.equal((await read(video.url)).status, 200);
   assert.equal((await bob.request(`/api/messages/${mine.id}`, "DELETE")).status, 200);
-  assert.equal((await fetch(file.url)).status, 404);
-  assert.equal((await fetch(video.url)).status, 404);
+  assert.equal((await read(file.url)).status, 404);
+  assert.equal((await read(video.url)).status, 404);
   // A role without the grant cannot upload.
   await alice.session();
   const role = await (await alice.request("/api/admin/roles", "POST", { name: "Text only", attachments: false })).json();
@@ -1143,6 +1156,44 @@ test("attachments upload by role, serve by unguessable address with ranges, and 
   assert.deepEqual([(await bob.session()).user.attachments, (await bob.session()).user.instance_role.name], [false, "Text only"]);
   assert.equal((await alice.request(`/api/admin/roles/${role.id}`, "DELETE")).status, 200);
   assert.equal((await upload(bob, png, "cat.png")).status, 201);
+});
+
+test("media follows current membership and account approval, and removed references never become drafts again", async t => {
+  const f = await application(t), alice = browser(f.origin), bob = browser(f.origin), charlie = browser(f.origin);
+  await alice.login("alice");
+  const author = await bob.login("bob"), viewer = await charlie.login("charlie");
+  const channel = await (await alice.request("/api/channels", "POST", { name: "media", description: "", mode: "timeline", visibility: "public", admission: "open" })).json();
+  await bob.request(`/api/channels/${channel.id}/join`, "POST", {});
+  const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC1lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=", "base64");
+  const file = f.store.addAttachment(f.store.user(author.id), bytes, "auth.png"), path = file.url.slice(f.origin.length);
+  const message = await (await bob.request(`/api/channels/${channel.id}/messages`, "POST", { body: `![media](${file.url})` })).json();
+  assert.equal((await charlie.request(path)).status, 403);
+  await charlie.request(`/api/channels/${channel.id}/join`, "POST", {});
+  assert.equal((await charlie.request(path)).status, 200);
+  f.store.db.prepare("UPDATE users SET admission_status='pending' WHERE id=?").run(viewer.id);
+  assert.equal((await charlie.request(path)).status, 403);
+  f.store.db.prepare("UPDATE users SET admission_status='approved',banned=1 WHERE id=?").run(viewer.id);
+  assert.equal((await charlie.request(path)).status, 403);
+  f.store.db.prepare("UPDATE users SET banned=0 WHERE id=?").run(viewer.id);
+  f.store.setMember(f.store.user((await alice.session()).user.id), channel.id, viewer.id, { rule: "block" });
+  assert.equal((await charlie.request(path)).status, 403);
+  assert.equal((await bob.request(`/api/channels/${channel.id}/leave`, "POST", {})).status, 200);
+  assert.equal((await bob.request(path)).status, 403);
+  await bob.request(`/api/channels/${channel.id}/join`, "POST", {});
+  assert.equal((await bob.request(path)).status, 200);
+  assert.equal((await bob.request(`/api/messages/${message.id}`, "PATCH", { body: "Removed media", expected_edited_at: null })).status, 200);
+  assert.equal((await bob.request(path)).status, 403);
+  assert.equal((await alice.request(path)).status, 403);
+
+  // Old databases migrate conservatively: an old URL is never a private draft bypass.
+  f.store.db.exec("ALTER TABLE attachments DROP COLUMN published; PRAGMA user_version=24");
+  f.store.db.migrate();
+  assert.equal(f.store.db.version(), 25);
+  assert.equal((await bob.request(path)).status, 403);
+  const dmFile = f.store.addAttachment(f.store.user(author.id), bytes, "direct.png");
+  f.store.sendDirect(f.store.user(author.id), (await alice.session()).user.id, `![direct](${dmFile.url})`);
+  assert.equal((await alice.request(dmFile.url.slice(f.origin.length))).status, 200);
+  assert.equal((await charlie.request(dmFile.url.slice(f.origin.length))).status, 403);
 });
 
 // What a browser does with a push message: RFC 8291, from the receiving side.

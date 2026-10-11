@@ -103,8 +103,9 @@ function open(from: Element) {
     dialog.querySelector<HTMLAnchorElement>("[data-original]")!.href = url;
     const download = new URL(url);
     // Cross-origin links need a download response from the source: browsers ignore their download attribute.
-    if (/^\/media\/[A-Za-z0-9_-]{43}\.(png|jpg|gif|webp|mp4|webm)$/.test(download.pathname) && !download.search && !download.hash)
-      download.search = "?download=1";
+    if ((/^\/media\/[A-Za-z0-9_-]{43}\.(png|jpg|gif|webp|mp4|webm)$/.test(download.pathname) && !download.search && !download.hash) ||
+        (download.origin === location.origin && download.pathname === "/api/media"))
+      download.searchParams.set("download", "1");
     save.href = download.href;
     save.download = name;
     for (const step of dialog.querySelectorAll<HTMLButtonElement>("[data-step]"))

@@ -64,7 +64,7 @@ test("markdown previews local and external media and offers other uploads as dow
   // The same attachment is visible to readers on another instance.
   const remote = md("![cat](https://other.example/media/" + "a".repeat(43) + ".png)");
   assert.match(remote, /<img/);
-  assert.match(remote, /href="https:\/\/other\.example\/media\//);
+  assert.match(remote, /href="https:\/\/chat\.example\/api\/media\?url=https%3A%2F%2Fother\.example%2Fmedia%2F/);
   assert.match(md(`![report.pdf](https://other.example/media/${"a".repeat(43)}.bin)`), /class="attachment file"/);
   assert.match(md(`![x](${file}.png?next=1)`), /<img/);
   assert.equal(md('![a"b](javascript:x)'), "<p>![a&quot;b](javascript:x)</p>");

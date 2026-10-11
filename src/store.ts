@@ -773,7 +773,7 @@ export class Store {
         .slice(0, 100) || `attachment.${mediaTypes[mime]}`;
     const id = randomToken();
     this.db
-      .prepare("INSERT INTO attachments VALUES(?,?,?,?,?,?,?)")
+      .prepare("INSERT INTO attachments(id,owner_id,name,mime,size,data,created_at,published) VALUES(?,?,?,?,?,?,?,0)")
       .run(id, me.id, name, mime, data.length, data, now());
     return {
       id,
@@ -788,14 +788,20 @@ export class Store {
       /^([A-Za-z0-9_-]{43})\.([a-z0-9]{3,4})$/.exec(file) || [];
     const row = id
       ? (this.db
-          .prepare("SELECT id,name,mime,size FROM attachments WHERE id=?")
+          .prepare("SELECT id,owner_id,name,mime,size,published FROM attachments WHERE id=?")
           .get(id) as
-          | { id: string; name: string; mime: string; size: number }
+          | { id: string; owner_id: string; name: string; mime: string; size: number; published: number }
           | undefined)
       : undefined;
     if (!row || mediaTypes[row.mime] !== extension)
       throw new Problem(404, "Attachment not found.");
-    return row;
+    return { ...row, file };
+  }
+  publishAttachments(body: string, ownerId: string) {
+    const prefix = `${this.baseUrl}/media/`;
+    for (let at = body.indexOf(prefix); at >= 0; at = body.indexOf(prefix, at + 1))
+      this.db.prepare("UPDATE attachments SET published=1 WHERE id=? AND owner_id=?")
+        .run(body.slice(at + prefix.length, at + prefix.length + 43), ownerId);
   }
   // A slice of the file, so a video plays from wherever the viewer seeks to.
   attachmentBytes(id: string, start: number, length: number) {
@@ -2013,6 +2019,7 @@ export class Store {
           messageId,
         );
       const result = this.message(messageId);
+      this.publishAttachments(body, user.id);
       this.federationHooks?.message(result, "Create", user);
       this.xmppHooks?.message(result, "Create");
       return result;
@@ -2416,6 +2423,7 @@ export class Store {
       throw new Problem(400, "Threads in this channel need a title.");
     this.refuseBanned(body + (title || ""), channel);
     this.transaction(() => {
+      this.publishAttachments(body, message.author_id);
       this.db
         .prepare("UPDATE messages SET body=?,title=?,edited_at=? WHERE id=?")
         .run(
@@ -2669,6 +2677,7 @@ export class Store {
       this.db.prepare("UPDATE direct_messages SET xmpp_source_id=? WHERE id=? OR id=?")
         .run(outgoingId, outgoingId, incomingId);
       this.xmppHooks?.direct(outgoingId, sender, target);
+      this.publishAttachments(body, sender.id);
     });
     return { peer: this.actorOf(target.id), id: outgoingId };
   }

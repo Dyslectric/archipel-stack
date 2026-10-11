@@ -106,7 +106,7 @@ test("an instance moves from its SQLite file into PostgreSQL whole, and carries 
   lite.react(bob, first.id, { emoji: "tada", on: true });
   lite.sendDirect(alice, bob.id, "Between us");
   const image = randomBytes(70000);
-  before.prepare("INSERT INTO attachments VALUES('file',?,'blob.bin','application/octet-stream',?,?,'2026-01-01T00:00:00.000Z')").run(alice.id, image.length, image);
+  before.prepare("INSERT INTO attachments(id,owner_id,name,mime,size,data,created_at) VALUES('file',?,'blob.bin','application/octet-stream',?,?,'2026-01-01T00:00:00.000Z')").run(alice.id, image.length, image);
   const expected = {
     messages: lite.messages(bob, channel.id),
     dms: lite.directHistory(bob, `${origin}/actors/users/${alice.id}`),
@@ -127,7 +127,7 @@ test("an instance moves from its SQLite file into PostgreSQL whole, and carries 
   again.close();
 
   const moved = new Store(target, origin);
-  assert.equal(target.version(), 24);
+  assert.equal(target.version(), 25);
   assert.deepEqual(moved.messages(moved.user(bob.id), channel.id), expected.messages);
   assert.deepEqual(moved.directHistory(moved.user(bob.id), `${origin}/actors/users/${alice.id}`), expected.dms);
   assert.deepEqual(moved.overview(moved.user(bob.id)), expected.overview);

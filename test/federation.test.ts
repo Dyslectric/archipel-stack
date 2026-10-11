@@ -110,6 +110,119 @@ function channel(i: Awaited<ReturnType<typeof instance>>, extra = {}) {
   return i.store.channel(c.id);
 }
 
+test("media authenticates subscribers through their home, including a third file server and immediate revocation", async t => {
+  const a = await instance(t), b = await instance(t), c = await instance(t);
+  const home = channel(a), actor = a.fed.channelActor(home);
+  const bSub = await b.fed.subscribe(b.bob, actor);
+  await c.fed.subscribe(c.bob, actor);
+  await drain(a, b, c);
+  const bytes = Buffer.from(image, "base64");
+  const own = a.store.addAttachment(a.alice, bytes, "home.png");
+  a.store.post(a.alice, home.id, { body: `![home](${own.url})` });
+  await drain(a, b, c);
+  const signed = (i: typeof a, user: typeof a.alice, url: string, method: "GET" | "HEAD" = "GET", extra = {}) =>
+    fetch(url, { method, headers: { ...signedHeaders(new URL(url), method, i.fed.userActor(user), i.fed.keys().private_key), ...extra } });
+  const sessions = new Map<string, string>();
+  const proxy = (i: typeof a, user: typeof a.alice, url: string, method = "GET", extra = {}, download = false) => {
+    const key = i.origin + user.id;
+    if (!sessions.has(key)) sessions.set(key, i.store.createSession(user.id).token);
+    return fetch(`${i.origin}/api/media?url=${encodeURIComponent(url)}${download ? "&download=1" : ""}`, {
+      method, headers: { Cookie: `archipel=${sessions.get(key)}`, ...extra },
+    });
+  };
+  assert.equal((await fetch(own.url)).status, 401);
+  assert.equal((await fetch(`${c.origin}/api/media?url=${encodeURIComponent(own.url)}`)).status, 401);
+  assert.equal((await signed(b, b.alice, own.url)).status, 403);
+  assert.equal((await proxy(c, c.alice, own.url)).status, 403);
+  const received = await proxy(c, c.bob, own.url);
+  assert.equal(received.status, 200);
+  assert.equal(received.headers.get("cache-control"), "private, no-store");
+  assert.deepEqual(Buffer.from(await received.arrayBuffer()), bytes);
+  assert.equal((await signed(b, b.bob, own.url, "HEAD")).status, 200);
+  const tampered = signedHeaders(new URL(own.url), "GET", b.fed.userActor(b.bob), c.fed.keys().private_key);
+  assert.equal((await fetch(own.url, { headers: tampered })).status, 401);
+
+  // The uploader lives on B, the channel on A, and the viewer on C.
+  const videoBytes = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypisom"), Buffer.alloc(16)]);
+  const foreign = b.store.addAttachment(b.bob, videoBytes, "peer.mp4");
+  await b.fed.remotePost(b.bob, bSub.channel.id, { body: `![peer](${foreign.url})` });
+  await drain(a, b, c);
+  const range = await proxy(c, c.bob, foreign.url, "GET", { Range: "bytes=2-5" });
+  assert.equal(range.status, 206);
+  assert.equal(range.headers.get("content-range"), `bytes 2-5/${videoBytes.length}`);
+  assert.deepEqual(Buffer.from(await range.arrayBuffer()), videoBytes.subarray(2, 6));
+  const head = await proxy(a, a.alice, foreign.url, "HEAD");
+  assert.equal(head.status, 200);
+  assert.equal(head.headers.get("content-length"), String(videoBytes.length));
+  assert.equal((await head.arrayBuffer()).byteLength, 0);
+  const download = await proxy(c, c.bob, foreign.url, "GET", {}, true);
+  assert.match(download.headers.get("content-disposition")!, /^attachment;/);
+  const beyond = await proxy(c, c.bob, foreign.url, "GET", { Range: `bytes=${videoBytes.length}-` });
+  assert.equal(beyond.status, 416);
+  assert.equal(beyond.headers.get("content-range"), `bytes */${videoBytes.length}`);
+  assert.equal((await proxy(c, c.bob, `${b.origin}/health`)).status, 400);
+  b.fed.block(b.alice, { kind: "instance", target: a.origin, blocked: true });
+  assert.equal((await proxy(a, a.alice, foreign.url)).status, 403);
+  b.fed.block(b.alice, { kind: "instance", target: a.origin, blocked: false });
+
+  const waiting = channel(a, { name: "waiting", visibility: "members", admission: "allowlist" });
+  const pendingFile = a.store.addAttachment(a.alice, bytes, "pending.png");
+  a.store.post(a.alice, waiting.id, { body: `![pending](${pendingFile.url})` });
+  await c.fed.subscribe(c.bob, a.fed.channelActor(waiting));
+  await drain(a, b, c);
+  assert.equal((await signed(c, c.bob, pendingFile.url)).status, 403);
+
+  // Reposting a private upload URL into a different channel cannot grant access.
+  a.store.join(a.bob, home.id);
+  const privateChannel = a.store.createChannel(a.alice, { name: "private", description: "", mode: "timeline", visibility: "members", admission: "allowlist" });
+  const secret = a.store.addAttachment(a.alice, bytes, "secret.png");
+  a.store.post(a.alice, privateChannel.id, { body: `![secret](${secret.url})` });
+  a.store.post(a.bob, home.id, { body: `![copied](${secret.url})` });
+  await drain(a, b, c);
+  assert.equal((await signed(c, c.bob, secret.url)).status, 403);
+  assert.equal((await proxy(c, c.bob, secret.url)).status, 403);
+
+  const follower = a.store.db.prepare("SELECT id FROM users WHERE remote_actor=?").get(c.fed.userActor(c.bob))!;
+  a.store.setMember(a.alice, home.id, follower.id, { remove: true });
+  // C's cached accepted subscription and messages still exist, but A has revoked it.
+  assert.equal((await proxy(c, c.bob, own.url)).status, 403);
+  assert.equal((await proxy(c, c.bob, foreign.url)).status, 403);
+  assert.equal((await signed(c, c.bob, foreign.url, "HEAD")).status, 403);
+  assert.equal((await signed(c, c.bob, foreign.url, "GET", { Range: "bytes=0-2" })).status, 403);
+  assert.equal((await proxy(a, a.alice, foreign.url)).status, 200);
+
+  await drain(a, b, c);
+  await c.fed.subscribe(c.bob, actor);
+  await drain(a, b, c);
+  assert.equal((await proxy(c, c.bob, foreign.url)).status, 200);
+  a.store.banInstance(a.alice, home.id, { instance: c.origin, banned: true });
+  assert.equal((await proxy(c, c.bob, foreign.url)).status, 403);
+
+  // Deleting at the authoritative home takes effect before B receives the deletion.
+  const message = a.store.db.prepare("SELECT id FROM messages WHERE instr(body,?)>0").get(foreign.url)!;
+  a.store.deleteMessage(a.alice, message.id);
+  assert.equal((await proxy(a, a.alice, foreign.url)).status, 403);
+});
+
+test("direct media is authenticated and private to its participants", async t => {
+  const a = await instance(t), b = await instance(t);
+  const file = a.store.addAttachment(a.bob, Buffer.from(image, "base64"), "direct.png");
+  await a.fed.sendDirect(a.bob, b.fed.userActor(b.bob), `![private](${file.url})`);
+  await drain(a, b);
+  const ask = (user: typeof b.bob) => fetch(file.url, {
+    headers: signedHeaders(new URL(file.url), "GET", b.fed.userActor(user), b.fed.keys().private_key),
+  });
+  assert.equal((await fetch(file.url)).status, 401);
+  assert.equal((await ask(b.alice)).status, 403);
+  assert.equal((await ask(b.bob)).status, 200);
+  const session = b.store.createSession(b.bob.id);
+  const url = `${b.origin}/api/media?url=${encodeURIComponent(file.url)}`;
+  const request = () => fetch(url, { headers: { Cookie: `archipel=${session.token}` } });
+  assert.equal((await request()).status, 200);
+  b.store.setUserBlock(b.bob, a.fed.userActor(a.bob), true);
+  assert.equal((await request()).status, 403);
+});
+
 test("removing or banning a follower, or banning their instance, ends the follow until it is lifted", async (t) => {
   const a = await instance(t), b = await instance(t);
   const home = channel(a), actor = a.fed.channelActor(home);

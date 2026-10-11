@@ -1237,6 +1237,7 @@ export class Federation {
           JSON.stringify(emojis),
           note.published,
         );
+      this.store.publishAttachments(body, user.id);
       const activity = this.queue(
         "Create",
         this.userActor(user),
@@ -1353,6 +1354,7 @@ export class Federation {
       this.store.db
         .prepare("INSERT INTO federation_objects VALUES(?,?,?,?)")
         .run(objectId, user.id, channel.remote_actor, JSON.stringify(note));
+      this.store.publishAttachments(body, user.id);
       this.queue(
         "Create",
         this.userActor(user),
@@ -1510,6 +1512,7 @@ export class Federation {
       this.store.db
         .prepare("UPDATE federation_objects SET document=? WHERE id=?")
         .run(JSON.stringify(updated), message.remote_object!);
+      this.store.publishAttachments(note.content, user.id);
       this.queue(
         "Update",
         this.userActor(user),
@@ -1789,7 +1792,7 @@ export class Federation {
     )
       this.keepRoster(channel, items);
   }
-  private acceptedFollower(id: string, actor: string) {
+  acceptedFollower(id: string, actor: string) {
     const row = this.store.db
       .prepare(
         "SELECT 1 FROM federation_follows f JOIN users u ON u.remote_actor=f.actor WHERE f.channel_id=? AND f.actor=? AND f.status='accepted' AND u.banned=0 AND u.admission_status='approved' AND NOT EXISTS (SELECT 1 FROM channel_rules r WHERE r.channel_id=f.channel_id AND r.user_id=u.id AND r.rule='block')",

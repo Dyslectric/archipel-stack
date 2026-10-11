@@ -302,18 +302,23 @@ removed gives the role up, and making someone a moderator replaces it.
 
 ## Attachments
 
-Files are stored in the database and served from `/media/<name>`. The name is 256
-random bits and is the only permission: a message carries the address, so anyone
-who can read the message — including members of other servers it federates or is
-bridged to — can fetch the file, and nobody else can find it. Responses cannot run
-as pages. Removing a message, or deleting its channel, deletes the files its author
+Files are stored in the database and served from `/media/<name>`. Access requires
+an authenticated user with a current subscription to a channel where the uploader
+published the file. Public channels require a subscription too. Unsent uploads are
+visible only to their uploader; direct-message attachments are visible to the participants.
+Federated viewers authenticate to their home instance, which proxies media with a
+signed request identifying that user. If the file and channel have different homes,
+the file server checks the user's subscription with the channel's authoritative home.
+Every image, download, HEAD and video range request is checked; responses are not cached.
+Responses cannot run as pages. Removing a message, or deleting its channel, deletes the files its author
 attached to it. A file that is not a PNG, JPEG, GIF or WebP picture or an MP4 or WebM
 video — judged by its bytes, not its name — is stored as it came, up to 50 MiB, and
 only ever served as a download (`application/octet-stream`), shown in the message as
 a named link. A picture opens large when clicked, and a video from the button in its
 corner; the arrows step through everything shown in the conversation. Pictures and videos hosted
-on other instances and external hosts preview automatically as well: the browser fetches
-them from the source host. Direct image/video URLs also preview; ordinary links stay links.
+on other instances and external hosts preview automatically as well. Instance uploads
+use the authenticated home proxy; ordinary external media uses its host's access policy.
+Direct image/video URLs also preview; ordinary links stay links.
 Blocked senders' channel messages are hidden; media in their previous direct messages
 stays as links. An account may upload 200 files or 500 MiB a day. If a reverse proxy
 sits in front, allow request bodies of 51 MiB.

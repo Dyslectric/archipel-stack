@@ -1,4 +1,5 @@
 import { emojiParts, emojiData, markEmoji, type CustomEmoji } from "../src/emojis.js";
+import { mediaUrl } from "../src/media-url.js";
 
 // Messages are stored as written and formatted when shown: Markdown's everyday subset, with
 // :emoji: shortcodes. Everything is escaped on the way out, and nothing but http(s), mailto and
@@ -57,7 +58,7 @@ function previewType(url: URL) {
 function link(url: URL, label: string, ctx: Context) {
   // A link to somewhere in this app opens here; anything else opens beside it.
   const inside = !!ctx.origin && url.origin === ctx.origin && url.pathname === "/";
-  return `<a href="${esc(url.href)}"${inside ? "" : ' target="_blank" rel="noopener noreferrer nofollow"'}>${label}</a>`;
+  return `<a href="${esc(mediaUrl(url, ctx.origin))}"${inside ? "" : ' target="_blank" rel="noopener noreferrer nofollow"'}>${label}</a>`;
 }
 function image(alt: string, address: string, ctx: Context) {
   const url = safeUrl(address);
@@ -65,7 +66,7 @@ function image(alt: string, address: string, ctx: Context) {
   if (!ctx.previews || !["http:", "https:"].includes(url.protocol) || url.username || url.password)
     return link(url, esc(alt || address), ctx);
   const type = uploadedMedia(url) || previewType(url),
-    href = esc(url.href),
+    href = esc(mediaUrl(url, ctx.origin)),
     name = esc(alt);
   if (type && ["mp4", "webm", "ogv", "mov", "m4v"].includes(type))
     return `<span class="attachment video"><video controls playsinline preload="metadata" src="${href}" title="${name}"></video><button type="button" class="icon-button" data-expand aria-label="Expand video" title="Expand">${expandIcon}</button></span>`;
