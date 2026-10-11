@@ -306,7 +306,8 @@ button.member-name { flex: 1; min-width: 0; font-weight: 500; overflow: hidden; 
 .dragging { opacity: .45; }
 .side-item.drop-before, .side-group.drop-before, .side-section.drop-before { box-shadow: 0 -2px 0 var(--accent); }
 .side-items.drop-end, .side-group.drop-end, .side-section.drop-end { box-shadow: 0 2px 0 var(--accent); }
-.dm-link .avatar.small { width: 1.25rem; height: 1.25rem; font-size: 0.7rem; border-radius: 5px; }
+/* As big as a member's picture in the list beside the channel, without making its row taller than a channel's. */
+.dm-link .avatar.small { margin-block: -1px; }
 .channel-link .count, .side-toggle .count { vertical-align: 0; }
 #channel-list { flex: 1; overflow-y: auto; padding: 4px 8px 10px; }
 .channel-link { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 7px; color: var(--text); }
@@ -394,10 +395,10 @@ ul.plain.people-list > li { padding: 0; border: none; }
 .rb-topic { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block !important; }
 .rb-date { margin-left: auto; padding-left: 10px; font-weight: 400; font-size: 0.85em; color: var(--muted); white-space: nowrap; }
 .topic-group .group-body { border-radius: 0 0 8px 8px; }
-.group-body > article { position: relative; display: grid; grid-template-columns: 3rem minmax(0, 1fr); gap: 0 12px;
+.group-body > article { position: relative; display: grid; grid-template-columns: 2.5rem minmax(0, 1fr); gap: 0 12px;
   padding: 7px 14px 2px; }
-/* A picture is as big as a large emoji, with the room under it that a smaller one had beside a name and one line. */
-.msg-gutter .avatar { width: 3rem; height: 3rem; border-radius: 12px; font-size: 1.4rem; margin-bottom: .5625rem; vertical-align: top; }
+/* A picture is a little taller than a name and one line, with the room under it that a smaller one had. */
+.msg-gutter .avatar { width: 2.5rem; height: 2.5rem; border-radius: 10px; font-size: 1.2rem; margin-bottom: .5625rem; vertical-align: top; }
 .group-body > article.cont { padding-top: 1px; }
 .group-body > article:hover, .group-body > article:focus-within, .group-body > article.show-actions { background: var(--hover); }
 .msg-gutter { text-align: right; }
