@@ -394,8 +394,10 @@ ul.plain.people-list > li { padding: 0; border: none; }
 .rb-topic { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block !important; }
 .rb-date { margin-left: auto; padding-left: 10px; font-weight: 400; font-size: 0.85em; color: var(--muted); white-space: nowrap; }
 .topic-group .group-body { border-radius: 0 0 8px 8px; }
-.group-body > article { position: relative; display: grid; grid-template-columns: 2.25rem minmax(0, 1fr); gap: 0 12px;
+.group-body > article { position: relative; display: grid; grid-template-columns: 3rem minmax(0, 1fr); gap: 0 12px;
   padding: 7px 14px 2px; }
+/* A picture is as big as a large emoji, with the room under it that a smaller one had beside a name and one line. */
+.msg-gutter .avatar { width: 3rem; height: 3rem; border-radius: 12px; font-size: 1.4rem; margin-bottom: .5625rem; vertical-align: top; }
 .group-body > article.cont { padding-top: 1px; }
 .group-body > article:hover, .group-body > article:focus-within, .group-body > article.show-actions { background: var(--hover); }
 .msg-gutter { text-align: right; }

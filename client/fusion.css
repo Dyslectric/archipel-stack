@@ -464,8 +464,8 @@
 
 /* ---- Cozy: a picture beside each message, the name and time above it ---- */
 :root[data-style="fusion-cozy"] {
-  .group-body > article { grid-template-columns: 2rem minmax(0, 1fr); gap: 0 10px; padding: 7px 12px; }
-  .msg-gutter .avatar, .post .thread-avatar .avatar { width: 2rem; height: 2rem; font-size: 1rem; }
+  .group-body > article { grid-template-columns: 3rem minmax(0, 1fr); gap: 0 10px; padding: 7px 12px; }
+  .msg-gutter .avatar, .post .thread-avatar .avatar { width: 3rem; height: 3rem; margin: 0; font-size: 1.4rem; }
   .group-body .message-meta { font-size: 1em; line-height: 1.25; }
   .group-body .message-meta :is(time, .handle), .thread-clock { font-size: var(--fusion-small); }
   .group-body .message-meta .handle:not(:has(+ time)), .group-body .message-meta .handle { display: none; }
@@ -478,36 +478,44 @@
   .fusion-thread[open] > .thread-heading :is(.avatar, .thread-starter) { display: none; }
   .thread-body { padding-bottom: 6px; }
   .thread-avatar { line-height: 0; }
-  .thread-avatar .avatar { width: 2rem; height: 2rem; font-size: 1rem; }
+  .thread-avatar .avatar { width: 3rem; height: 3rem; font-size: 1.4rem; }
   .byline { display: flex; align-items: baseline; gap: 8px; line-height: 1.25; }
   /* The picture sits level with the middle of the name and the first line under it (the top half of
      that line, when it is large emoji), however long the message runs. Each message is a grid for
-     that: the name and the text are its rows, and the picture spans them, no taller than those lines. */
+     that: the name and the text are its rows, and the picture spans them. It is as big as a large
+     emoji, a rem taller than the smaller one those lines were set around: so the name starts half
+     of that lower, and a message is never shorter than its picture and the room around it. */
   --fusion-lead: 2.65em; /* a name's line and one of text */
+  .group-body > article, .thread-row { align-content: start; }
+  .group-body > article { min-height: calc(var(--fusion-lead) + 1rem + 14px); }
+  .post > .thread-row { min-height: calc(var(--fusion-lead) + 1rem + 15px); }
+  .comment > summary.thread-row { min-height: calc(var(--fusion-lead) + 1rem + 12px); }
+  .group-body > article > .message-content > :first-child, .thread-row .byline { margin-top: .5rem; }
   .group-body > article > .message-content, .thread-row > .row-main, .row-main > .row-text { display: contents; }
   .thread-row { display: grid; align-items: start; column-gap: 10px; }
-  .post > .thread-row { grid-template-columns: 2rem minmax(0, 1fr) auto; padding: 9px 12px 6px; }
-  .comment > summary.thread-row, .comments > .comment > summary.thread-row { display: grid; grid-template-columns: auto 2rem minmax(0, 1fr); column-gap: 0; }
+  .post > .thread-row { grid-template-columns: 3rem minmax(0, 1fr) auto; padding: 9px 12px 6px; }
+  .comment > summary.thread-row, .comments > .comment > summary.thread-row { display: grid; grid-template-columns: auto 3rem minmax(0, 1fr); column-gap: 0; }
   .group-body > article > .message-content > *, .post > .thread-row :is(.byline, .row-text > *) { grid-column: 2; min-width: 0; }
   .comment > summary :is(.byline, .row-text > *) { grid-column: 3; min-width: 0; margin-left: 10px; }
   .group-body .reply-context { justify-self: start; }
-  .msg-gutter, .thread-avatar, .comment > summary .fold { grid-row: 1 / span 2; align-self: stretch; display: flex; align-items: center;
-    max-height: var(--fusion-lead); }
+  /* The picture hangs from a box with no height of its own, so it never stretches the lines beside it. */
+  .msg-gutter, .thread-avatar, .comment > summary .fold { grid-row: 1 / span 2; align-self: start; display: flex; align-items: flex-start;
+    height: 0; padding-top: calc((var(--fusion-lead) - 2rem) / 2); }
   .msg-gutter { grid-column: 1; }
-  :is(article, .thread-row):has(.emoji-only) :is(.msg-gutter, .thread-avatar, .fold) { max-height: calc(1.25em + 1.8rem); }
-  article:has(.reply-context) > .msg-gutter { grid-row: 1 / span 3; max-height: calc(var(--fusion-lead) + 1.4em); }
+  :is(article, .thread-row):has(.emoji-only) :is(.msg-gutter, .thread-avatar, .fold) { padding-top: calc((1.25em - .2rem) / 2); }
+  article:has(.reply-context) > .msg-gutter { grid-row: 1 / span 3; padding-top: calc((var(--fusion-lead) + 1.4em - 2rem) / 2); }
   .thread-row > .pref-button { grid-column: 3; grid-row: 1; }
   /* The line down the side of a set of replies runs under the middle of the picture they answer.
      Replies show no chevron: the line folds them, and a folded one says what it hides. */
-  .comments { margin-left: calc(12px + 1rem - .5px); border-left: 1px solid var(--fusion-rule); }
+  .comments { margin-left: calc(12px + 1.5rem - .5px); border-left: 1px solid var(--fusion-rule); }
   .comments:empty { display: none; }
   /* A reply's picture starts where the text it answers does: a picture and its gap in from that one's. */
-  .comment > summary { padding: 6px 12px 6px calc(1rem + 9.5px); }
+  .comment > summary { padding: 6px 12px 6px calc(1.5rem + 9.5px); }
   .comment > summary .fold { display: none; }
-  .comment > summary .fold { grid-column: 1; height: auto; min-height: 2rem; }
+  .comment > summary .fold { grid-column: 1; height: auto; min-height: 3rem; }
   .comment > summary .thread-avatar { grid-column: 2; }
-  .replies { margin-left: calc(2rem + 9px); }
-  .post > .inline-form, .comment > .content > .inline-form { margin-left: calc(2rem + 22px); }
+  .replies { margin-left: calc(3rem + 9px); }
+  .post > .inline-form, .comment > .content > .inline-form { margin-left: calc(3rem + 22px); }
 }
 
 /* ---- by touch, and on a phone: full-size targets, panes as drawers ---- */
