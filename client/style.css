@@ -267,7 +267,8 @@ main.page { padding: 0 16px; }
 .panel-head h2 { margin: 0; font-size: 1rem; }
 .panel-head h2 .muted { font-weight: 400; }
 .panel-body { flex: 1; overflow-y: auto; padding: 0 8px 12px; }
-.panel-body h3.side-label { margin: 0; padding: 13px 8px; }
+/* A heading is as tall as a member's row, so it is as far from the name under it as one name is from the next. */
+.panel-body h3.side-label { display: flex; align-items: center; height: calc(1.8rem + 8px); margin: 0; padding: 0 8px; }
 ul.plain.member-rows > li { display: flex; align-items: center; gap: 12px; padding: 4px 8px; border: none; border-radius: 7px; }
 ul.plain.member-rows > li:hover { background: var(--hover); }
 button.member-name { flex: 1; min-width: 0; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -293,9 +294,13 @@ button.member-name { flex: 1; min-width: 0; font-weight: 500; overflow: hidden; 
 .side-row .channel-link { flex: 1; min-width: 0; }
 .side-row:has([data-item-menu]) .channel-link { padding-right: 42px; }
 .side-row .row-menu { position: absolute; right: 6px; }
-.topic-toggle { position: absolute; left: 5px; width: 24px; height: 24px; z-index: 1; }
-.topic-toggle .i { width: 16px; height: 16px; }
-.side-row:has(.topic-toggle) .channel-link { padding-left: 34px; }
+/* Down the list of channels, a picture starts where the text of a section's heading does (after its padding, its
+   chevron and their gap), and a channel's icon is centred on the line a picture is centred on. An icon is 1.15em of
+   the row's text. A topical channel's folder is as big as an icon and sits where one would, its name after it. */
+:root { --side-text: calc(11px + .890625rem); --side-icon: 1.078125rem; --side-x: calc(var(--side-text) + (1.8rem - var(--side-icon)) / 2); }
+.topic-toggle { position: absolute; left: calc(var(--side-x) + var(--side-icon) / 2 - 12px); width: 24px; height: 24px; z-index: 1; }
+.topic-toggle .i { width: var(--side-icon); height: var(--side-icon); }
+.side-row:has(.topic-toggle) .channel-link { padding-left: calc(var(--side-x) + var(--side-icon) + 8px); }
 .side-row:hover .channel-link:not(.on), .side-row:focus-within .channel-link:not(.on),
 .side-row:has(.row-menu[aria-expanded=true]) .channel-link:not(.on) { background: var(--hover); }
 .row-menu { width: 28px; height: 28px; opacity: 0; pointer-events: none; }
@@ -308,18 +313,19 @@ button.member-name { flex: 1; min-width: 0; font-weight: 500; overflow: hidden; 
 .side-items.drop-end, .side-group.drop-end, .side-section.drop-end { box-shadow: 0 2px 0 var(--accent); }
 /* On a direct message's row and a member's, a picture is as big as the one beside a message. */
 .dm-link .avatar.small, .member-rows .avatar.small { width: 1.8rem; height: 1.8rem; border-radius: 7px; font-size: 0.95rem; }
-/* A direct message's picture is centred on the line the channels' icons are centred on. */
-.channel-link.dm-link { gap: 12px; padding-left: calc(10px + (1.15em - 1.8rem) / 2); }
+/* A direct message's picture starts where an icon would, moved left by half of what it is wider by. */
+.channel-link.dm-link { gap: 12px; }
+.dm-link .avatar.small { margin-left: calc((var(--side-icon) - 1.8rem) / 2); }
 .channel-link .count, .side-toggle .count { vertical-align: 0; }
 #channel-list { flex: 1; overflow-y: auto; padding: 4px 8px 10px; }
-.channel-link { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 7px; color: var(--text); }
+.channel-link { display: flex; align-items: center; gap: 8px; padding: 6px 10px 6px var(--side-x); border-radius: 7px; color: var(--text); }
 .channel-link:hover { background: var(--hover); text-decoration: none; }
 .channel-link.on { background: var(--new-bg); font-weight: 600; }
 .channel-link .i { color: var(--muted); }
 .channel-link.on .i { color: var(--accent); }
 .channel-link .grow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mode-tag { font-size: 0.78em; color: var(--muted); font-weight: 500; }
-.topic-list { margin: 2px 0 6px 18px; padding-left: 6px; border-left: 2px solid var(--line); }
+.topic-list { margin: 2px 0 6px calc(var(--side-x) + var(--side-icon) / 2 - 1px); padding-left: 6px; border-left: 2px solid var(--line); }
 .topic-link { display: block; padding: 3px 8px; border-radius: 6px; color: var(--muted); font-size: 0.94em;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topic-link:hover { background: var(--hover); color: var(--text); text-decoration: none; }
@@ -739,6 +745,7 @@ dialog.share-dialog li + li { margin-top: 6px; }
   .message-actions .act { min-height: 44px; }
   .nav-item { min-width: 44px; justify-content: center; }
   .side-row .channel-link { padding-right: 48px; }
+  .topic-toggle { left: calc(var(--side-x) + var(--side-icon) / 2 - 22px); }
   .header-actions { gap: 0; }
 }
 @media (max-width: 720px) {

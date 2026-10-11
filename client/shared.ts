@@ -211,8 +211,7 @@ const paths: Record<string, string> = {
   "fusion-smile": '<path d="M3 12a9 9 0 1 0 18 0a9 9 0 1 0-18 0m6-2h.01M15 10h.01M9.5 15a3.5 3.5 0 0 0 5 0"/>',
   "fusion-quote": '<path d="M10 11H6a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v6q0 4-4 5m13-7h-4a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v6q0 4-4 5"/>',
   "fusion-chevron-down": '<path class="solid" d="M4 8h16l-8 10z"/>',
-  "fusion-folder": '<g transform="scale(1.5)"><path d="M3.2 3.6h2.6c.5 0 .9.2 1.2.6l.6.8c.2.2.4.3.7.3h4.5c.7 0 1.2.5 1.2 1.2v4.8c0 .7-.5 1.2-1.2 1.2H3.2c-.7 0-1.2-.5-1.2-1.2V4.8c0-.7.5-1.2 1.2-1.2z"/></g>',
-  "folder-open": '<path d="M5 20h14l3-10H8L5 20zm0 0H3V5a1 1 0 0 1 1-1h5l3 3h7a1 1 0 0 1 1 1v2"/>',
+  "folder-open": '<path d="m5 19 2.757-7.351A1 1 0 0 1 8.693 11H21a1 1 0 0 1 .986 1.164l-.996 5.211A2 2 0 0 1 19.026 19H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h4l3 3h7a2 2 0 0 1 2 2v2"/>',
   collapse: '<path d="M12 3v6l3-3M9 6l3 3m0 12v-6l3 3m-6 0l3-3m-8-3h1m4 0h1m4 0h1m4 0h1"/>',
   "fusion-hash": '<path d="M5 9h14M5 15h14M11 4 7 20M17 4l-4 16"/>',
   "fusion-globe": '<path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0-18 0M3.6 9h16.8M3.6 15h16.8M11.5 3a17 17 0 0 0 0 18M12.5 3a17 17 0 0 1 0 18"/>',
@@ -260,10 +259,8 @@ const paths: Record<string, string> = {
   inbox:
     '<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5.1 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.9A2 2 0 0 0 16.8 4H7.2a2 2 0 0 0-1.7 1.1Z"/>',
   more: '<circle class="solid" cx="5" cy="12" r="1.6"/><circle class="solid" cx="12" cy="12" r="1.6"/><circle class="solid" cx="19" cy="12" r="1.6"/>',
-  folder:
-    '<path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/>',
-  "folder-plus":
-    '<path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M12 11v5M9.5 13.5h5"/>',
+  folder: '<path d="M5 4h4l3 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2"/>',
+  "folder-plus": '<path d="M12 19H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h4l3 3h7a2 2 0 0 1 2 2v3.5M16 19h6M19 16v6"/>',
   "arrow-up": '<path d="M12 19V5M5 12l7-7 7 7"/>',
   paperclip:
     '<path d="m21 12-8.6 8.6a5 5 0 0 1-7-7L14 5a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.5a1.7 1.7 0 0 1-2.4-2.4l8-7.9"/>',

@@ -142,19 +142,21 @@
   .side-toggle { padding: 3px 6px 3px 9px; gap: 7px; color: var(--text); border-radius: 0; }
   .side-toggle .chev, .thread-heading .chev, .section-toggle .chev { width: 10px; height: 10px; stroke-width: 3; color: var(--muted); }
   .side-row { border-radius: 0; }
-  .channel-link { gap: 6px; padding: 4px 8px 4px 34px; border-radius: 0; }
+  /* A channel's icon starts where the text of a section's heading does; in Cozy a picture does, and icons are
+     centred on the line pictures are. */
+  --side-x: 26px; --side-icon: 14px; --side-gap: 6px;
+  .channel-link { gap: var(--side-gap); padding: 4px 8px 4px var(--side-x); border-radius: 0; }
   .side-item:nth-child(even) > .side-row { background: var(--fusion-stripe); }
-  .channel-link > .i { width: 14px; height: 14px; }
+  .channel-link > .i, .topic-toggle .i { width: var(--side-icon); height: var(--side-icon); }
   .channel-link .i { align-self: center; }
   .channel-link > .mode-tag:not(:has(.i)) { display: none; }
   .channel-link .remote-marker .i { width: 1.05em; height: 1.05em; }
-  .dm-link { padding-left: 40px; }
+  .dm-link { padding-left: calc(var(--side-x) + 6px); }
   .topic-list { border: 0; margin: 0; padding: 0; }
-  .topic-link { padding: 4px 8px 4px 55px; border-radius: 0; font-size: 1em; color: var(--text); }
+  .topic-link { padding: 4px 8px 4px calc(var(--side-x) + 21px); border-radius: 0; font-size: 1em; color: var(--text); }
   .topic-placeholder { color: var(--muted); }
-  .side-row:has(.topic-toggle) .channel-link { padding-left: 53px; }
-  .topic-toggle { left: 30px; width: 20px; height: 100%; border-radius: 0; }
-  .topic-toggle .i { width: 14px; height: 14px; }
+  .side-row:has(.topic-toggle) .channel-link { padding-left: calc(var(--side-x) + var(--side-icon) + var(--side-gap)); }
+  .topic-toggle { left: calc(var(--side-x) + var(--side-icon) / 2 - 10px); width: 20px; height: 100%; border-radius: 0; }
   /* what is new: the name in bold and a bare number */
   .channel-link .count, .side-toggle .count { min-width: 0; padding: 0; background: none; color: inherit; font-size: 1em; font-weight: 600; }
   .channel-link:has(.count) .grow { font-weight: 600; }
@@ -178,7 +180,7 @@
   .panel-head .icon-button { width: 22px; height: 22px; color: var(--text); }
   .panel-head .icon-button .i { width: 12px; height: 12px; }
   .panel-body { padding: 0 0 8px; }
-  .panel-body h3.side-label { padding: 10px; font-size: 1em; font-weight: 400; text-transform: none; letter-spacing: 0; }
+  .panel-body h3.side-label { height: calc(1.4em + 6px); padding: 0 10px; font-size: 1em; font-weight: 400; text-transform: none; letter-spacing: 0; }
   ul.plain.member-rows > li { padding: 3px 10px; border-radius: 0; gap: 12px; }
   ul.plain.member-rows > li:nth-child(even):not(:hover) { background: var(--fusion-stripe); }
   button.member-name { font-weight: 400; }
@@ -471,12 +473,14 @@
   .group-body .message-meta .handle:not(:has(+ time)), .group-body .message-meta .handle { display: none; }
   .member-rows .avatar, .dm-link .avatar { width: 1.8rem; height: 1.8rem; font-size: .95rem; }
   ul.plain.member-rows > li { padding-block: 4px; }
-  .channel-link { gap: 8px; padding-block: 6px; }
-  /* A direct message's picture is centred on the line the channels' icons are centred on. */
-  .channel-link.dm-link { gap: 12px; padding-left: calc(34px + (1.125rem - 1.8rem) / 2); }
+  .panel-body h3.side-label { height: calc(1.8rem + 8px); }
+  --side-x: calc(26px + (1.8rem - 1.125rem) / 2); --side-icon: 1.125rem; --side-gap: 8px;
+  .channel-link { padding-block: 6px; }
+  /* A direct message's picture starts where an icon would, moved left by half of what it is wider by. */
+  .channel-link.dm-link { gap: 12px; padding-left: var(--side-x); }
+  .dm-link .avatar { margin-left: calc((var(--side-icon) - 1.8rem) / 2); }
   .channel-table td { padding-block: 12px; }
   .topic-link { padding-block: 5px; }
-  .channel-link > .i { width: 1.125rem; height: 1.125rem; }
   .fusion-thread[open] > .thread-heading :is(.avatar, .thread-starter) { display: none; }
   .thread-body { padding-bottom: 6px; }
   .thread-avatar { line-height: 0; }
@@ -545,11 +549,7 @@
     .side-head > .icon-button, .row-menu { opacity: 1; width: 44px; height: 44px; }
     .side-row .row-menu { right: 0; }
     .side-row:has([data-item-menu]) .channel-link { padding-right: 48px; }
-    .side-row .channel-link { padding-left: 14px; }
-    .dm-link { padding-left: 14px; }
-    .topic-toggle { left: 0; width: 44px; height: 44px; }
-    .side-row:has(.topic-toggle) .channel-link { padding-left: 46px; }
-    .topic-link { padding-left: 46px; }
+    .topic-toggle { left: calc(var(--side-x) + var(--side-icon) / 2 - 22px); width: 44px; height: 44px; }
     .side-section + .side-section { padding-top: 3px; }
     .channel-header { min-height: 34px; }
     #channel-options { opacity: 1; width: 30px; height: 30px; }
