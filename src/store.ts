@@ -1,5 +1,5 @@
 import { decodeEmojiImage, decodeRasterImage, imageMime } from "./emoji-image.js";
-import { standardEmojis, type CustomEmoji } from "./emojis.js";
+import { bannedEmoji, bannedNames, standardEmojis, withoutEmojis, type CustomEmoji } from "./emojis.js";
 import { openDatabase, type Database } from "./db.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
@@ -42,7 +42,7 @@ export interface Channel {
   hide_handles: number; // members see names without the handles behind them
   reactions: number; // members may react to messages with emoji
   optional_titles: number; // threads may start without a title
-  reaction_bans: string; // JSON: the emoji names moderators keep out of its reactions
+  reaction_bans: string; // JSON: the emoji names moderators keep out of its messages and reactions
   created_at: string;
 }
 const notifyChoice = (n: number | null) =>
@@ -168,6 +168,10 @@ function choice<T extends string>(
   return value as T;
 }
 
+// Who can hold a channel's role (a is its channel_member_roles row): a member who is not a
+// moderator, or someone on another instance whose follow the channel accepted.
+const holding = `(EXISTS (SELECT 1 FROM memberships m WHERE m.channel_id=a.channel_id AND m.user_id=a.user_id AND m.role='member')
+  OR EXISTS (SELECT 1 FROM federation_follows f JOIN users u ON u.remote_actor=f.actor WHERE f.channel_id=a.channel_id AND u.id=a.user_id AND f.status='accepted'))`;
 const everyone = `
   SELECT user_id, role, 1 AS held FROM memberships WHERE channel_id=?
   UNION ALL SELECT u.id, 'member', 0 FROM federation_follows f JOIN users u ON u.remote_actor=f.actor
@@ -197,6 +201,8 @@ export class Store {
     channel: (channel: Channel, change: "rename" | "privacy" | "delete") => void;
     // Someone on another instance, or everyone on one, was put out of a channel hosted here.
     expelled: (channel: Channel, who: { actor: string } | { instance: string }) => void;
+    // The role these people hold in a channel hosted here changed, or what it allows did.
+    roles: (channel: Channel, userIds: string[]) => void;
     direct: (user: User, peer: string) => DirectAccess;
   };
   mirrorHooks?: {
@@ -1098,17 +1104,52 @@ export class Store {
   channelRole(channelId: string, userId: string) {
     return this.db
       .prepare(
-        "SELECT r.* FROM channel_member_roles a JOIN channel_roles r ON r.id=a.role_id JOIN memberships m ON m.channel_id=a.channel_id AND m.user_id=a.user_id WHERE a.channel_id=? AND a.user_id=? AND m.role='member'",
+        `SELECT r.* FROM channel_member_roles a JOIN channel_roles r ON r.id=a.role_id WHERE a.channel_id=? AND a.user_id=? AND ${holding}`,
       )
       .get(channelId, userId) as ChannelRole | undefined;
   }
+  // The role a followed channel's home says a subscriber here holds. It decides what they are
+  // offered and what is sent on their behalf; the home answers for what the role allows.
+  heldRole(channelId: string, userId: string) {
+    return this.db
+      .prepare(
+        "SELECT h.* FROM channel_held_roles h JOIN memberships m ON m.channel_id=h.channel_id AND m.user_id=h.user_id WHERE h.channel_id=? AND h.user_id=?",
+      )
+      .get(channelId, userId) as
+      | ({ name: string } & Record<ChannelPermission, number>)
+      | undefined;
+  }
+  keepHeldRole(
+    channelId: string,
+    userId: string,
+    role: { name: string; permissions: ChannelPermission[] } | null,
+  ) {
+    this.db
+      .prepare("DELETE FROM channel_held_roles WHERE channel_id=? AND user_id=?")
+      .run(channelId, userId);
+    if (role)
+      this.db
+        .prepare(
+          `INSERT INTO channel_held_roles(channel_id,user_id,name,${channelPermissions.join(",")}) VALUES(?,?,?,${channelPermissions.map(() => "?").join(",")})`,
+        )
+        .run(
+          channelId,
+          userId,
+          role.name,
+          ...channelPermissions.map((p) => Number(role.permissions.includes(p))),
+        );
+  }
   channelCan(user: User, channel: Channel, permission: ChannelPermission) {
     if (this.manages(user, channel)) return true;
-    return (
-      !channel.remote_actor &&
-      this.rule(channel.id, user.id) !== "block" &&
-      !!this.channelRole(channel.id, user.id)?.[permission]
-    );
+    if (this.rule(channel.id, user.id) === "block") return false;
+    // In a followed channel the action is asked of its home. Banning instances is not: the list
+    // of who is banned is the home's alone.
+    if (channel.remote_actor)
+      return (
+        permission !== "ban_instances" &&
+        !!this.heldRole(channel.id, user.id)?.[permission]
+      );
+    return !!this.channelRole(channel.id, user.id)?.[permission];
   }
   requireChannelPermission(
     user: User,
@@ -1165,7 +1206,11 @@ export class Store {
     if (!role) return false;
     if (!channel.remote_actor && role !== "member") return true;
     // Whoever may remove or ban members has to see who they are.
-    const held = what === "members" && this.channelRole(channel.id, user.id);
+    const held =
+      what === "members" &&
+      (channel.remote_actor
+        ? this.heldRole(channel.id, user.id)
+        : this.channelRole(channel.id, user.id));
     if (held && (held.kick_members || held.ban_members)) return true;
     return !!(
       this.db
@@ -1179,9 +1224,11 @@ export class Store {
     const rule = this.rule(channel.id, user.id),
       manages = this.manages(user, channel),
       held =
-        channel.remote_actor || rule === "block"
+        rule === "block"
           ? undefined
-          : this.channelRole(channel.id, user.id);
+          : channel.remote_actor
+            ? this.heldRole(channel.id, user.id)
+            : this.channelRole(channel.id, user.id);
     return {
       ...channel,
       sees_members: this.sees(user, channel, "members"),
@@ -1189,9 +1236,12 @@ export class Store {
       actor_url:
         channel.remote_actor || `${this.baseUrl}/actors/channels/${channel.id}`,
       role: this.role(channel.id, user.id),
-      channel_role: held ? { id: held.id, name: held.name } : null,
+      // A role held in a followed channel is known by its name alone.
+      channel_role: held
+        ? { id: "id" in held ? held.id : "", name: held.name }
+        : null,
       permissions: Object.fromEntries(
-        channelPermissions.map((p) => [p, manages || !!held?.[p]]),
+        channelPermissions.map((p) => [p, this.channelCan(user, channel, p)]),
       ) as Record<ChannelPermission, boolean>,
       reaction_bans: this.reactionBans(channel),
       bridge_room: this.bridgeRoom(channel.id),
@@ -1215,7 +1265,7 @@ export class Store {
   members(id: string) {
     return this.db
       .prepare(
-        `SELECT u.*, e.role, e.held, COALESCE(g.see_members,0) AS see_members, COALESCE(g.see_handles,0) AS see_handles, cr.id AS channel_role_id, cr.name AS channel_role_name FROM (${everyone}) e JOIN users u ON u.id=e.user_id LEFT JOIN channel_grants g ON g.channel_id=? AND g.user_id=e.user_id LEFT JOIN channel_member_roles a ON a.channel_id=? AND a.user_id=e.user_id AND e.held=1 AND e.role='member' LEFT JOIN channel_roles cr ON cr.id=a.role_id ORDER BY u.username`,
+        `SELECT u.*, e.role, e.held, COALESCE(g.see_members,0) AS see_members, COALESCE(g.see_handles,0) AS see_handles, cr.id AS channel_role_id, cr.name AS channel_role_name FROM (${everyone}) e JOIN users u ON u.id=e.user_id LEFT JOIN channel_grants g ON g.channel_id=? AND g.user_id=e.user_id LEFT JOIN channel_member_roles a ON a.channel_id=? AND a.user_id=e.user_id AND e.role='member' LEFT JOIN channel_roles cr ON cr.id=a.role_id ORDER BY u.username`,
       )
       .all(id, id, id, id, id) as unknown as (User & {
       role: string;
@@ -1381,6 +1431,7 @@ export class Store {
         "channel_rules",
         "channel_grants",
         "channel_member_roles",
+        "channel_held_roles",
         "channel_roles",
         "channel_instance_bans",
         "conversation_prefs",
@@ -1424,6 +1475,11 @@ export class Store {
     this.dropGrants(id, user.id);
   }
   // What a member was allowed to see, and the role they held, end with their membership.
+  // The same for a follow from another instance that ended.
+  followEnded(channelId: string, actor: string) {
+    const user = this.db.prepare("SELECT id FROM users WHERE remote_actor=?").get(actor) as { id: string } | undefined;
+    if (user) this.dropGrants(channelId, user.id);
+  }
   dropGrants(channelId: string, userId: string) {
     for (const table of ["channel_grants", "channel_member_roles"])
       this.db
@@ -1538,9 +1594,14 @@ export class Store {
         throw new Problem(400, "Choose a role.");
       if (input.channel_role !== null) {
         this.channelRoleRow(channelId, input.channel_role);
-        if (target.remote_actor)
-          throw new Problem(400, "Only local members can hold a channel's role.");
-        if ((input.role ?? role) !== "member")
+        // Someone following from another instance holds a role like a member here.
+        const following =
+          !role &&
+          !!target.remote_actor &&
+          !!this.db
+            .prepare("SELECT 1 FROM federation_follows WHERE channel_id=? AND actor=? AND status='accepted'")
+            .get(channelId, target.remote_actor);
+        if ((input.role ?? (following ? "member" : role)) !== "member")
           throw new Problem(
             409,
             role
@@ -1619,6 +1680,8 @@ export class Store {
               "INSERT INTO channel_member_roles VALUES(?,?,?) ON CONFLICT(channel_id,user_id) DO UPDATE SET role_id=excluded.role_id",
             )
             .run(channelId, targetId, input.channel_role as string);
+        if (input.channel_role !== undefined)
+          this.federationHooks?.roles(channel, [targetId]);
       }
       this.audit(
         user.id,
@@ -1649,6 +1712,13 @@ export class Store {
     if (!role) throw new Problem(404, "Role not found.");
     return role;
   }
+  private roleHolders(roleId: string) {
+    return (
+      this.db
+        .prepare(`SELECT a.user_id FROM channel_member_roles a WHERE a.role_id=? AND ${holding}`)
+        .all(roleId) as { user_id: string }[]
+    ).map((row) => row.user_id);
+  }
   private channelRoleView(role: ChannelRole) {
     return {
       id: role.id,
@@ -1659,7 +1729,7 @@ export class Store {
       members: Number(
         this.db
           .prepare(
-            "SELECT COUNT(*) AS n FROM channel_member_roles a JOIN memberships m ON m.channel_id=a.channel_id AND m.user_id=a.user_id WHERE a.role_id=? AND m.role='member'",
+            `SELECT COUNT(*) AS n FROM channel_member_roles a WHERE a.role_id=? AND ${holding}`,
           )
           .get(role.id)?.n,
       ),
@@ -1748,6 +1818,7 @@ export class Store {
           `UPDATE channel_roles SET name=?,${channelPermissions.map((p) => `${p}=?`).join(",")} WHERE id=?`,
         )
         .run(name, ...flags, roleId);
+      this.federationHooks?.roles(this.channel(id), this.roleHolders(roleId));
       this.audit(
         user.id,
         "channel.role.update",
@@ -1760,11 +1831,13 @@ export class Store {
   deleteChannelRole(user: User, id: string, roleId: string) {
     this.requireOwner(user, this.channel(id));
     this.transaction(() => {
-      const role = this.channelRoleRow(id, roleId);
+      const role = this.channelRoleRow(id, roleId),
+        holders = this.roleHolders(roleId);
       this.db
         .prepare("DELETE FROM channel_member_roles WHERE role_id=?")
         .run(roleId);
       this.db.prepare("DELETE FROM channel_roles WHERE id=?").run(roleId);
+      this.federationHooks?.roles(this.channel(id), holders);
       this.audit(
         user.id,
         "channel.role.delete",
@@ -1884,6 +1957,7 @@ export class Store {
         ? null
         : text(input.topic_id, "Topic ID", 100);
     const title = threadTitle(input.title);
+    this.refuseBanned(body + (title || ""), channel);
     if (channel.mode === "timeline" && (topicId || title))
       throw new Problem(400, "Timeline messages cannot have a topic or title.");
     if (channel.mode !== "topical" && topicId)
@@ -2100,8 +2174,73 @@ export class Store {
       this.db.prepare("SELECT id FROM custom_emojis WHERE name=?").get(emoji) as { id: string } | undefined
     )?.id;
   }
+  // ---- banned emoji: a channel's own list, and the instance's, which holds everywhere here.
+  // A banned emoji cannot be written or given as a reaction, and is left out of what was written
+  // before. ----
   reactionBans(channel: Channel) {
     return JSON.parse(channel.reaction_bans) as string[];
+  }
+  instanceEmojiBans() {
+    const raw = this.db.prepare("SELECT value FROM instance_settings WHERE key='emoji_bans'").get()?.value;
+    return raw ? (JSON.parse(String(raw)) as string[]) : [];
+  }
+  // Every shortcode kept out of a channel or, with none named, out of direct messages.
+  emojiBans(channel?: Channel) {
+    return bannedNames([
+      ...this.instanceEmojiBans(),
+      ...(channel ? this.reactionBans(channel) : []),
+    ]);
+  }
+  refuseBanned(body: string, channel?: Channel) {
+    const name = bannedEmoji(body, this.emojiBans(channel));
+    if (name)
+      throw new Problem(
+        403,
+        `:${name}: is banned ${bannedNames(this.instanceEmojiBans()).has(name) ? "on this instance" : "in this channel"}.`,
+      );
+  }
+  // What a message says where it is read. It is stored whole, so lifting a ban brings the emoji back.
+  unbanned<T extends { body: string; title: string | null }>(info: T, channel?: Channel): T {
+    const names = this.emojiBans(channel);
+    if (!names.size) return info;
+    const body = withoutEmojis(info.body, names),
+      title = info.title === null ? null : withoutEmojis(info.title, names);
+    return body === info.body && title === info.title
+      ? info
+      : {
+          ...info,
+          body: body.trim() || "This message was only emoji that are banned here.",
+          title: title === null ? null : title.trim() || null,
+        };
+  }
+  private banInput(input: Record<string, unknown>) {
+    if (
+      typeof input.emoji !== "string" ||
+      !/^[a-z0-9_+-]{1,64}$/.test(input.emoji) ||
+      typeof input.banned !== "boolean"
+    )
+      throw new Problem(400, "Choose an emoji by its shortcode, and whether it is banned.");
+    return input.emoji;
+  }
+  // Administrators keep an emoji out of every channel and direct conversation here, or let it back in.
+  banEmoji(user: User, input: Record<string, unknown>) {
+    this.requireAdmin(user);
+    const emoji = this.banInput(input),
+      names = this.instanceEmojiBans().filter((name) => name !== emoji);
+    if (input.banned) names.push(emoji);
+    if (names.length > 200)
+      throw new Problem(409, "An instance bans up to 200 emoji.");
+    return this.transaction(() => {
+      this.db
+        .prepare("INSERT INTO instance_settings VALUES('emoji_bans',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        .run(JSON.stringify(names.sort()));
+      for (const name of bannedNames(names)) {
+        this.db.prepare("DELETE FROM message_reactions WHERE emoji=?").run(name);
+        this.db.prepare("DELETE FROM reaction_emojis WHERE emoji=?").run(name);
+      }
+      this.audit(user.id, input.banned ? "emoji.ban" : "emoji.unban", emoji);
+      return names;
+    });
   }
   // Takes an emoji off a message, whoever gave it; the callers have checked who may.
   dropReaction(messageId: string, emoji: string) {
@@ -2110,11 +2249,11 @@ export class Store {
       this.db.prepare("DELETE FROM reaction_emojis WHERE message_id=? AND emoji=?").run(messageId, emoji);
     });
   }
-  // Keeps a channel's list of unwanted reactions, and takes those already given off its messages.
+  // Keeps a channel's list of unwanted emoji, and takes the reactions already given with them off its messages.
   keepReactionBans(channelId: string, names: string[]) {
     this.transaction(() => {
       this.db.prepare("UPDATE channels SET reaction_bans=? WHERE id=?").run(JSON.stringify(names), channelId);
-      for (const name of names) {
+      for (const name of bannedNames(names)) {
         this.db
           .prepare("DELETE FROM message_reactions WHERE emoji=? AND message_id IN (SELECT id FROM messages WHERE channel_id=?)")
           .run(name, channelId);
@@ -2136,17 +2275,11 @@ export class Store {
       return this.reactionsOf(user, messageId);
     });
   }
-  // Moderators (and the owner) keep an emoji out of a channel's reactions, or let it back in.
+  // Moderators (and the owner) keep an emoji out of a channel, or let it back in.
   banReaction(user: User, id: string, input: Record<string, unknown>) {
     const channel = this.channel(id);
     this.requireManage(user, channel);
-    if (
-      typeof input.emoji !== "string" ||
-      !/^[a-z0-9_+-]{1,64}$/.test(input.emoji) ||
-      typeof input.banned !== "boolean"
-    )
-      throw new Problem(400, "Choose an emoji by its shortcode, and whether it is banned.");
-    const emoji = input.emoji,
+    const emoji = this.banInput(input),
       names = this.reactionBans(channel).filter((name) => name !== emoji);
     if (input.banned) names.push(emoji);
     if (names.length > 200)
@@ -2207,8 +2340,8 @@ export class Store {
     // A custom emoji is this instance's, or one already given to the message from elsewhere.
     if (input.on && !standardEmojis.has(emoji) && !picture)
       throw new Problem(400, "That emoji is not available here.");
-    if (input.on && this.reactionBans(channel).includes(emoji))
-      throw new Problem(403, "That emoji is not allowed as a reaction in this channel.");
+    if (input.on && this.emojiBans(channel).has(emoji))
+      throw new Problem(403, "That emoji is banned here.");
     this.applyReaction(user.id, messageId, emoji, input.on, picture);
     this.federationHooks?.reaction(user, message, emoji, input.on);
     return this.reactionsOf(user, messageId);
@@ -2236,7 +2369,7 @@ export class Store {
           emojis: [],
           edited_at: null,
         }
-      : info;
+      : this.unbanned(info, this.channel(message.channel_id));
   }
   editMessage(user: User, id: string, input: Record<string, unknown>) {
     this.active(user.id);
@@ -2272,6 +2405,7 @@ export class Store {
     // A thread that has a title keeps one unless the channel lets threads go without.
     if (!title && message.title && !channel.optional_titles)
       throw new Problem(400, "Threads in this channel need a title.");
+    this.refuseBanned(body + (title || ""), channel);
     this.transaction(() => {
       this.db
         .prepare("UPDATE messages SET body=?,title=?,edited_at=? WHERE id=?")
@@ -2498,6 +2632,7 @@ export class Store {
     const body = text(bodyValue, "Message", 8000),
       tags = JSON.stringify(this.messageEmojiTags(sender, body)),
       at = now();
+    this.refuseBanned(body);
     const insert = this.db.prepare(
       "INSERT INTO direct_messages(id,user_id,peer,direction,body,emoji_tags,created_at) VALUES(?,?,?,?,?,?,?)",
     );
@@ -2627,7 +2762,7 @@ export class Store {
       author_actor_url:
         row.direction === "outgoing" ? this.actorOf(me.id) : info.peer,
       avatar_url: row.direction === "outgoing" ? this.avatarUrl(me.id) : info.avatar_url,
-      body: row.body,
+      body: this.unbanned({ body: row.body, title: null }).body,
       title: null,
       parent_id: null,
       topic_id: null,
@@ -2767,7 +2902,7 @@ export class Store {
             ...this.unreadArgs(me, c.id, this.channelMark(me.id, c.id)),
           ) as unknown as Message[]
       ).map((m) => ({
-        ...this.veiled(me, this.messageInfo(m, me)),
+        ...this.veiled(me, this.unbanned(this.messageInfo(m, me), c)),
         kind: "channel" as const,
         target: c.id,
         channel: {
@@ -3060,13 +3195,38 @@ export class Store {
             .get(message.topic_id) as { title: string } | undefined
         )?.title
       : null;
-    const within = topic || (part?.startsWith("thread:") ? first.title : null);
+    const shown = this.messageFor(user, this.message(message.id)),
+      // A thread without a title is known by how it began.
+      within =
+        topic ||
+        (part?.startsWith("thread:")
+          ? first.title ||
+            this.noticeText(
+              first.id === message.id ? shown.body : this.messageFor(user, this.message(first.id)).body,
+              40,
+            ) ||
+            "Thread"
+          : null);
     return {
       tag: part || channel.id,
       title: `#${channel.name}${within ? ` › ${within}` : ""}`,
-      from: this.messageFor(user, this.message(message.id)).display_name as string | null,
+      from: shown.display_name as string | null,
+      text: this.noticeText(shown.body),
+      icon: shown.avatar_url,
       url: `/#/c/${channel.id}${message.topic_id ? `/t/${message.topic_id}` : ""}`,
     };
+  }
+  // What a message says, as a notification can show it: one short line, its files named for what they are.
+  private noticeText(body: string, most = 240) {
+    const said = body
+      .split(`${this.baseUrl}/media/`)
+      .map((piece, at) =>
+        at ? piece.replace(/^[\w-]+\.(\w+)/, (_file, type) => (/^(mp4|webm)$/.test(type) ? "Video" : "Picture")) : piece,
+      )
+      .join("")
+      .replace(/\s+/g, " ")
+      .trim();
+    return said.length > most ? `${said.slice(0, most - 1)}…` : said;
   }
   // Whether a message is meant for this reader in particular: it names their handle, or
   // answers something they wrote.
@@ -3095,10 +3255,20 @@ export class Store {
       this.pref(user.id, target)?.notify === 0
     )
       return null;
+    // A direct conversation is named with the whole handle, so one alice is told from another.
+    const peer = this.peerInfo(row.peer, user),
+      handle = peer.username.includes("@")
+        ? peer.username
+        : `${peer.username}@${new URL(this.baseUrl).host}`,
+      said = this.db
+        .prepare("SELECT body FROM direct_messages WHERE seq=?")
+        .get(row.seq) as { body: string } | undefined;
     return {
       tag: target,
-      title: this.peerInfo(row.peer, user).display_name as string,
+      title: peer.display_name === handle ? handle : `${peer.display_name} (@${handle})`,
       from: null as string | null,
+      text: this.noticeText(this.unbanned({ body: said?.body ?? "", title: null }).body),
+      icon: peer.avatar_url as string | null,
       url: `/#/dm/${this.localPeer(row.peer) ?? encodeURIComponent(row.peer)}`,
     };
   }

@@ -475,7 +475,7 @@ export class Xmpp {
       { stanza_id: string; origin_id: string | null } | undefined;
     return { id, from: row.direction === "outgoing" ? me : peer, to,
       by: to.split("/")[0].endsWith(`@${this.config.xmppDomain}`) ? to.split("/")[0] : me,
-      body: row.body, stamp: row.created_at, type: "chat",
+      body: this.store.unbanned({ body: row.body, title: null }).body, stamp: row.created_at, type: "chat",
       ...(native ? { stanza_id: native.stanza_id, ...(native.origin_id ? { origin_id: native.origin_id } : {}) } : {}) };
   }
   archive(user: User, input: Input, to = this.jid(user)) {

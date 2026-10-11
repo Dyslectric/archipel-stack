@@ -206,7 +206,39 @@ test("a channel's roles let members remove, ban and delete without being moderat
   store.deleteChannelRole(alice, c.id, helper.id);
   denied(() => store.deleteMessage(bob, other.id));
   assert.equal(mine(bob).channel_role, null);
-  store.createChannelRole(alice, c.id, { name: "Helper" });
+  const again = store.createChannelRole(alice, c.id, { name: "Helper" });
+  // Someone following from another instance holds a role too, but does not moderate, and loses it with the follow.
+  const far = "https://far.example/actors/users/erin";
+  store.db.prepare("INSERT INTO users(id,username,display_name,created_at,remote_actor) VALUES(?,?,?,?,?)").run("erin", "erin@far.example", "Erin", new Date().toISOString(), far);
+  denied(() => store.setMember(alice, c.id, "erin", { channel_role: again.id }), 409);
+  store.db.prepare("INSERT INTO federation_follows VALUES(?,?,?,'accepted')").run(c.id, far, "https://far.example/follows/1");
+  store.setMember(alice, c.id, "erin", { channel_role: again.id });
+  assert.equal(store.channelRole(c.id, "erin")?.id, again.id);
+  assert.equal(store.channelRoles(alice, c.id)[0].members, 1);
+  assert.deepEqual(store.details(alice, c.id).members.find((u) => u.id === "erin")!.channel_role, { id: again.id, name: "Helper" });
+  denied(() => store.setMember(alice, c.id, "erin", { role: "moderator" }), 409);
+  store.followEnded(c.id, far);
+  assert.equal(store.channelRole(c.id, "erin"), undefined);
+  assert.equal(store.channelRoles(alice, c.id)[0].members, 0);
+  store.db.prepare("DELETE FROM federation_follows WHERE channel_id=?").run(c.id);
+  // A role held in a channel followed from here is offered as its home told it, short of banning
+  // instances. Nothing is applied here, and it ends with the membership.
+  store.db
+    .prepare("INSERT INTO channels(id,name,description,mode,visibility,admission,owner_id,created_at,remote_actor,federation_enabled) VALUES('away','away@far.example','','timeline','members','allowlist','erin',?,'https://far.example/actors/channels/away',1)")
+    .run(new Date().toISOString());
+  const away = store.channel("away");
+  store.keepHeldRole("away", bob.id, { name: "Helper", permissions: ["kick_members", "ban_instances"] });
+  assert.equal(store.heldRole("away", bob.id), undefined);
+  store.db.prepare("INSERT INTO memberships VALUES('away',?,'member')").run(bob.id);
+  assert.deepEqual(store.channelInfo(bob, away).channel_role, { id: "", name: "Helper" });
+  assert.deepEqual(store.channelInfo(bob, away).permissions, { kick_members: true, ban_members: false, ban_instances: false, delete_messages: false });
+  assert.equal(store.channelCan(charlie, away, "kick_members"), false);
+  denied(() => store.setMember(bob, "away", "erin", { remove: true }));
+  denied(() => store.instanceBans(bob, "away"));
+  store.keepHeldRole("away", bob.id, null);
+  assert.equal(store.channelCan(bob, away, "kick_members"), false);
+  store.db.prepare("DELETE FROM memberships WHERE channel_id='away'").run();
+  store.db.prepare("DELETE FROM channels WHERE id='away'").run();
   store.deleteChannel(alice, c.id);
   store.close();
 });
@@ -710,7 +742,7 @@ test("version-two emoji messages keep their image metadata through the federatio
     { id: "asset", name: "island", url: "/api/emojis/asset/image" },
   ]);
   assert.equal(store.user("author").federation_send, 0);
-  assert.equal(store.db.version(), 23);
+  assert.equal(store.db.version(), 24);
 });
 
 test("direct messages reach both members, and only the reader's own are news to them", () => {
@@ -846,7 +878,7 @@ test("personal blocks persist across restarts and upgrade an existing version 4 
   let store = new Store(path);
   const alice = store.loginIdentity("https://id.example", "alice", "alice", []);
   const bob = store.loginIdentity("https://id.example", "bob", "bob", []);
-  store.db.exec("DROP TABLE channel_instance_bans; DROP TABLE channel_member_roles; DROP TABLE channel_roles; DROP TABLE reaction_emojis; ALTER TABLE channels DROP COLUMN reaction_bans; DROP TABLE device_flows; DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; DROP TABLE user_blocks; PRAGMA user_version=4;");
+  store.db.exec("DROP TABLE channel_held_roles; DROP TABLE channel_instance_bans; DROP TABLE channel_member_roles; DROP TABLE channel_roles; DROP TABLE reaction_emojis; ALTER TABLE channels DROP COLUMN reaction_bans; DROP TABLE device_flows; DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; DROP TABLE user_blocks; PRAGMA user_version=4;");
   store.close();
   store = new Store(path);
   const peer = `${store.baseUrl}/actors/users/${alice.id}`;
@@ -897,7 +929,7 @@ test("profile picture migration preserves identities and pictures survive restar
   const path = join(directory, "db.sqlite");
   let store = new Store(path);
   const alice = store.loginIdentity("https://id.example", "alice", "alice", []);
-  store.db.exec("DROP TABLE channel_instance_bans; DROP TABLE channel_member_roles; DROP TABLE channel_roles; DROP TABLE reaction_emojis; ALTER TABLE channels DROP COLUMN reaction_bans; DROP TABLE device_flows; DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; PRAGMA user_version=5;");
+  store.db.exec("DROP TABLE channel_held_roles; DROP TABLE channel_instance_bans; DROP TABLE channel_member_roles; DROP TABLE channel_roles; DROP TABLE reaction_emojis; ALTER TABLE channels DROP COLUMN reaction_bans; DROP TABLE device_flows; DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; DROP TABLE xmpp_direct_ids; DROP TABLE xmpp_message_ids; DROP TABLE xmpp_incoming; DROP TABLE xmpp_events; DROP TABLE xmpp_credentials; DROP TABLE xmpp_accounts; DROP INDEX direct_messages_xmpp_source; ALTER TABLE direct_messages DROP COLUMN xmpp_source_id; DROP TABLE user_avatars; PRAGMA user_version=5;");
   store.close();
   store = new Store(path);
   const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
@@ -951,9 +983,9 @@ test("version 9 avatar migration preserves pictures and XMPP cursors and remote 
   const image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
   store.setAvatar(alice, image);
   store.db.prepare("INSERT INTO xmpp_events(seq,kind,object_id) VALUES(50,'Direct','old-message')").run();
-  store.db.exec("DROP TABLE channel_instance_bans; DROP TABLE channel_member_roles; DROP TABLE channel_roles; DROP TABLE reaction_emojis; ALTER TABLE channels DROP COLUMN reaction_bans; DROP TABLE device_flows; DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; PRAGMA user_version=9");
+  store.db.exec("DROP TABLE channel_held_roles; DROP TABLE channel_instance_bans; DROP TABLE channel_member_roles; DROP TABLE channel_roles; DROP TABLE reaction_emojis; ALTER TABLE channels DROP COLUMN reaction_bans; DROP TABLE device_flows; DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; PRAGMA user_version=9");
   store.close(); store = new Store(path);
-  assert.equal(store.db.version(), 23);
+  assert.equal(store.db.version(), 24);
   assert.equal(Buffer.from(store.avatarImage(alice.id).image).toString("base64"), image);
   assert.equal(store.db.prepare("SELECT seq FROM xmpp_events WHERE object_id='old-message'").get()?.seq, 50);
   store.db.prepare("INSERT INTO xmpp_events(kind,object_id) VALUES('Profile',?)").run(alice.id);
@@ -1086,12 +1118,19 @@ test("hidden topics and threads leave what is new, and each part of a channel de
   assert.equal(store.channelNotice(bob.id, loud), null);
   assert.equal(store.channelNotice(bob.id, deeper), null);
   assert.deepEqual(store.channelNotice(bob.id, kept), {
-    tag: `thread:${kept.id}`, title: "#threads › Kept thread", from: "alice", url: `/#/c/${threads.id}`,
+    tag: `thread:${kept.id}`, title: "#threads › Kept thread", from: "alice", text: "Kept", icon: null, url: `/#/c/${threads.id}`,
   });
   store.setPref(bob, { target: threads.id, notify: false });
   assert.equal(store.channelNotice(bob.id, kept), null);
   store.setPref(bob, { target: `thread:${kept.id}`, notify: true });
   assert.equal(store.channelNotice(bob.id, kept)?.tag, `thread:${kept.id}`);
+  // A notification shows the author's picture, and what was said on one short line.
+  const pictured = store.setAvatar(alice, "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=");
+  const long = store.post(alice, threads.id, { body: `Look\n\nhere ${"x".repeat(300)}`, parent_id: kept.id });
+  const told = store.channelNotice(bob.id, long)!;
+  assert.equal(told.icon, pictured.avatar_url);
+  assert.ok(told.text.startsWith("Look here x") && told.text.endsWith("…") && told.text.length === 240);
+  store.removeAvatar(alice);
   store.setPref(bob, { target: `thread:${dull.id}`, hidden: false });
   assert.equal(store.channelNotice(bob.id, deeper), null); // the channel is off, and this thread follows it
   store.setPref(bob, { target: threads.id, notify: true });
@@ -1109,7 +1148,14 @@ test("hidden topics and threads leave what is new, and each part of a channel de
 
   store.sendDirect(alice, bob.id, "Hello");
   const direct = store.db.prepare("SELECT seq,user_id,peer FROM direct_messages WHERE user_id=? AND direction='incoming'").get(bob.id) as { seq: number; user_id: string; peer: string };
-  assert.deepEqual(store.directNotice(direct), { tag: `dm:${direct.peer}`, title: "alice", from: null, url: `/#/dm/${alice.id}` });
+  assert.deepEqual(store.directNotice(direct), { tag: `dm:${direct.peer}`, title: `alice (@alice@${new URL(direct.peer).host})`, from: null, text: "Hello", icon: null, url: `/#/dm/${alice.id}` });
+  // A thread without a title is named by how it began.
+  const open = store.createChannel(alice, channelInput({ name: "loose", mode: "threaded", optional_titles: true }));
+  store.join(bob, open.id);
+  const bare = store.post(alice, open.id, { body: `It began ${"y".repeat(60)}` });
+  const later = store.channelNotice(bob.id, store.post(alice, open.id, { body: "And went on", parent_id: bare.id }))!;
+  assert.ok(later.title.startsWith("#loose › It began y") && later.title.endsWith("…"));
+  assert.equal(later.text, "And went on");
   denied(() => store.setPref(bob, { target: `dm:${direct.peer}`, hidden: true }), 400);
   store.setPref(bob, { target: `dm:${direct.peer}`, notify: false });
   assert.equal(store.directNotice(direct), null);
@@ -1216,6 +1262,37 @@ test("moderators take a reaction off a message for everyone and ban an emoji fro
   assert.deepEqual(store.banReaction(alice, c.id, { emoji: "eggplant", banned: false }).reaction_bans, []);
   store.react(charlie, m.id, { emoji: "eggplant", on: true });
   assert.equal((seen() as unknown[]).length, 2);
+  // A ban holds in messages too. However the emoji is written, it is refused in new ones and left
+  // out of those already there, which are stored whole and read as before once the ban is lifted.
+  const dinner = store.post(charlie, c.id, { body: "Dinner :eggplant: and \u{1F346} tonight" }),
+    only = store.post(charlie, c.id, { body: ":eggplant:" });
+  const said = (id: string) => store.messages(alice, c.id).find((x) => x.id === id)!.body;
+  store.banReaction(bob, c.id, { emoji: "eggplant", banned: true });
+  assert.equal(said(dinner.id), "Dinner  and  tonight");
+  assert.equal(said(only.id), "This message was only emoji that are banned here.");
+  assert.equal(store.message(dinner.id).body, "Dinner :eggplant: and \u{1F346} tonight");
+  denied(() => store.post(charlie, c.id, { body: "An :eggplant: again" }));
+  denied(() => store.post(charlie, c.id, { body: "An \u{1F346} again" }));
+  denied(() => store.editMessage(charlie, dinner.id, { body: ":eggplant:", expected_edited_at: null }));
+  assert.equal(store.post(charlie, c.id, { body: "A :tada: is fine" }).body, "A :tada: is fine");
+  store.banReaction(bob, c.id, { emoji: "eggplant", banned: false });
+  assert.equal(said(dinner.id), "Dinner :eggplant: and \u{1F346} tonight");
+  // An administrator's ban holds in every channel and in direct messages, under any name of the emoji.
+  const admin = store.loginIdentity("https://id.example", "admin", "admin", [], true);
+  denied(() => store.banEmoji(alice, { emoji: "+1", banned: true }));
+  store.react(charlie, m.id, { emoji: "thumbsup", on: true });
+  const direct = store.sendDirect(bob, charlie.id, "Well done :+1:");
+  assert.deepEqual(store.banEmoji(admin, { emoji: "+1", banned: true }), ["+1"]);
+  assert.ok(!(seen() as { emoji: string }[]).some((r) => r.emoji === "thumbsup"));
+  denied(() => store.react(charlie, m.id, { emoji: "thumbsup", on: true }));
+  denied(() => store.post(charlie, c.id, { body: "Agreed :thumbsup:" }));
+  denied(() => store.sendDirect(bob, charlie.id, "Agreed \u{1F44D}"));
+  assert.equal(
+    store.directHistory(bob, direct.peer).messages.find((x) => x.body.startsWith("Well done"))!.body,
+    "Well done",
+  );
+  assert.deepEqual(store.banEmoji(admin, { emoji: "+1", banned: false }), []);
+  assert.equal(store.post(charlie, c.id, { body: "Agreed :thumbsup:" }).body, "Agreed :thumbsup:");
   store.deleteChannel(alice, c.id);
   store.close();
 });

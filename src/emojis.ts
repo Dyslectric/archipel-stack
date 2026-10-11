@@ -39,6 +39,38 @@ const typed =
 export const markEmoji = (escaped: string) =>
   escaped.replace(typed, '<span class="emoji">$&</span>');
 
+// A ban names an emoji by one shortcode and covers it however it is written: under any of its
+// shortcodes, or typed as itself.
+export function bannedNames(banned: string[]) {
+  const names = new Set<string>();
+  for (const name of banned) {
+    names.add(name);
+    const emoji = standardEmojis.get(name);
+    if (emoji) for (const other of emojiNames(emoji)) names.add(other);
+  }
+  return names;
+}
+const banned = (name: string | undefined, names: Set<string>) =>
+  name !== undefined && names.has(name) ? name : undefined;
+// The first banned emoji a text uses, by a shortcode of it.
+export function bannedEmoji(body: string, names: Set<string>) {
+  if (!names.size) return undefined;
+  for (const match of body.matchAll(/:([a-z0-9_+\-]{1,64}):/g))
+    if (names.has(match[1])) return match[1];
+  for (const match of body.matchAll(typed)) {
+    const name = banned(emojiNames(match[0])[0], names);
+    if (name) return name;
+  }
+  return undefined;
+}
+// The text with them left out. What is stored is not changed: lifting the ban brings them back.
+export const withoutEmojis = (body: string, names: Set<string>) =>
+  names.size
+    ? body
+        .replace(/:([a-z0-9_+\-]{1,64}):/g, (code, name) => (names.has(name) ? "" : code))
+        .replace(typed, (emoji) => (banned(emojiNames(emoji)[0], names) ? "" : emoji))
+    : body;
+
 // Keep the stored message intact so editing and unknown shortcodes are lossless.
 export function emojiParts(body: string, custom: CustomEmoji[]): EmojiPart[] {
   const images = new Map(custom.map((e) => [e.name, e]));

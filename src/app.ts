@@ -729,6 +729,13 @@ export function createApp(config: Config, store: Store) {
     store.removeEmoji(user(res), String(req.params.name));
     res.json({ ok: true });
   });
+  app.get("/api/admin/emoji-bans", (_req, res) => {
+    store.requireAdmin(user(res));
+    res.json(store.instanceEmojiBans());
+  });
+  app.put("/api/admin/emoji-bans", (req, res) =>
+    res.json(store.banEmoji(user(res), req.body || {})),
+  );
   app.get("/api/admin/settings", (_req, res) => {
     store.requireAdmin(user(res));
     res.json({ registration_mode: store.registrationMode() });
@@ -934,7 +941,9 @@ export function createApp(config: Config, store: Store) {
     res.json(store.banInstance(user(res), String(req.params.id), req.body || {})),
   );
   app.patch("/api/channels/:id/members/:user", (req, res) => {
-    store.setMember(
+    (store.channel(String(req.params.id)).remote_actor
+      ? federation.moderateRemote.bind(federation)
+      : store.setMember.bind(store))(
       user(res),
       String(req.params.id),
       String(req.params.user),

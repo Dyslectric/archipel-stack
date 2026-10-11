@@ -14,6 +14,7 @@ import {
   hash,
   text,
   threadTitle,
+  channelPermissions,
   type User,
   type Channel,
   type Message,
@@ -85,6 +86,7 @@ export class Federation {
       profile: (user) => this.profileChanged(user),
       permissions: (user) => this.permissionsChanged(user),
       expelled: (channel, who) => this.expelled(channel, who),
+      roles: (channel, userIds) => this.rolesChanged(channel, userIds),
       write: (user, channel) => {
         if (this.importing) return;
         if (channel.remote_actor)
@@ -636,6 +638,7 @@ export class Federation {
       this.store.db
         .prepare("DELETE FROM federation_follows WHERE channel_id=? AND actor=?")
         .run(channel.id, follow.actor);
+      this.store.followEnded(channel.id, follow.actor);
     }
   }
   private followAnswer(
@@ -658,6 +661,54 @@ export class Federation {
       null,
       channel.id,
     );
+    // A role kept from before the follow was accepted again is theirs again.
+    const holder =
+      accept &&
+      (this.store.db.prepare("SELECT id FROM users WHERE remote_actor=?").get(actor) as
+        | { id: string }
+        | undefined);
+    if (holder && this.store.channelRole(channel.id, holder.id))
+      this.rolesChanged(channel, [holder.id]);
+  }
+  // A role as it is told to other instances: its name and what it allows.
+  private roleDoc(channelId: string, userId: string) {
+    const role = this.store.channelRole(channelId, userId);
+    return role
+      ? { name: role.name, permissions: channelPermissions.filter((p) => role[p]) }
+      : null;
+  }
+  private roleFrom(doc: unknown) {
+    const role = doc as { name?: unknown; permissions?: unknown } | null | undefined;
+    if (!role || typeof role.name !== "string" || !Array.isArray(role.permissions))
+      return null;
+    const allowed = role.permissions as unknown[];
+    return {
+      name: role.name.slice(0, 40),
+      permissions: channelPermissions.filter((p) => allowed.includes(p)),
+    };
+  }
+  // Tells those following a home channel from elsewhere the role they now hold there, or that
+  // they hold none. It is theirs to know; what it allows is decided here each time it is used.
+  private rolesChanged(channel: Channel, userIds: string[]) {
+    if (!this.enabled() || channel.remote_actor || !channel.federation_enabled) return;
+    for (const id of userIds) {
+      const actor = this.store.user(id).remote_actor;
+      if (!actor || !this.acceptedFollower(channel.id, actor)) continue;
+      this.queue(
+        "Update",
+        this.channelActor(channel),
+        {
+          type: "ChannelRole",
+          channel: this.channelActor(channel),
+          holder: actor,
+          role: this.roleDoc(channel.id, id),
+        },
+        [actor],
+        "moderation",
+        null,
+        channel.id,
+      );
+    }
   }
   private remoteUser(actor: Doc) {
     if (new URL(actor.id).origin === this.config.baseUrl) {
@@ -828,6 +879,7 @@ export class Federation {
       this.store.db
         .prepare("DELETE FROM memberships WHERE channel_id=? AND user_id=?")
         .run(id, user.id);
+      this.store.keepHeldRole(id, user.id, null);
       this.queue(
         "Undo",
         this.userActor(user),
@@ -1126,8 +1178,8 @@ export class Federation {
     // A custom emoji is this instance's, sent along with its picture, or one already on the message.
     if (input.on && !standardEmojis.has(input.emoji) && !this.store.reactionEmojiId(id, input.emoji))
       throw new Problem(400, "That emoji is not available here.");
-    if (input.on && this.store.reactionBans(channel).includes(input.emoji))
-      throw new Problem(403, "That emoji is not allowed as a reaction in this channel.");
+    if (input.on && this.store.emojiBans(channel).has(input.emoji))
+      throw new Problem(403, "That emoji is banned here.");
     this.queue(
       "React",
       this.userActor(user),
@@ -1244,6 +1296,7 @@ export class Federation {
       );
     const body = text(input.body, "Message", 8000),
       title = threadTitle(input.title);
+    this.store.refuseBanned(body + (title || ""), channel);
     const parent = input.parent_id
       ? this.store.message(String(input.parent_id))
       : null;
@@ -1474,14 +1527,16 @@ export class Federation {
     this.ensureEnabled();
     const message = this.store.message(id),
       channel = this.store.channel(message.channel_id);
+    // Someone else's message is removed by its home, for a subscriber whose role there allows it.
+    const own = message.author_id === user.id;
     if (
       !channel.remote_actor ||
-      message.author_id !== user.id ||
-      !this.store.role(channel.id, user.id)
+      !this.store.role(channel.id, user.id) ||
+      (!own && !this.store.channelCan(user, channel, "delete_messages"))
     )
       throw new Problem(
         403,
-        "Only the subscribed author can delete a remote message.",
+        "Only the subscribed author, or a subscriber whose role allows it, can delete a remote message.",
       );
     this.queue(
       "Delete",
@@ -1492,9 +1547,52 @@ export class Federation {
         channel: channel.remote_actor,
       },
       [channel.remote_actor!],
-      "cleanup",
+      own ? "cleanup" : "moderate",
       user.id,
       channel.id,
+    );
+    if (!own) this.store.audit(user.id, "message.delete.remote", id);
+  }
+  // Removing or banning in a followed channel is asked of its home, for a subscriber whose role
+  // there allows it. The home decides, and tells whoever it concerns.
+  moderateRemote(user: User, id: string, targetId: string, input: Doc) {
+    this.store.active(user.id);
+    this.ensureEnabled();
+    const channel = this.store.channel(id),
+      target = this.store.user(targetId),
+      banning = input.rule === "block" || input.rule === "clear";
+    if (
+      !channel.remote_actor ||
+      Object.keys(input).length !== 1 ||
+      !(input.remove === true || banning) ||
+      !this.store.channelCan(user, channel, banning ? "ban_members" : "kick_members")
+    )
+      throw new Problem(
+        403,
+        this.store.heldRole(id, user.id)
+          ? "Your role in this channel does not allow that."
+          : "Channel moderation belongs to its home instance.",
+      );
+    if (target.remote_actor?.startsWith("xmpp:"))
+      throw new Problem(400, "The channel's home does not know this person.");
+    this.queue(
+      banning ? "Block" : "Remove",
+      this.userActor(user),
+      {
+        type: "Person",
+        id: this.userActor(target),
+        channel: channel.remote_actor,
+        ...(banning ? { on: input.rule === "block" } : {}),
+      },
+      [channel.remote_actor!],
+      "moderate",
+      user.id,
+      id,
+    );
+    this.store.audit(
+      user.id,
+      "channel.membership.remote",
+      JSON.stringify({ channel: id, user: targetId, ...input }),
     );
   }
   history(actor: Doc, id: string, before?: number) {
@@ -1570,7 +1668,12 @@ export class Federation {
       !this.acceptedFollower(id, actor.id)
     )
       throw new Problem(403, "An accepted channel subscription is required.");
-    if (!channel.show_members)
+    // Whoever may remove or ban members is shown them, as a member here with that role is.
+    const asking = this.store.db
+        .prepare("SELECT id FROM users WHERE remote_actor=?")
+        .get(actor.id) as { id: string } | undefined,
+      held = asking && this.store.channelRole(id, asking.id);
+    if (!channel.show_members && !held?.kick_members && !held?.ban_members)
       throw new Problem(403, "This channel does not show its members.");
     const items = this.store
       .members(id)
@@ -1591,6 +1694,7 @@ export class Federation {
         preferredUsername: u.remote_actor ? u.username.split("@")[0] : u.username,
         name: u.display_name,
         role: u.role,
+        ...(u.channel_role_id ? { channelRole: this.roleDoc(id, u.id) } : {}),
       }));
     return {
       "@context": context,
@@ -1642,6 +1746,9 @@ export class Federation {
                   .get(item.id)
           ) as { id: string } | undefined;
           if (!known && origin === this.config.baseUrl) continue;
+          // What the home says of a subscriber here replaces what it said before.
+          if (known && origin === this.config.baseUrl)
+            this.store.keepHeldRole(channel.id, known.id, this.roleFrom(item.channelRole));
           this.store.db
             .prepare("INSERT OR IGNORE INTO channel_roster VALUES(?,?,?)")
             .run(
@@ -1663,7 +1770,7 @@ export class Federation {
     if (
       !this.enabled() ||
       !channel.remote_actor ||
-      !channel.show_members ||
+      !this.store.sees(user, channel, "members") ||
       (this.rosterAsked.get(id) || 0) > Date.now() - 60000 ||
       !user.federation_receive ||
       !user.federation_subscribe ||
@@ -2078,7 +2185,11 @@ export class Federation {
     const channelUpdate = activity.type === "Update" && object?.type === "Group";
     let renamed: Doc | undefined;
     let reactor: Doc | undefined;
-    if (channelUpdate) {
+    const roleUpdate = activity.type === "Update" && object?.type === "ChannelRole";
+    if (roleUpdate) {
+      if (sender.type !== "Group" || object.channel !== sender.id)
+        throw new Problem(403, "A role is told by the channel it is held in.");
+    } else if (channelUpdate) {
       if (sender.type !== "Group" || object.id !== sender.id)
         throw new Problem(403, "Channel update must belong to its signing actor.");
       // As with profiles, the channel's own endpoint is the authority on its name.
@@ -2161,6 +2272,18 @@ export class Federation {
           this.store.db.prepare("UPDATE channels SET name=?,description=? WHERE id=?")
             .run(name, String(renamed!.summary || "").slice(0, 500), channel.id);
         this.keepPrivacy(channel.id, renamed!);
+      } else if (roleUpdate) {
+        const channel = this.store.db.prepare("SELECT id FROM channels WHERE remote_actor=?").get(sender.id) as { id: string } | undefined;
+        if (!channel) throw new Problem(403, "Unknown remote channel.");
+        const local = `${this.config.baseUrl}/actors/users/`,
+          holder = typeof object.holder === "string" && object.holder.startsWith(local) ? object.holder.slice(local.length) : "";
+        if (
+          !this.store.db
+            .prepare("SELECT 1 FROM federation_subscriptions WHERE channel_id=? AND user_id=? AND status='accepted'")
+            .get(channel.id, holder)
+        )
+          throw new Problem(403, "The role is not for a subscriber here.");
+        this.store.keepHeldRole(channel.id, holder, this.roleFrom(object.role));
       } else if (profileUpdate || profileRelay) {
         const author = profileUpdate ? sender.id : object.actor;
         const cached = this.store.db.prepare("SELECT document FROM federation_actors WHERE id=?").get(author) as { document: string };
@@ -2229,6 +2352,10 @@ export class Federation {
           object.actor !== sender.id
         )
           throw new Problem(403, "Undo must belong to its sender.");
+        for (const { channel_id } of this.store.db
+          .prepare("SELECT channel_id FROM federation_follows WHERE actor=? AND follow_id=?")
+          .all(sender.id, object.id) as { channel_id: string }[])
+          this.store.followEnded(channel_id, sender.id);
         this.store.db
           .prepare(
             "UPDATE federation_follows SET status='blocked' WHERE actor=? AND follow_id=?",
@@ -2272,10 +2399,12 @@ export class Federation {
             .run(channel.id, sub.user_id);
           this.store.startReading(sub.user_id, channel.id);
           if (roster) this.keepRoster(channel, roster);
-        } else
+        } else {
           this.store.db
             .prepare("DELETE FROM memberships WHERE channel_id=? AND user_id=?")
             .run(channel.id, sub.user_id);
+          this.store.keepHeldRole(channel.id, sub.user_id, null);
+        }
         this.store.db
           .prepare(
             "UPDATE federation_subscriptions SET status=? WHERE follow_id=?",
@@ -2308,8 +2437,8 @@ export class Federation {
           (object.on && !standardEmojis.has(object.emoji) && !known)
         )
           throw new Problem(400, "That emoji is not available here.");
-        if (object.on && this.store.reactionBans(channel).includes(object.emoji))
-          throw new Problem(403, "That emoji is not allowed as a reaction in this channel.");
+        if (object.on && this.store.emojiBans(channel).has(object.emoji))
+          throw new Problem(403, "That emoji is banned here.");
         this.store.applyReaction(remote.id, target.id, object.emoji, object.on, known);
         this.relayReaction(remote, this.store.message(target.id), object.emoji, object.on);
       } else if (activity.type === "Announce" && object?.type === "React") {
@@ -2378,14 +2507,22 @@ export class Federation {
             .get(object.id, channel.id, remote.id) as
             | { id: string }
             | undefined;
-          if (!existing)
+          // Someone else's message goes only for a follower whose role here allows it, which
+          // the channel's own roles say; removing it tells the followers as a member's removal does.
+          const other = existing ? undefined : this.messageAt(channel.id, object.id);
+          if (other && this.store.channelRole(channel.id, remote.id)?.delete_messages) {
+            if (!this.store.message(other.id).deleted_at)
+              this.store.deleteMessage(remote, other.id);
+          } else if (!existing)
             throw new Problem(403, "Delete target does not belong to sender.");
-          this.store.db
-            .prepare(
-              "UPDATE messages SET body='',title=NULL,deleted_at=? WHERE id=?",
-            )
-            .run(time(), existing.id);
-          this.relay(this.store.message(existing.id), "Delete", remote);
+          else {
+            this.store.db
+              .prepare(
+                "UPDATE messages SET body='',title=NULL,deleted_at=? WHERE id=?",
+              )
+              .run(time(), existing.id);
+            this.relay(this.store.message(existing.id), "Delete", remote);
+          }
         } else {
           this.importNote(channel, prepared!);
           const message = this.store.db
@@ -2393,6 +2530,44 @@ export class Federation {
             .get(object.id) as { id: string };
           this.relay(this.store.message(message.id), activity.type, remote);
         }
+      } else if (["Remove", "Block"].includes(activity.type)) {
+        const home = `${this.config.baseUrl}/actors/channels/`,
+          people = `${this.config.baseUrl}/actors/users/`;
+        if (
+          sender.type !== "Person" ||
+          object?.type !== "Person" ||
+          typeof object.id !== "string" ||
+          typeof object.channel !== "string" ||
+          !object.channel.startsWith(home) ||
+          (activity.type === "Block" && typeof object.on !== "boolean")
+        )
+          throw new Problem(400, "Name someone in a home channel.");
+        const channel = this.store.channel(object.channel.slice(home.length));
+        const remote = this.remoteUser(sender);
+        if (
+          !channel.federation_enabled ||
+          channel.remote_actor ||
+          !this.acceptedFollower(channel.id, sender.id)
+        )
+          throw new Problem(403, "Channel subscription or moderation permission denied.");
+        const target = (
+          object.id.startsWith(people)
+            ? this.store.db
+                .prepare("SELECT id FROM users WHERE id=? AND remote_actor IS NULL")
+                .get(object.id.slice(people.length))
+            : this.store.db.prepare("SELECT id FROM users WHERE remote_actor=?").get(object.id)
+        ) as { id: string } | undefined;
+        if (!target) throw new Problem(404, "This channel does not know that person.");
+        // As for a member here who holds a role: the channel's own roles say what the sender may
+        // do, and the owner, moderators and other role holders are out of reach.
+        this.store.setMember(
+          remote,
+          channel.id,
+          target.id,
+          activity.type === "Remove"
+            ? { remove: true }
+            : { rule: object.on ? "block" : "clear" },
+        );
       } else if (activity.type === "Create" && !object?.channel) {
         if (
           !Array.isArray(object.to) ||
@@ -2494,6 +2669,10 @@ export class Federation {
       this.require(user!, "federation_send");
       this.require(user!, "federation_post");
       this.require(user!, "federation_subscribe");
+      if (!this.store.role(channel!.id, user!.id))
+        throw new Problem(403, "No longer subscribed.");
+    } else if (outgoing.purpose === "moderate") {
+      this.store.active(user!.id);
       if (!this.store.role(channel!.id, user!.id))
         throw new Problem(403, "No longer subscribed.");
     } else if (outgoing.purpose === "profile") {

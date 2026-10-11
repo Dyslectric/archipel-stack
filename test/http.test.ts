@@ -1188,8 +1188,7 @@ test("browsers that subscribed are notified of new messages until they sign out 
   await push.tick();
   assert.deepEqual(received.map((r) => r.path).sort(), ["/desk", "/pocket"]);
   const notice = desk.open(received.find((r) => r.path === "/desk")!.body);
-  assert.deepEqual(notice, { tag: `topic:${topic.id}`, title: "#general › Plans", body: "2 new messages", url: `/#/c/${channel.id}/t/${topic.id}` });
-  assert.ok(!JSON.stringify(notice).includes("First"));
+  assert.deepEqual(notice, { tag: `topic:${topic.id}`, title: "#general › Plans", body: "alice: First\nalice: Second", url: `/#/c/${channel.id}/t/${topic.id}` });
   assert.throws(() => pocket.open(received.find((r) => r.path === "/desk")!.body));
   received.length = 0;
   await push.tick();
@@ -1201,7 +1200,7 @@ test("browsers that subscribed are notified of new messages until they sign out 
   assert.equal(received.length, 0);
   await bob.request("/api/prefs", "PUT", { target: `topic:${topic.id}`, notify: true });
   await say(alice, "This topic asked"); await push.tick();
-  assert.equal(desk.open(received.find((r) => r.path === "/desk")!.body).body, "New message from alice");
+  assert.equal(desk.open(received.find((r) => r.path === "/desk")!.body).body, "alice: This topic asked");
   received.length = 0;
   await bob.request("/api/prefs", "PUT", { target: `topic:${topic.id}`, hidden: true });
   assert.deepEqual((await (await bob.request("/api/overview")).json()).prefs, { [channel.id]: { hidden: false, notify: false }, [`topic:${topic.id}`]: { hidden: true, notify: true } });
@@ -1213,7 +1212,7 @@ test("browsers that subscribed are notified of new messages until they sign out 
   // Direct messages notify too. Signing out stops that browser; a subscription the push service dropped is forgotten.
   await alice.request("/api/dms", "POST", { to: b.username, body: "Psst" });
   await push.tick();
-  assert.deepEqual(pocket.open(received.find((r) => r.path === "/pocket")!.body), { tag: `dm:${f.origin}/actors/users/${a.id}`, title: "alice", body: "New direct message", url: `/#/dm/${a.id}` });
+  assert.deepEqual(pocket.open(received.find((r) => r.path === "/pocket")!.body), { tag: `dm:${f.origin}/actors/users/${a.id}`, title: `alice (@alice@${new URL(f.origin).host})`, body: "Psst", url: `/#/dm/${a.id}` });
   received.length = 0;
   await phone.request("/api/logout", "POST", {});
   gone = true;

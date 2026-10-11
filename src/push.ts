@@ -14,11 +14,13 @@ import { peerRequest, peerUrl } from "./federation-net.js";
 import { hash, Problem, text, type Message, type Store, type User } from "./store.js";
 
 // Web Push: browsers that asked for notifications are told about new messages, even with no
-// Archipel Web tab open. A notification names the conversation and who wrote, never what was said.
+// Archipel Web tab open. A notification names the conversation, and shows who wrote, their picture
+// and what they said. Only the browser can read it: the payload is encrypted to its keys.
 export interface Notice {
   tag: string;
   title: string;
   body: string;
+  icon?: string;
   url: string;
   test?: boolean;
 }
@@ -253,19 +255,25 @@ export class Push {
     this.busy = true;
     try {
       const fresh = new Date(Date.now() - FRESH).toISOString(),
-        notices = new Map<string, { user: string; notice: Notice; from: string | null; count: number }>();
+        notices = new Map<string, { user: string; notice: Notice; lines: string[] }>();
       const add = (
         user: string,
-        found: { tag: string; title: string; from: string | null; url: string } | null,
+        found: { tag: string; title: string; from: string | null; text: string; icon: string | null; url: string } | null,
       ) => {
         if (!found) return;
         const key = `${user}\n${found.tag}`,
-          had = notices.get(key);
+          what = found.text || "Sent a message";
+        // The picture is of whoever wrote last.
         notices.set(key, {
           user,
-          from: found.from,
-          count: (had?.count || 0) + 1,
-          notice: { tag: found.tag, title: found.title, body: "", url: found.url },
+          lines: [...(notices.get(key)?.lines || []), found.from ? `${found.from}: ${what}` : what],
+          notice: {
+            tag: found.tag,
+            title: found.title,
+            body: "",
+            ...(found.icon ? { icon: found.icon } : {}),
+            url: found.url,
+          },
         });
       };
       for (const message of this.since<Message>(
@@ -294,14 +302,14 @@ export class Push {
         )
           add(row.user_id, this.store.directNotice(row));
       await Promise.all(
-        [...notices.values()].flatMap(({ user, notice, from, count }) => {
-          const what = notice.tag.startsWith("dm:")
-            ? "direct message"
-            : "message";
-          notice.body =
-            count > 1
-              ? `${count} new ${what}s`
-              : `New ${what}${from ? ` from ${from}` : ""}`;
+        [...notices.values()].flatMap(({ user, notice, lines }) => {
+          // Several at once: the latest few, each on its line, within what a push message holds.
+          const shown = lines.slice(-4);
+          if (lines.length > shown.length)
+            shown.unshift(`${lines.length - shown.length} earlier`);
+          while (shown.length > 1 && Buffer.byteLength(shown.join("\n")) > 2000)
+            shown.shift();
+          notice.body = shown.join("\n");
           return (
             this.store.db
               .prepare(

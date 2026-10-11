@@ -415,6 +415,134 @@ test("two real instances subscribe, exchange signed messages, edit, delete, and 
   assert.equal(b.store.role(sub.channel.id, b.bob.id), null);
 });
 
+test("a role held from another instance deletes, removes and bans through the channel's home, which alone decides", async (t) => {
+  const a = await instance(t), b = await instance(t);
+  const home = channel(a), actor = a.fed.channelActor(home);
+  const sub = await b.fed.subscribe(b.bob, actor), copy = sub.channel.id;
+  const follow = async () => {
+    await b.fed.subscribe(b.alice, actor);
+    await drain(a, b);
+    return b.store.role(copy, b.alice.id);
+  };
+  assert.equal(await follow(), "member");
+  // Each side knows the other's people by its own ids.
+  const known = (i: typeof a, address: string) =>
+    (i.store.db.prepare("SELECT id FROM users WHERE remote_actor=?").get(address) as { id: string }).id;
+  const bobAtHome = known(a, b.fed.userActor(b.bob)),
+    ownerAway = known(b, a.fed.userActor(a.alice));
+  const said = async (body: string) => {
+    const message = a.store.post(a.alice, home.id, { body });
+    await drain(a, b);
+    return {
+      home: message.id,
+      away: (b.store.db.prepare("SELECT id FROM messages WHERE channel_id=? AND body=?").get(copy, body) as { id: string }).id,
+    };
+  };
+  const mine = () => b.store.channelInfo(b.bob, b.store.channel(copy));
+  const denied = (action: () => unknown) =>
+    assert.throws(action, (e: unknown) => e instanceof Problem && e.status === 403);
+  // What this instance sent for Bob and the home would not have.
+  const refused = async () => {
+    for (let step = 0; step < 5; step++) for (const i of [a, b]) await i.fed.tick();
+    const left = b.store.db
+      .prepare("SELECT d.status FROM federation_deliveries d JOIN federation_outgoing o ON o.id=d.activity_id WHERE o.purpose='moderate' AND d.status!='sent'")
+      .all();
+    assert.deepEqual(left.map((d) => d.status), ["failed"]);
+    b.store.db.prepare("DELETE FROM federation_deliveries WHERE status='failed'").run();
+  };
+  const everything = ["kick_members", "ban_members", "ban_instances", "delete_messages"] as const;
+
+  // Without a role nothing is offered, and saying here that Bob holds one moves nothing at the home.
+  const first = await said("Not Bob's to remove");
+  denied(() => b.fed.deleteRemote(b.bob, first.away));
+  denied(() => b.fed.moderateRemote(b.bob, copy, b.alice.id, { remove: true }));
+  b.store.keepHeldRole(copy, b.bob.id, { name: "Claimed", permissions: [...everything] });
+  b.fed.deleteRemote(b.bob, first.away);
+  await refused();
+  b.fed.moderateRemote(b.bob, copy, b.alice.id, { rule: "block" });
+  await refused();
+  assert.equal(a.store.message(first.home).deleted_at, null);
+  assert.equal(a.store.rule(home.id, known(a, b.fed.userActor(b.alice))), null);
+
+  // The owner gives the role: the home tells Bob's instance, replacing what it had.
+  const helper = a.store.createChannelRole(a.alice, home.id, { name: "Helper", delete_messages: true, ban_instances: true });
+  a.store.setMember(a.alice, home.id, bobAtHome, { channel_role: helper.id });
+  await drain(a, b);
+  assert.deepEqual(mine().channel_role, { id: "", name: "Helper" });
+  // Banning instances stays with the home, whatever the role says.
+  assert.deepEqual(mine().permissions, { kick_members: false, ban_members: false, ban_instances: false, delete_messages: true });
+  denied(() => b.store.deleteMessage(b.bob, first.away));
+  b.fed.deleteRemote(b.bob, first.away);
+  await drain(a, b);
+  assert.ok(a.store.message(first.home).deleted_at);
+  assert.ok(b.store.message(first.away).deleted_at);
+  // What the role does not allow is refused here, and by the home when sent anyway.
+  denied(() => b.fed.moderateRemote(b.bob, copy, b.alice.id, { remove: true }));
+  denied(() => b.fed.moderateRemote(b.bob, copy, b.alice.id, { remove: true, role: "moderator" }));
+  b.store.keepHeldRole(copy, b.bob.id, { name: "Helper", permissions: [...everything] });
+  b.fed.moderateRemote(b.bob, copy, b.alice.id, { remove: true });
+  await refused();
+  assert.equal(b.store.role(copy, b.alice.id), "member");
+
+  // A changed role reaches its holders. It removes and bans members, not the owner.
+  a.store.updateChannelRole(a.alice, home.id, helper.id, { kick_members: true, ban_members: true });
+  await drain(a, b);
+  assert.deepEqual(mine().permissions, { kick_members: true, ban_members: true, ban_instances: false, delete_messages: true });
+  // Whoever may remove or ban is shown the members a channel keeps to itself, and the list says
+  // again what role each of this instance's subscribers holds.
+  a.store.setPrivacy(a.alice, home.id, { show_members: false });
+  await drain(a, b);
+  b.store.keepHeldRole(copy, b.bob.id, { name: "Claimed", permissions: [...everything] });
+  await b.fed.refreshRoster(b.bob, copy);
+  assert.equal(b.store.details(b.bob, copy).members.length, 3);
+  assert.equal(mine().channel_role?.name, "Helper");
+  a.store.setPrivacy(a.alice, home.id, { show_members: true });
+  await drain(a, b);
+  b.fed.moderateRemote(b.bob, copy, ownerAway, { remove: true });
+  await refused();
+  b.fed.moderateRemote(b.bob, copy, b.alice.id, { remove: true });
+  await drain(a, b);
+  assert.equal(b.store.role(copy, b.alice.id), null);
+  assert.equal(await follow(), "member");
+  b.fed.moderateRemote(b.bob, copy, b.alice.id, { rule: "block" });
+  await drain(a, b);
+  assert.equal(await follow(), null);
+  b.fed.moderateRemote(b.bob, copy, b.alice.id, { rule: "clear" });
+  await drain(a, b);
+  assert.equal(await follow(), "member");
+  // Someone else who holds a role is out of its reach, as at home.
+  a.store.setMember(a.alice, home.id, known(a, b.fed.userActor(b.alice)), { channel_role: helper.id });
+  await drain(a, b);
+  b.fed.moderateRemote(b.bob, copy, b.alice.id, { remove: true });
+  await refused();
+  assert.equal(b.store.role(copy, b.alice.id), "member");
+
+  // Taking the role back ends it on both sides.
+  const second = await said("Still here");
+  a.store.setMember(a.alice, home.id, bobAtHome, { channel_role: null });
+  await drain(a, b);
+  assert.equal(mine().channel_role, null);
+  denied(() => b.fed.deleteRemote(b.bob, second.away));
+  b.store.keepHeldRole(copy, b.bob.id, { name: "Helper", permissions: [...everything] });
+  b.fed.deleteRemote(b.bob, second.away);
+  await refused();
+  assert.equal(a.store.message(second.home).deleted_at, null);
+
+  // So does the end of the follow, and following again does not bring it back.
+  a.store.setMember(a.alice, home.id, bobAtHome, { channel_role: helper.id });
+  await drain(a, b);
+  assert.equal(mine().permissions.delete_messages, true);
+  b.fed.unsubscribe(b.bob, copy);
+  await drain(a, b);
+  assert.equal(a.store.channelRole(home.id, bobAtHome), undefined);
+  assert.equal(b.store.heldRole(copy, b.bob.id), undefined);
+  await b.fed.subscribe(b.bob, actor);
+  await drain(a, b);
+  assert.equal(b.store.role(copy, b.bob.id), "member");
+  assert.equal(mine().channel_role, null);
+  denied(() => b.fed.deleteRemote(b.bob, second.away));
+});
+
 test("private channels wait for home approval and block queued content after access is revoked", async (t) => {
   const a = await instance(t),
     b = await instance(t);
@@ -1047,7 +1175,7 @@ test("a custom emoji of the reader's own instance is a reaction in a followed ch
   await drain(a, b);
   assert.deepEqual(copy().reactions.map((r) => r.emoji), ["tada"]);
   assert.deepEqual(b.store.channelInfo(b.bob, b.store.channel(sub.channel.id)).reaction_bans, ["island"]);
-  assert.throws(() => b.fed.remoteReact(b.bob, copy().id, { emoji: "island", on: true }), /not allowed/);
+  assert.throws(() => b.fed.remoteReact(b.bob, copy().id, { emoji: "island", on: true }), /banned/);
 });
 test("untitled threads cross instances where the home channel makes titles optional", async (t) => {
   const a = await instance(t),

@@ -264,11 +264,22 @@ list, and no federation grant. Upgrading keeps everyone's other access: the defa
 own are moved to roles carrying exactly those. Deleting a role returns its accounts
 to the default one. Administrators follow their role like anyone else.
 
+## Banned emoji
+
+A channel's owner and moderators can ban an emoji from it under channel settings →
+**Overview**, and an administrator can ban one from the whole instance under
+**Settings → Custom emoji**. A banned emoji cannot be written or given as a reaction,
+under any of its shortcodes or typed as itself. Messages already posted are stored as
+they were and shown without it, so lifting the ban brings it back; reactions given with
+it are removed. A channel's list travels to the instances following it; an instance's
+list holds on that instance only, in its channels and direct messages.
+
 ## Channel roles
 
 A channel's owner and moderators can do everything in it. Its owner can let other
 members do some of it: channel settings → **Roles** names up to 20 roles, and
-**Members** gives a local member one of them. A role grants, separately:
+**Members** gives one to a member, or to someone following the channel from
+another instance. A role grants, separately:
 
 | Grant | Covers |
 | --- | --- |
@@ -280,7 +291,10 @@ members do some of it: channel settings → **Roles** names up to 20 roles, and
 Someone acting through a role reaches members who hold no role: not the owner,
 moderators or other role holders. Removing or banning members lets them see the
 member list of a channel that otherwise hides it. Roles are kept on the channel's
-home instance and do nothing for a member following from another one. Only the
+home instance. Someone who holds one while following from another instance
+deletes messages, removes and bans from there: their instance asks the home,
+which decides from its own roles each time. Banning instances is done on the
+home only. See [federation](docs/federation.md#channel-roles-across-instances). Only the
 owner (or an administrator) creates, changes and gives out roles; leaving or being
 removed gives the role up, and making someone a moderator replaces it.
 

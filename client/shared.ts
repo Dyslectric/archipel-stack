@@ -65,7 +65,7 @@ export interface Channel {
   hide_handles: number;
   reactions: number; // members may react to messages with emoji
   optional_titles: number; // threads may start without a title
-  reaction_bans: string[]; // emoji its moderators keep out of its reactions
+  reaction_bans: string[]; // emoji its moderators keep out of its messages and reactions
   sees_members: boolean;
   sees_handles: boolean;
   topics?: Topic[];

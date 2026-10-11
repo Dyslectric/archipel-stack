@@ -422,6 +422,37 @@ test("private invitation and a subsequent block change the other browser’s acc
   await context.close();
 });
 
+// A channel's settings open on its Overview.
+async function overview(page: Page) {
+  await page.getByRole("button", { name: "Channel options" }).click();
+  await page.getByRole("menuitem", { name: "Channel settings" }).click();
+  await expect(page.getByRole("heading", { name: "Overview", exact: true, level: 1 })).toBeVisible();
+}
+test("a banned emoji is left out of a channel's messages and cannot be written there", async ({ page }) => {
+  await login(page);
+  await createChannel(page, "emoji-ban-room");
+  await page.getByRole("textbox", { name: "Message", exact: true }).fill("Dinner :eggplant: tonight");
+  await page.getByRole("button", { name: "Send message" }).click();
+  const said = page.locator(".message-body").filter({ hasText: "Dinner" });
+  await expect(said.locator(".emoji")).toHaveCount(1);
+  await overview(page);
+  await page.getByLabel("Emoji shortcode", { exact: true }).fill("eggplant");
+  await page.getByRole("button", { name: "Ban emoji", exact: true }).click();
+  await expect(page.locator("#toast")).toContainText(":eggplant: is banned from this channel.");
+  await page.getByRole("link", { name: "Open channel" }).click();
+  await expect(said).toHaveText(/^Dinner\s+tonight$/);
+  await expect(said.locator(".emoji")).toHaveCount(0);
+  await page.getByRole("textbox", { name: "Message", exact: true }).fill("More :eggplant: please");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.getByText(":eggplant: is banned in this channel.")).toBeVisible();
+  // Lifting the ban brings it back: the message was stored whole.
+  await overview(page);
+  await page.getByRole("button", { name: "Allow again", exact: true }).click();
+  await expect(page.locator("#toast")).toContainText(":eggplant: is allowed again.");
+  await page.getByRole("link", { name: "Open channel" }).click();
+  await expect(said.locator(".emoji")).toHaveCount(1);
+});
+
 async function openAdmin(page: Page, name = "Membership") {
   await page.locator("[data-nav=settings]").click();
   await section(page, name);

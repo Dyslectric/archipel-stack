@@ -22,7 +22,7 @@ self.addEventListener("push", (event) => {
         body: notice.body || "Something new was said.",
         tag: notice.tag,
         renotify: !!notice.tag,
-        icon: "/icon-192.png",
+        icon: notice.icon || "/icon-192.png",
         badge: "/badge.png",
         data: { url: notice.url || "/" },
       });

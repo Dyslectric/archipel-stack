@@ -424,7 +424,8 @@
   .menu-panel { padding: 3px; }
   /* An emoji's card is a small window: its shortcode in the title bar, the picture and what it is under it. */
   .emoji-card { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto 1fr repeat(3, auto) 1fr;
-    gap: 0 10px; max-width: min(260px, calc(100vw - 16px)); padding: 0; overflow: hidden; background: var(--bg);
+    gap: 0 10px; min-width: min(calc(300px * var(--text-scale, 1)), calc(100vw - 16px));
+    max-width: min(calc(400px * var(--text-scale, 1)), calc(100vw - 16px)); padding: 0; overflow: hidden; background: var(--bg);
     border: 1px solid var(--fusion-window-edge); border-radius: 3px; box-shadow: 0 6px 20px rgb(0 0 0 / .3); }
   .emoji-card .ec-text { display: contents; }
   .emoji-card .ec-text > strong { grid-area: 1 / 1 / 2 / -1; padding: 3px 9px; background: var(--fusion-top);

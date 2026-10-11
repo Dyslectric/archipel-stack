@@ -48,6 +48,7 @@ activity and actor.
 | `topics`         | History page   | The channel's topics                                       |
 | `proof`          | Note           | The author's signature over the note                       |
 | `emoji`          | Note           | Custom emoji used in the note, each with its name and image |
+| `channelRole`    | Member entry   | The role a member holds: its name and what it allows       |
 
 ## Authority and conversation structure
 
@@ -59,7 +60,8 @@ editing, removal, and membership decisions.
 The home enforces admission and blocks for both new writes and signed history
 requests. Remote users can edit and remove their own channel messages; moderation
 of other authors belongs to the home channel. A cached copy of a channel grants
-no management rights. Topics are created at the home. Timeline, topical, and
+no management rights. The home may let a follower moderate through a role, as
+described under [Delegated moderation](#delegated-moderation). Topics are created at the home. Timeline, topical, and
 threaded messages retain their channel, topic, and parent relationships.
 
 Incoming activity IDs are deduplicated; conflicting reuse is rejected. A note's
@@ -92,6 +94,41 @@ placeholder; a removed parent keeps a removal marker so its surviving replies
 still have a place. A later authenticated update can fill a placeholder without
 changing its ID. User outboxes and generic object fetching are not part of the
 protocol.
+
+## Delegated moderation
+
+A home may give an accepted follower a role that allows some of: removing
+members (`kick_members`), banning people (`ban_members`), banning instances
+(`ban_instances`) and deleting other authors' messages (`delete_messages`).
+
+The home tells the holder with an `Update` it signs as the channel, delivered to
+the holder's inbox:
+
+```json
+{ "type": "Update", "actor": "<channel>", "object": {
+  "type": "ChannelRole", "channel": "<channel>", "holder": "<follower actor>",
+  "role": { "name": "Helper", "permissions": ["delete_messages"] } } }
+```
+
+`role` is `null` when the follower holds none. A receiver takes it only from the
+channel itself, for one of its own accepted subscribers. Entries of the member
+list carry the same `role` value as `channelRole` when the member holds one.
+This is information for the holder's instance; it authorises nothing.
+
+The holder's instance sends the home, signed as the holder:
+
+| Activity | Object                                                                    | Asks the home to                |
+| -------- | ------------------------------------------------------------------------- | ------------------------------- |
+| `Delete` | `Tombstone` with the message `id` and `channel`                           | Remove another author's message |
+| `Remove` | `Person` with the member's actor `id` and `channel`                       | Remove a member or end a follow |
+| `Block`  | `Person` with the actor `id`, `channel` and `on` (`true` ban, `false` lift) | Ban someone, or lift their ban  |
+
+The home applies one only when the signer is an accepted follower whose role, in
+the home's own records, grants that action, and never against the owner, a
+moderator or another role holder. It answers anything else with 403. Results are
+distributed as any moderation by the home is: an `Announce` of the `Delete`, and
+a `Reject` of a removed or banned follower's follow. Banning instances has no
+activity in version 1.
 
 Direct messages are delivered from the sender's server to the recipient's inbox.
 They are stored on the participating servers and are not end-to-end encrypted.

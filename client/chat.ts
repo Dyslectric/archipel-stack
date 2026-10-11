@@ -621,7 +621,7 @@ function moderateReactions(id: string) {
           `<li class="row"><span class="grow">${reactionEmoji(r)} <code>:${esc(r.emoji)}:</code> · ${r.count}</span><button type="button" class="small secondary" data-clear="${esc(r.emoji)}">Remove</button><button type="button" class="small secondary bad-text" data-ban="${esc(r.emoji)}">Ban</button></li>`,
       )
       .join("");
-    dialog.innerHTML = `<h2>Reactions to this message</h2>${rows ? `<ul class="plain stack">${rows}</ul><p class="muted small">Remove takes a reaction off this message for everyone. Ban also takes the emoji off every message in this channel and keeps it from being given here again; the channel's settings list what is banned.</p>` : '<p class="muted">No reactions are left.</p>'}<div class="row end"><button type="button" class="secondary" data-cancel>Close</button></div>`;
+    dialog.innerHTML = `<h2>Reactions to this message</h2>${rows ? `<ul class="plain stack">${rows}</ul><p class="muted small">Remove takes a reaction off this message for everyone. Ban also takes the emoji out of this channel: it is left out of every message here and cannot be written or given again. The channel's settings list what is banned.</p>` : '<p class="muted">No reactions are left.</p>'}<div class="row end"><button type="button" class="secondary" data-cancel>Close</button></div>`;
   };
   dialog.addEventListener("close", () => dialog.remove());
   dialog.addEventListener("click", (e) => {
@@ -639,7 +639,8 @@ function moderateReactions(id: string) {
         await api(`/channels/${current!.id}/reaction-bans`, "PUT", { emoji: name, banned: true });
         for (const m of messages) m.reactions = m.reactions?.filter((r) => r.emoji !== name);
         state.channels = await api<Channel[]>("/channels");
-        toast(`:${name}: is banned from reactions in this channel.`);
+        toast(`:${name}: is banned from this channel.`);
+        await refreshCurrent();
       }
       if (token !== generation) return dialog.close();
       draw();
@@ -728,9 +729,9 @@ function messageMenu(button: HTMLElement, id = button.dataset.messageMenu, at?: 
   const panel = popup(button, `<div class="menu-section" role="menu">${item("copy", "Copy text", "quote")}${mine(m) ? item("edit", "Edit message", "pencil") : ""}${removable(m) ? item("remove", "Remove message", "trash") : ""}</div>${author ? `<div class="menu-section" role="menu"><div class="menu-label">${esc(m.display_name)}</div>${author}</div>` : ""}`, at);
   panel?.addEventListener("click", (e) => {
     if (generation !== token) return;
-    const name = (e.target as Element).closest<HTMLElement>("[data-message-action]")?.dataset.messageAction;
     const member = (e.target as Element).closest<HTMLElement>("[data-member-act]")?.dataset.memberAct;
     if (member) return hooks.memberAct({ id: m.author_id }, member);
+    const name = (e.target as Element).closest<HTMLElement>("[data-message-action]")?.dataset.messageAction;
     if (name === "edit") editMessage(m.id);
     else if (name === "remove") removeMessage(m.id);
     else if (name === "copy") action(async () => {
@@ -1106,9 +1107,9 @@ function wireFeed() {
     },
     true,
   );
-  list.addEventListener("contextmenu", (e) => {
   // A right click on a message or a post opens its menu, in every style. Outside Fusion, where text is
   // selected the browser keeps its own menu, to copy it by.
+  list.addEventListener("contextmenu", (e) => {
     if ((e.target as Element).closest("input, textarea, a") || (!isFusion() && !getSelection()?.isCollapsed)) return;
     const row = (e.target as Element).closest<HTMLElement>(".message[id]");
     if (!row) return;

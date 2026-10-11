@@ -330,7 +330,7 @@ const sections: Section[] = [
         card(
           "This device",
           device,
-          "You are told when something new is said, even with Archipel Web closed. A notification names the conversation and who wrote, not what they said. Each browser and device is turned on by itself, and signing out turns it off.",
+          "You are told when something new is said, even with Archipel Web closed. A notification names the conversation and shows who wrote, their picture and what they said. Each browser and device is turned on by itself, and signing out turns it off.",
         ) +
         card(
           "Your choices",
@@ -746,7 +746,7 @@ const sections: Section[] = [
             card(
               "Banned emojis",
               `${c.reaction_bans.length ? `<ul class="plain stack">${c.reaction_bans.map((name) => `<li class="row"><span class="grow">${emojiHtml(`:${name}:`)} <code>:${esc(name)}:</code></span><button type="button" class="small secondary" data-unban="${esc(name)}">Allow again</button></li>`).join("")}</ul>` : '<p class="muted">No emoji is banned.</p>'}<form class="stack narrow-form" id="reaction-ban"><label>Emoji shortcode<input name="emoji" required maxlength="66" pattern=":?[a-z0-9_+\\-]+:?" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="eggplant"></label>${error}<button>Ban emoji</button></form>`,
-              "A banned emoji is taken off every message in this channel and cannot be given as a reaction again, here or from an instance following the channel. A single unwanted reaction can be removed from its message instead.",
+              "A banned emoji cannot be written in this channel or given as a reaction, here or from an instance following the channel. Messages already here are shown without it, and show it again if the ban is lifted; reactions given with it are removed. A single unwanted reaction can be removed from its message instead.",
             )
           : "") +
         (reacting && c.mode === "threaded"
@@ -783,7 +783,7 @@ const sections: Section[] = [
           await api(`/channels/${c.id}/reaction-bans`, "PUT", { emoji, banned });
           state.channels = await api<Channel[]>("/channels");
           if (chatChannel()?.id === c.id) resetChat();
-          toast(banned ? `:${emoji}: is banned from reactions.` : `:${emoji}: can be given again.`);
+          toast(banned ? `:${emoji}: is banned from this channel.` : `:${emoji}: is allowed again.`);
           ctx.refresh();
         };
         onSubmit($("#reaction-ban", el), (data) =>
@@ -873,13 +873,11 @@ const sections: Section[] = [
             !u.channel_role &&
             u.id !== state.session.user?.id));
       // The owner chooses what a member is from a list by their name: a member, one of the channel's
-      // roles, or a moderator. Someone from elsewhere can only be a member, so has no list.
+      // roles, or a moderator. Someone from elsewhere can hold a role, not moderate.
+      const local = (u: User) => !u.actor_url || u.actor_url.startsWith(location.origin);
       const roleSelect = (u: User) =>
-        owning &&
-        u.role !== "owner" &&
-        u.held !== false &&
-        (!u.actor_url || u.actor_url.startsWith(location.origin))
-          ? `<select class="role-select" data-member-role-for="${u.id}" data-was="${u.role}" aria-label="Role for ${esc(u.display_name)}" title="Role"><option value="member" ${u.role === "member" && !u.channel_role ? "selected" : ""}>Member</option>${roles.map((r) => `<option value="role:${r.id}" ${u.role === "member" && r.id === u.channel_role?.id ? "selected" : ""}>${esc(r.name)}</option>`).join("")}<option value="moderator" ${u.role === "moderator" ? "selected" : ""}>Moderator</option></select>`
+        owning && u.role !== "owner" && (u.held !== false || !local(u))
+          ? `<select class="role-select" data-member-role-for="${u.id}" data-was="${u.role}" aria-label="Role for ${esc(u.display_name)}" title="Role"><option value="member" ${u.role === "member" && !u.channel_role ? "selected" : ""}>Member</option>${roles.map((r) => `<option value="role:${r.id}" ${u.role === "member" && r.id === u.channel_role?.id ? "selected" : ""}>${esc(r.name)}</option>`).join("")}${local(u) ? `<option value="moderator" ${u.role === "moderator" ? "selected" : ""}>Moderator</option>` : ""}</select>`
           : "";
       // Where the channel keeps something from its members, a moderator can let one of them see it.
       const allow = (u: User, grant: "see_members" | "see_handles", what: string) =>
@@ -969,7 +967,8 @@ const sections: Section[] = [
     label: "Access rules",
     about: "Who is invited to, or blocked from, this channel.",
     icon: "lock",
-    show: (c) => canModerate(c) || channelCan(c, "ban_members"),
+    // A followed channel's rules are kept by its home.
+    show: (c) => canModerate(c) || (!c.remote_actor && channelCan(c, "ban_members")),
     async draw(el, ctx) {
       const c = ctx.channel!,
         moderating = canModerate(c);
@@ -1034,10 +1033,8 @@ const sections: Section[] = [
     async draw(el, ctx) {
       const c = ctx.channel!,
         roles = await api<ChannelRole[]>(`/channels/${c.id}/roles`);
-      // A role is held by local members who are not moderators, one role each.
-      const local = (c.members || []).filter(
-        (u) => u.role === "member" && (!u.actor_url || u.actor_url.startsWith(location.origin)),
-      );
+      // A role is held by members who are not moderators, here or on another instance, one role each.
+      const local = (c.members || []).filter((u) => u.role === "member");
       const holders = (role: ChannelRole) => {
         const has = local.filter((u) => u.channel_role?.id === role.id),
           rest = local.filter((u) => u.channel_role?.id !== role.id);
@@ -1460,11 +1457,14 @@ const sections: Section[] = [
     group: "instance",
     key: "emoji",
     label: "Custom emoji",
-    about: "Emoji everyone on this instance can use by :shortcode:.",
+    about: "Emoji everyone on this instance can use by :shortcode:, and the ones nobody may.",
     icon: "smile",
     admin: true,
     async draw(el, ctx) {
-      const emojis = await api<CustomEmoji[]>("/admin/emojis");
+      const [emojis, bans] = await Promise.all([
+        api<CustomEmoji[]>("/admin/emojis"),
+        api<string[]>("/admin/emoji-bans"),
+      ]);
       el.innerHTML =
         card(
           "Add an emoji",
@@ -1474,11 +1474,26 @@ const sections: Section[] = [
         card(
           "Instance emoji",
           `<ul class="plain admin-emojis">${emojis.length ? emojis.map((e) => `<li class="row"><span class="emoji-sample">${emojiHtml(`:${e.name}:`, [e])}</span><code class="grow">:${esc(e.name)}:</code><button type="button" class="small secondary" data-rename-instance-emoji="${esc(e.name)}">Rename</button><button type="button" class="small secondary bad-text" data-remove-emoji="${esc(e.name)}">Remove</button></li>`).join("") : '<li class="muted">No custom emoji yet.</li>'}</ul>`,
+        ) +
+        card(
+          "Banned emojis",
+          `${bans.length ? `<ul class="plain stack instance-emoji-bans">${bans.map((name) => `<li class="row"><span class="grow">${emojiHtml(`:${name}:`)} <code>:${esc(name)}:</code></span><button type="button" class="small secondary" data-unban-emoji="${esc(name)}">Allow again</button></li>`).join("")}</ul>` : '<p class="muted">No emoji is banned.</p>'}<form class="stack narrow-form" id="emoji-ban"><label>Shortcode to ban<input name="emoji" required maxlength="66" pattern=":?[a-z0-9_+\\-]+:?" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="eggplant"></label>${error}<button>Ban emoji</button></form>`,
+          "A banned emoji cannot be written or given as a reaction in any channel or direct conversation on this instance. Messages already here are shown without it, and show it again if the ban is lifted; reactions given with it are removed. A channel's moderators can ban more in that channel alone.",
         );
       const changed = async () => {
         state.emojis = await api<CustomEmoji[]>("/emojis");
         ctx.refresh();
       };
+      const ban = async (emoji: string, banned: boolean) => {
+        await api("/admin/emoji-bans", "PUT", { emoji, banned });
+        resetChat();
+        toast(banned ? `:${emoji}: is banned on this instance.` : `:${emoji}: is allowed again.`);
+        ctx.refresh();
+      };
+      onSubmit($("#emoji-ban", el), (data) =>
+        ban(String(data.get("emoji")).trim().replaceAll(":", ""), true),
+      );
+      onClick(el, "[data-unban-emoji]", (button) => ban(button.dataset.unbanEmoji!, false));
       onSubmit($("#emoji-form", el), async (data) => {
         await api("/admin/emojis", "POST", {
           name: data.get("name"),

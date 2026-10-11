@@ -64,6 +64,36 @@ when a subscriber opens the channel; it shows it beside its own subscribers and
 applies the channel's handle setting. Remote followers are admitted and removed
 under **Federation and remote followers**, not in the member list.
 
+### Channel roles across instances
+
+A channel's owner can give one of its [roles](../README.md#channel-roles) to
+someone following from another instance, once their follow is accepted. The
+home tells that person's instance the role's name and what it allows, when it
+is given, changed or taken back, when the follow is accepted again, and in the
+member list. The following instance keeps this only to know what to offer: the
+holder sees the same **Delete**, **Remove** and **Ban** actions as a member at
+home, and using one sends the request to the home instead of changing anything
+locally.
+
+The home accepts such a request only from an accepted follower who, by its own
+role table, holds a role granting that action at that moment. The limits are
+those of a local holder: the owner, moderators and other role holders are out
+of reach. A request from anyone else is refused, whatever their instance says
+they hold. What the home then does reaches every instance as a moderator's
+action does: a removed message is announced as removed, and a removed or banned
+follower has their follow ended. The role ends with the follow, and following
+again does not bring it back.
+
+A holder who may remove or ban is served the member list of a channel that
+otherwise keeps it to itself. Lifting a ban from a following instance needs the
+banned person to be known there; the list of who is banned stays with the home.
+Banning instances is not offered from a following instance: that list is the
+home's alone, and it decides who may reach the channel at all, the holder's own
+instance included.
+
+A request the home refuses shows as a failed delivery under the instance's
+delivery results; nothing changes on either side.
+
 Admission imports up to five history pages of twenty records each. This is
 bounded initial history, not complete archival replication. History is served
 only to an accepted follower, even for a public home channel; the browser's
