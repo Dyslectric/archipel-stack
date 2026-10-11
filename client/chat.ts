@@ -367,11 +367,24 @@ addEventListener("resize", () => {
   renderMembers();
   updateFusionToolbar();
 });
-const ranks = [
-  ["owner", "Owner"],
-  ["moderator", "Moderators"],
-  ["member", "Members"],
-] as const;
+// The list's sections, in order: the owner, the moderators, each role the owner made that someone holds, by
+// name, and the members who hold none.
+function memberSections(members: User[]) {
+  const held = new Map<string, { label: string; list: User[] }>(),
+    plain: User[] = [];
+  for (const u of members.filter((u) => u.role === "member")) {
+    const role = u.channel_role;
+    if (!role) plain.push(u);
+    else if (held.has(role.id)) held.get(role.id)!.list.push(u);
+    else held.set(role.id, { label: role.name, list: [u] });
+  }
+  return [
+    { label: "Owner", list: members.filter((u) => u.role === "owner"), counted: false },
+    { label: "Moderators", list: members.filter((u) => u.role === "moderator"), counted: true },
+    ...[...held.values()].sort((a, b) => a.label.localeCompare(b.label)).map((s) => ({ ...s, counted: true })),
+    { label: "Members", list: plain, counted: true },
+  ].filter((s) => s.list.length);
+}
 // The panel is as wide as the reader dragged it, here and in every channel.
 const MEMBERS_WIDTH = "archipel-members-w";
 function membersWidth(value: number | null) {
@@ -483,11 +496,10 @@ function renderMembers() {
       (may.ban ? `<button type="button" class="icon-button member-act" data-ban-member="${u.id}" aria-label="Ban ${esc(u.display_name)} from this channel" title="Ban from this channel">${icon("block")}</button>` : "");
   };
   const html = `<div class="panel-head"><h2 class="grow">Members <span class="muted">${members.length}</span></h2><a class="icon-button" href="#/settings/channel/members/${c.id}" aria-label="Manage members" title="Roles, invitations and removal">${icon("settings")}</a><button type="button" class="icon-button" data-close-members aria-label="Hide members" title="Hide members">${icon("x")}</button></div>
-    <div class="panel-body">${ranks
-      .map(([role, label]) => {
-        const list = members.filter((u) => u.role === role);
+    <div class="panel-body">${memberSections(members)
+      .map(({ label, list, counted }) => {
         return list.length
-          ? `<h3 class="side-label">${label}${role === "owner" ? "" : ` · ${list.length}`}</h3><ul class="plain member-rows">${list.map((u) => `<li>${avatar(u, "small")}${nameButton(u, u.actor_url, "member-name")}${ban(u)}${u.actor_url?.startsWith("xmpp:") ? `<span class="mode-tag" title="XMPP" aria-label="XMPP">${icon("xmpp")}</span>` : u.actor_url && !u.actor_url.startsWith(location.origin) ? `<span class="mode-tag" title="On another instance">${icon("globe")}</span>` : ""}</li>`).join("")}</ul>`
+          ? `<h3 class="side-label">${esc(label)}${counted ? ` · ${list.length}` : ""}</h3><ul class="plain member-rows">${list.map((u) => `<li>${avatar(u, "small")}${nameButton(u, u.actor_url, "member-name")}${ban(u)}${u.actor_url?.startsWith("xmpp:") ? `<span class="mode-tag" title="XMPP" aria-label="XMPP">${icon("xmpp")}</span>` : u.actor_url && !u.actor_url.startsWith(location.origin) ? `<span class="mode-tag" title="On another instance">${icon("globe")}</span>` : ""}</li>`).join("")}</ul>`
           : "";
       })
       .join("")}</div>`;
