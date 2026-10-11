@@ -47,22 +47,45 @@ test("markdown escapes markup and only links safe addresses", () => {
   assert.doesNotMatch(md("`<script>`\n```\n</code><script>\n```"), /<script/);
 });
 
-test("markdown shows this instance's attachments in place and links everything else", () => {
+test("markdown previews local and external media and offers other uploads as downloads", () => {
   assert.equal(
     md(`![cat.png](${file}.png)`),
-    `<p><a class="attachment" href="${file}.png" target="_blank" rel="noopener noreferrer"><img src="${file}.png" alt="cat.png" title="cat.png" loading="lazy" decoding="async"></a></p>`,
+    `<p><a class="attachment" href="${file}.png" target="_blank" rel="noopener noreferrer" aria-haspopup="dialog"><img src="${file}.png" alt="cat.png" title="cat.png" loading="lazy" decoding="async" referrerpolicy="no-referrer"></a></p>`,
   );
-  assert.equal(
+  assert.match(
     md(`![clip](${file}.mp4)`),
-    `<p><video class="attachment" controls preload="metadata" src="${file}.mp4" title="clip"></video></p>`,
+    new RegExp(`^<p><span class="attachment video"><video controls playsinline preload="metadata" src="${file}.mp4" title="clip"></video><button type="button" class="icon-button" data-expand aria-label="Expand video" title="Expand"><svg.*</svg></button></span></p>$`),
   );
-  // Another host's picture is never fetched by reading a message.
+  // Any other file is offered as a download under its own name.
+  assert.match(
+    md(`![notes "v2".pdf](${file}.bin)`),
+    new RegExp(`^<p><a class="attachment file" href="${file}.bin" download="notes &quot;v2&quot;.pdf" title="Download notes &quot;v2&quot;.pdf"><svg.*</svg><span>notes &quot;v2&quot;.pdf</span></a></p>$`),
+  );
+  // The same attachment is visible to readers on another instance.
   const remote = md("![cat](https://other.example/media/" + "a".repeat(43) + ".png)");
-  assert.doesNotMatch(remote, /<img|<video/);
-  assert.match(remote, /<a href="https:\/\/other\.example\/media\//);
-  assert.doesNotMatch(md(`![x](${origin}/api/session)`), /<img/);
-  assert.doesNotMatch(md(`![x](${file}.png?next=1)`), /<img/);
+  assert.match(remote, /<img/);
+  assert.match(remote, /href="https:\/\/other\.example\/media\//);
+  assert.match(md(`![report.pdf](https://other.example/media/${"a".repeat(43)}.bin)`), /class="attachment file"/);
+  assert.match(md(`![x](${file}.png?next=1)`), /<img/);
   assert.equal(md('![a"b](javascript:x)'), "<p>![a&quot;b](javascript:x)</p>");
+});
+
+test("external pictures and videos preview from Markdown and direct links", () => {
+  assert.match(md("![picture](https://images.example/render?id=1)"), /<img src="https:\/\/images.example\/render\?id=1"/);
+  assert.match(md("![clip](https://other.example/clip.MP4?token=a&b=2)"), /<video controls playsinline preload="metadata" src="https:\/\/other.example\/clip.MP4\?token=a&amp;b=2"/);
+  for (const ext of ["jpg", "jpeg", "png", "gif", "webp", "avif", "svg"])
+    assert.match(md(`https://images.example/picture.${ext}?size=large.`), /<img/);
+  for (const ext of ["mp4", "webm", "ogv", "mov", "m4v"])
+    assert.match(md(`https://videos.example/clip.${ext}`), /<video/);
+  // Text links stay text links, and credentials and non-web schemes never become embeds.
+  assert.doesNotMatch(md("[a picture](https://images.example/a.png)"), /<img/);
+  assert.doesNotMatch(md("https://example.com/file.pdf"), /<img|<video/);
+  for (const url of ["https://user:secret@example.com/a.png", "mailto:a@example.com", "xmpp:a@example.com", "data:image/png,x", "javascript:x"])
+    assert.doesNotMatch(md(`![x](${url})`), /<img|<video/);
+  assert.doesNotMatch(md("`https://images.example/a.png`\n```\nhttps://videos.example/a.mp4\n```"), /<img|<video/);
+  const blocked = markdownHtml("![picture](https://images.example/a.png) https://videos.example/a.mp4", [], origin, false);
+  assert.doesNotMatch(blocked, /<img|<video/);
+  assert.match(blocked, /href="https:\/\/images.example\/a.png"/);
 });
 
 test("markdown renders emoji shortcodes outside code and keeps unknown ones as written", () => {

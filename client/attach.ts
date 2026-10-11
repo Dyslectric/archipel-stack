@@ -1,14 +1,16 @@
 import { icon, state, toast } from "./shared.js";
 import { markdownQuote } from "./markdown.js";
 
-// Pictures and videos go into a message as ![name](address), where the cursor is: chosen with the
-// paperclip, pasted, or dropped on the box. The address is the file on this instance.
-const accept = "image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm";
+// Files go into a message as ![name](address), where the cursor is: chosen with the paperclip,
+// pasted, or dropped on the box. The address is the file on this instance. Pictures and videos
+// a browser shows are shown in the message; anything else is there to download.
+const pictures = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 const boxes = "#message-body, .inline-form textarea, #xmpp-composer textarea";
+const uploading = new WeakMap<HTMLTextAreaElement, number>();
 export const canAttach = () => !!state.session.user?.attachments;
 export const attachButton = (attrs: string) =>
   canAttach()
-    ? `<button type="button" class="icon-button" ${attrs} aria-label="Attach an image or video" title="Attach an image or video">${icon("paperclip")}</button>`
+    ? `<button type="button" class="icon-button" ${attrs} aria-label="Attach a file" title="Attach a file">${icon("paperclip")}</button>`
     : "";
 
 function put(area: HTMLTextAreaElement, text: string) {
@@ -55,31 +57,39 @@ async function upload(file: File) {
 }
 export async function attachFiles(area: HTMLTextAreaElement, files: File[]) {
   if (!canAttach()) return toast("Your role does not allow attaching files.", true);
-  for (const file of files.slice(0, 10)) {
-    const video = file.type.startsWith("video/");
-    if (!accept.split(",").includes(file.type)) {
-      toast(`${file.name}: only PNG, JPEG, GIF and WebP images and MP4 and WebM videos can be attached.`, true);
-      continue;
+  if (files.length > 10) toast("Attach up to 10 files at a time. Only the first 10 will be uploaded.", true);
+  uploading.set(area, (uploading.get(area) || 0) + 1);
+  area.setAttribute("aria-busy", "true");
+  try {
+    for (const file of files.slice(0, 10)) {
+      const picture = pictures.includes(file.type);
+      if (!file.size) {
+        toast(`${file.name}: the file is empty.`, true);
+        continue;
+      }
+      if (file.size > (picture ? 10485760 : 52428800)) {
+        toast(`${file.name}: ${picture ? "images can be up to 10" : "files can be up to 50"} MiB.`, true);
+        continue;
+      }
+      const waiting = `[Uploading ${file.name.replace(/[[\]()]/g, "")}…]`;
+      put(area, waiting);
+      try {
+        const sent = await upload(file);
+        swap(area, waiting, `![${sent.name}](${sent.url})`);
+      } catch (error) {
+        swap(area, waiting, "");
+        toast((error as Error).message, true);
+      }
     }
-    if (file.size > (video ? 52428800 : 10485760)) {
-      toast(`${file.name}: ${video ? "videos can be up to 50" : "images can be up to 10"} MiB.`, true);
-      continue;
-    }
-    const waiting = `[Uploading ${file.name.replace(/[[\]()]/g, "")}…]`;
-    put(area, waiting);
-    try {
-      const sent = await upload(file);
-      swap(area, waiting, `![${sent.name}](${sent.url})`);
-    } catch (error) {
-      swap(area, waiting, "");
-      toast((error as Error).message, true);
-    }
+  } finally {
+    const remaining = (uploading.get(area) || 1) - 1;
+    uploading.set(area, remaining);
+    if (!remaining) area.removeAttribute("aria-busy");
   }
 }
 export function pickFiles(area: HTMLTextAreaElement) {
   const input = document.createElement("input");
   input.type = "file";
-  input.accept = accept;
   input.multiple = true;
   input.addEventListener("change", () => {
     area.focus();
@@ -90,6 +100,14 @@ export function pickFiles(area: HTMLTextAreaElement) {
 
 const box = (e: Event) =>
   canAttach() ? (e.target as Element).closest?.<HTMLTextAreaElement>(boxes) : null;
+// Every composer (including edits, replies and XMPP rooms) waits for its files before sending.
+document.addEventListener("submit", (e) => {
+  const area = (e.target as HTMLFormElement).querySelector<HTMLTextAreaElement>("textarea");
+  if (!area || !uploading.get(area)) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  toast("Wait for your files to finish uploading before sending.", true);
+}, true);
 document.addEventListener("paste", (e) => {
   const area = box(e),
     files = [...(e.clipboardData?.files || [])];

@@ -58,7 +58,7 @@ function messageHtml(m: Item) {
     m.kind === "channel" && m.topic_id
       ? `<a class="pill" href="#/c/${m.channel.id}/t/${m.topic_id}">${esc(m.topic_title || "Topic")}</a>`
       : "";
-  return `<article class="message"><div class="msg-gutter">${avatar(m)}</div><div class="message-content"><div class="message-meta">${nameButton(m, m.author_actor_url)}${handleTag(m.username)}${time}${topic}</div>${m.title ? `<div class="inbox-title">${emojiHtml(m.title, m.emojis || [])}</div>` : ""}<div class="message-body markdown">${richHtml(m.body, m.emojis || [])}</div></div></article>`;
+  return `<article class="message"><div class="msg-gutter">${avatar(m)}</div><div class="message-content"><div class="message-meta">${nameButton(m, m.author_actor_url)}${handleTag(m.username)}${time}${topic}</div>${m.title ? `<div class="inbox-title">${emojiHtml(m.title, m.emojis || [])}</div>` : ""}<div class="message-body markdown">${richHtml(m.body, m.emojis || [], m.author_actor_url)}</div></div></article>`;
 }
 function draw() {
   const kind = filter(),

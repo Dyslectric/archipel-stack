@@ -218,7 +218,7 @@ function markSeen() {
 const me = () => state.session.user!;
 // What is on the page: the conversation, then what is still being sent to it.
 const everything = () => (pending.length ? [...messages, ...pending] : messages);
-const signature = () => JSON.stringify([messages, pending]);
+const signature = () => JSON.stringify([messages, pending, state.userBlocks]);
 const threaded = () => current?.mode === "threaded";
 const topicOf = (id: string | null) =>
   current?.topics?.find((t) => t.id === id);
@@ -700,7 +700,7 @@ function bodyHtml(m: Message, cls = "") {
   if (editing === m.id && !m.deleted_at)
     return `<form class="stack inline-form picker-host" data-edit-form="${m.id}">${threaded() && !m.parent_id ? `<input name="title" maxlength="160" value="${esc(m.title || "")}" placeholder="Thread title${m.title && !current!.optional_titles ? "" : " (optional)"}" aria-label="Thread title" ${m.title && !current!.optional_titles ? "required" : ""}>` : ""}<textarea name="body" rows="3" maxlength="8000" aria-label="Edited message" required>${esc(m.body)}</textarea><p class="form-error" role="alert"></p><div class="row"><button class="small">Save changes</button><button type="button" class="small secondary" data-cancel-edit>Cancel</button><button type="button" class="icon-button" data-emoji-for aria-label="Choose emoji" title="Emoji">${icon("smile")}</button>${attachButton("data-attach-for")}</div></form>`;
   const big = !m.deleted_at && emojiOnly(m.body, m.emojis || []);
-  return `<div class="message-body${cls ? ` ${cls}` : ""}${m.deleted_at ? " faded" : " markdown"}${big ? " emoji-only" : ""}">${m.deleted_at ? "This message was removed." : richHtml(m.body, m.emojis || [])}</div>${reactionsHtml(m)}`;
+  return `<div class="message-body${cls ? ` ${cls}` : ""}${m.deleted_at ? " faded" : " markdown"}${big ? " emoji-only" : ""}">${m.deleted_at ? "This message was removed." : richHtml(m.body, m.emojis || [], m.author_actor_url)}</div>${reactionsHtml(m)}`;
 }
 // Direct messages stay as they were sent.
 const mine = (m: Message) =>

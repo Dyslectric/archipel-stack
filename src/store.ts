@@ -139,6 +139,8 @@ const mediaTypes: Record<string, string> = {
   "image/webp": "webp",
   "video/mp4": "mp4",
   "video/webm": "webm",
+  // Any other file: kept as bytes and handed back as a download, whatever it holds.
+  "application/octet-stream": "bin",
 };
 export const hash = (value: string) =>
   createHash("sha256").update(value).digest("hex");
@@ -737,26 +739,21 @@ export class Store {
       return this.profile(this.user(targetId), true);
     });
   }
-  // ---- attachments: pictures and videos put in messages ----
+  // ---- attachments: pictures, videos and other files put in messages ----
   addAttachment(user: User, data: unknown, nameValue: unknown) {
     const me = this.requirePermission(user, "attachments");
     if (!Buffer.isBuffer(data) || !data.length)
-      throw new Problem(
-        400,
-        "Attach a PNG, JPEG, GIF or WebP image, or an MP4 or WebM video.",
-      );
-    const mime = imageMime(data) || videoMime(data);
-    if (!mime)
-      throw new Problem(
-        415,
-        "Only PNG, JPEG, GIF and WebP images and MP4 and WebM videos can be attached.",
-      );
-    const video = mime.startsWith("video/"),
-      limit = video ? 52428800 : 10485760;
+      throw new Problem(400, "Attach a file that is not empty.");
+    // What the bytes are, not what they were called: only a picture or video a browser shows is
+    // served as one. Everything else is a file to download.
+    const mime =
+        imageMime(data) || videoMime(data) || "application/octet-stream",
+      image = mime.startsWith("image/"),
+      limit = image ? 10485760 : 52428800;
     if (data.length > limit)
       throw new Problem(
         413,
-        `${video ? "Videos" : "Images"} can be up to ${limit / 1048576} MiB.`,
+        `${image ? "Images" : "Files"} can be up to ${limit / 1048576} MiB.`,
       );
     const recent = this.db
       .prepare(
@@ -3233,7 +3230,7 @@ export class Store {
     const said = body
       .split(`${this.baseUrl}/media/`)
       .map((piece, at) =>
-        at ? piece.replace(/^[\w-]+\.(\w+)/, (_file, type) => (/^(mp4|webm)$/.test(type) ? "Video" : "Picture")) : piece,
+        at ? piece.replace(/^[\w-]+\.(\w+)/, (_file, type) => (/^(mp4|webm)$/.test(type) ? "Video" : type === "bin" ? "File" : "Picture")) : piece,
       )
       .join("")
       .replace(/\s+/g, " ")

@@ -1068,10 +1068,25 @@ test("attachments upload by role, serve by unguessable address with ranges, and 
   assert.equal((await fetch(`${f.origin}/api/attachments`, { method: "POST", body: new Uint8Array(png), headers: { Origin: f.origin, "Content-Type": "image/png" } })).status, 401);
   assert.equal((await upload(bob, png, "cat.png", "image/png", false)).status, 403);
   // What a file is comes from its bytes, never from what the browser called it.
-  assert.equal((await upload(bob, Buffer.from("<svg onload=alert(1)>"), "x.png")).status, 415);
-  assert.equal((await upload(bob, Buffer.from("<html><script>alert(1)</script>"), "x.mp4", "video/mp4")).status, 415);
+  // Whatever is not a picture or video a browser shows is only ever handed back as a download.
+  assert.equal((await upload(bob, Buffer.alloc(0), "empty.txt", "text/plain")).status, 400);
+  const page = Buffer.from("<html><script>alert(1)</script>");
   const heic = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypheic"), Buffer.alloc(16)]);
-  assert.equal((await upload(bob, heic, "x.mp4", "video/mp4")).status, 415);
+  for (const [data, name, type] of [[Buffer.from("<svg onload=alert(1)>"), "x.png", "image/png"], [page, "x.mp4", "video/mp4"], [heic, "x.mp4", "video/mp4"], [page, "page.html", "text/html"]] as const) {
+    const other = await (await upload(bob, data, name, type)).json();
+    assert.deepEqual([other.mime, other.name], ["application/octet-stream", name]);
+    assert.match(other.url, /\.bin$/);
+    const back = await fetch(other.url);
+    assert.deepEqual([back.headers.get("content-type"), back.headers.get("content-disposition"), back.headers.get("x-content-type-options"), back.headers.get("content-security-policy")],
+      ["application/octet-stream", `attachment; filename*=UTF-8''${name}`, "nosniff", "default-src 'none'; sandbox"]);
+    assert.deepEqual(Buffer.from(await back.arrayBuffer()), data);
+  }
+  const jsonBytes = Buffer.from('{"hello":"world"}\n');
+  const jsonResponse = await upload(bob, jsonBytes, "data.json", "application/json");
+  assert.equal(jsonResponse.status, 201);
+  const jsonFile = await jsonResponse.json();
+  assert.equal(jsonFile.mime, "application/octet-stream");
+  assert.deepEqual(Buffer.from(await (await fetch(jsonFile.url)).arrayBuffer()), jsonBytes);
   const sent = await upload(bob, png, 'my [cat](x) "1".png', "text/html");
   assert.equal(sent.status, 201);
   const file = await sent.json();
@@ -1084,8 +1099,17 @@ test("attachments upload by role, serve by unguessable address with ranges, and 
   const got = await fetch(file.url);
   assert.equal(got.status, 200);
   assert.equal(got.headers.get("content-type"), "image/png");
+  assert.match(got.headers.get("content-disposition")!, /^inline;/);
+  const savedImage = await fetch(`${file.url}?download=1`);
+  assert.match(savedImage.headers.get("content-disposition")!, /^attachment;/);
+  assert.equal(savedImage.headers.get("content-type"), "image/png");
+  assert.deepEqual(Buffer.from(await savedImage.arrayBuffer()), png);
   assert.equal(got.headers.get("content-security-policy"), "default-src 'none'; sandbox");
   assert.equal(got.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(got.headers.get("cross-origin-resource-policy"), "cross-origin");
+  const csp = (await fetch(f.origin)).headers.get("content-security-policy")!;
+  assert.match(csp, /img-src 'self' data: http: https:/);
+  assert.match(csp, /media-src 'self' http: https:/);
   assert.deepEqual(Buffer.from(await got.arrayBuffer()), png);
   const part = await fetch(file.url, { headers: { Range: "bytes=1-3" } });
   assert.equal(part.status, 206);

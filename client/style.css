@@ -460,9 +460,18 @@ ul.plain.people-list > li { padding: 0; border: none; }
 .markdown hr { border: none; border-top: 1px solid var(--line); margin: 8px 0; }
 .markdown a { overflow-wrap: anywhere; }
 .attachment { display: block; width: fit-content; max-width: 100%; margin: 4px 0; }
-a.attachment > img, video.attachment { display: block; max-width: min(100%, 520px); max-height: 380px; border-radius: 8px;
+a.attachment > img, .attachment > video { display: block; max-width: min(100%, 520px); max-height: 380px; border-radius: 8px;
   border: 1px solid var(--line); background: var(--bg); }
-a.attachment > img { object-fit: contain; }
+a.attachment > img { object-fit: contain; cursor: zoom-in; }
+.attachment.video { position: relative; }
+.attachment.video > [data-expand] { position: absolute; top: 6px; right: 6px; background: rgb(0 0 0 / .55); color: #fff; opacity: 0;
+  transition: opacity .15s; }
+.attachment.video:is(:hover, :focus-within) > [data-expand] { opacity: 1; }
+@media (hover: none) { .attachment.video > [data-expand] { opacity: 1; } }
+a.attachment.file { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--bg); color: var(--text); overflow-wrap: anywhere; }
+a.attachment.file:hover { background: var(--hover); text-decoration: none; }
+a.attachment.file > .i { color: var(--muted); }
 .spoiler { border-radius: 4px; background: var(--text); color: transparent; cursor: pointer; }
 .spoiler:not(.shown) * { visibility: hidden; }
 .spoiler.shown { background: var(--hover); color: inherit; cursor: auto; }
@@ -670,6 +679,29 @@ dialog.dialog::backdrop { background: rgba(0, 0, 0, .4); }
 dialog.dialog h2 { margin-bottom: 6px; }
 dialog.dialog form { margin-top: 16px; }
 dialog.share-dialog { max-width: 520px; }
+/* a picture or video opened large: the whole window, dark whatever the look */
+dialog.viewer { width: 100vw; height: 100dvh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; background: rgb(0 0 0 / .88); color-scheme: dark;
+  color: #fff; }
+dialog.viewer[open] { display: grid; grid-template: auto minmax(0, 1fr) / auto minmax(0, 1fr) auto; align-items: center; }
+dialog.viewer::backdrop { background: none; }
+.viewer-bar { grid-column: 1 / -1; display: flex; align-items: center; gap: 6px; padding: 8px 10px; }
+.viewer-name { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.viewer-count { color: rgb(255 255 255 / .7); margin-right: 6px; }
+dialog.viewer .icon-button { color: #fff; }
+dialog.viewer .icon-button:hover { background: rgb(255 255 255 / .16); color: #fff; }
+.viewer-step { width: 44px; height: 44px; margin: 0 6px; }
+.viewer-step[data-step="-1"] { grid-column: 1; grid-row: 2; }
+.viewer-step[data-step="1"] { grid-column: 3; grid-row: 2; }
+.viewer-stage { grid-column: 2; grid-row: 2; align-self: stretch; display: flex; align-items: center; justify-content: center; min-width: 0; min-height: 0; padding-bottom: 12px;
+  cursor: zoom-out; }
+.viewer-stage > * { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 4px; cursor: auto; }
+.viewer-error { position: absolute; bottom: 60px; left: 10%; right: 10%; text-align: center; pointer-events: none; }
+@media (max-width: 720px) {
+  .viewer-step { position: absolute; bottom: 12px; z-index: 1; background: rgb(0 0 0 / .55); }
+  .viewer-step[data-step="-1"] { left: 6px; }
+  .viewer-step[data-step="1"] { right: 6px; }
+  .viewer-stage { grid-column: 1 / -1; }
+}
 dialog.share-dialog ul { margin: 8px 0 0; padding-left: 20px; }
 dialog.share-dialog li + li { margin-top: 6px; }
 #toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 40; display: flex;

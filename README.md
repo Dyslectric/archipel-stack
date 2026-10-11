@@ -57,8 +57,10 @@ usernames match. New instances start without fabricated channels or conversation
 - Author-only message editing, edited markers, and conflict checks.
 - Markdown in channels, threads, direct messages and XMPP rooms: emphasis, code,
   quotes, lists, headings, links and spoilers, escaped and rendered in the browser.
-- Image, GIF and video attachments (PNG, JPEG, GIF, WebP up to 10 MiB; MP4, WebM up
-  to 50 MiB), attached with the paperclip, by pasting, or by dropping a file.
+- File attachments up to 50 MiB (images up to 10 MiB), attached with the paperclip,
+  by pasting, or by dropping a file. PNG, JPEG, GIF and WebP pictures and MP4 and
+  WebM videos are shown in the message and open large; anything else downloads.
+  External images and videos also preview automatically, including direct media links.
 - Instance roles: a default role and any number of others, each granting channel
   creation, channel federation, direct messages, attachments, XMPP room joining,
   seeing the instance's member list and the four federation grants. See [roles](#roles).
@@ -253,7 +255,7 @@ on it. A role grants, separately:
 | Create channels | Starting channels and mirrors |
 | Open their channels to federation | Turning federation on for a channel they manage |
 | Send direct messages | Writing to anyone, here or elsewhere; what others send still arrives |
-| Attach images and videos | Uploading files into messages |
+| Attach files | Uploading files into messages |
 | Join XMPP rooms on other servers | Browser and native-client joins, and speaking through a bridge |
 | See the list of everyone on this instance | Browsing all accounts when starting a direct message or changing a channel's access; without it a person is named by their handle. Administrators always see the list |
 | Send / receive federated messages | As described under [federation](docs/federation.md) |
@@ -305,9 +307,16 @@ random bits and is the only permission: a message carries the address, so anyone
 who can read the message — including members of other servers it federates or is
 bridged to — can fetch the file, and nobody else can find it. Responses cannot run
 as pages. Removing a message, or deleting its channel, deletes the files its author
-attached to it. Pictures and videos hosted anywhere else are shown as links, so
-reading a message never contacts a third party. An account may upload 200 files or
-500 MiB a day. If a reverse proxy sits in front, allow request bodies of 51 MiB.
+attached to it. A file that is not a PNG, JPEG, GIF or WebP picture or an MP4 or WebM
+video — judged by its bytes, not its name — is stored as it came, up to 50 MiB, and
+only ever served as a download (`application/octet-stream`), shown in the message as
+a named link. A picture opens large when clicked, and a video from the button in its
+corner; the arrows step through everything shown in the conversation. Pictures and videos hosted
+on other instances and external hosts preview automatically as well: the browser fetches
+them from the source host. Direct image/video URLs also preview; ordinary links stay links.
+Blocked senders' channel messages are hidden; media in their previous direct messages
+stays as links. An account may upload 200 files or 500 MiB a day. If a reverse proxy
+sits in front, allow request bodies of 51 MiB.
 
 Users open **Profile → Federated conversations** to subscribe to
 `#channel@instance.domain` or send a direct message to `user@instance.domain`.

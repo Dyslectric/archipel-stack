@@ -62,7 +62,11 @@ export function createApp(config: Config, store: Store) {
   app.use(
     helmet({
       contentSecurityPolicy: {
-        directives: { "upgrade-insecure-requests": secure ? [] : null },
+        directives: {
+          "upgrade-insecure-requests": secure ? [] : null,
+          "img-src": ["'self'", "data:", "http:", "https:"],
+          "media-src": ["'self'", "http:", "https:"],
+        },
       },
       strictTransportSecurity: secure ? undefined : false,
     }),
@@ -201,7 +205,9 @@ export function createApp(config: Config, store: Store) {
     const picture = store.avatarImage(String(req.params.id));
     res.type(picture.mime).send(Buffer.from(picture.image));
   });
-  app.use(express.json({ limit: "64kb" }));
+  const jsonBody = express.json({ limit: "64kb" });
+  // A JSON file is still an attachment: leave its bytes for the upload route's raw parser.
+  app.use((req, res, next) => req.path === "/api/attachments" ? next() : jsonBody(req, res, next));
   // Private bearer-authenticated adapter, before browser Origin/session checks.
   app.use("/internal/xmpp", xmpp.internalRouter());
   app.use(
@@ -275,11 +281,12 @@ export function createApp(config: Config, store: Store) {
     (req, res) => {
       const file = store.attachment(String(req.params.file));
       res.setHeader("Accept-Ranges", "bytes");
+      res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
       res.setHeader("Cache-Control", "private, max-age=31536000, immutable");
       res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
       res.setHeader(
         "Content-Disposition",
-        `inline; filename*=UTF-8''${encodeURIComponent(file.name)}`,
+        `${file.mime === "application/octet-stream" || req.query.download === "1" ? "attachment" : "inline"}; filename*=UTF-8''${encodeURIComponent(file.name)}`,
       );
       res.type(file.mime);
       let start = 0,

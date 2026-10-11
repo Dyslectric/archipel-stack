@@ -267,6 +267,8 @@ const paths: Record<string, string> = {
   "arrow-up": '<path d="M12 19V5M5 12l7-7 7 7"/>',
   paperclip:
     '<path d="m21 12-8.6 8.6a5 5 0 0 1-7-7L14 5a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.5a1.7 1.7 0 0 1-2.4-2.4l8-7.9"/>',
+  download: '<path d="M12 4v12M6 11l6 6 6-6M5 20h14"/>',
+  "external-link": '<path d="M14 4h6v6M20 4l-9 9M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/>',
   sidebar: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>',
   at: '<circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/>',
   bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
@@ -614,8 +616,8 @@ if (typeof document !== "undefined") {
   document.addEventListener("keydown", (e) => e.key === "Escape" && hide());
 }
 // A message as it is shown: Markdown, with emoji.
-export const richHtml = (body: string, emojis = state.emojis) =>
-  markdownHtml(body, emojis);
+export const richHtml = (body: string, emojis = state.emojis, sender?: string | null) =>
+  markdownHtml(body, emojis, undefined, !sender || !state.userBlocks.includes(sender));
 // A message made of nothing but a few emoji (typed, shortcode or custom) is shown larger.
 const bareEmoji =
   /^(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|[‍️\u{1f3fb}-\u{1f3ff}⃣]|\s)+$/u;

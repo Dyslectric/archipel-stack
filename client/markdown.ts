@@ -2,8 +2,8 @@ import { emojiParts, emojiData, markEmoji, type CustomEmoji } from "../src/emoji
 
 // Messages are stored as written and formatted when shown: Markdown's everyday subset, with
 // :emoji: shortcodes. Everything is escaped on the way out, and nothing but http(s), mailto and
-// xmpp addresses becomes a link. Attachments uploaded to this instance are shown in place;
-// pictures and videos anywhere else stay links, so reading a message never contacts another host.
+// xmpp addresses becomes a link. Pictures and videos, including those on other instances,
+// are shown in place. Other uploaded files are offered as downloads.
 const esc = (value: string) =>
   value.replace(
     /[&<>"']/g,
@@ -15,6 +15,7 @@ const esc = (value: string) =>
 interface Context {
   emojis: CustomEmoji[];
   origin: string;
+  previews: boolean;
 }
 
 function emoji(text: string, ctx: Context) {
@@ -38,12 +39,20 @@ function safeUrl(value: string) {
     return null;
   }
 }
-// A file uploaded here: /media/<43 characters>.<type>, on this instance's own address.
-const media = /^\/media\/[A-Za-z0-9_-]{43}\.(png|jpg|gif|webp|mp4|webm)$/;
-function localMedia(url: URL, ctx: Context) {
-  return !!ctx.origin && url.origin === ctx.origin && !url.search && !url.hash
+// Archipel uploads use this address on every instance, including generic file downloads.
+const media = /^\/media\/[A-Za-z0-9_-]{43}\.(png|jpg|gif|webp|mp4|webm|bin)$/;
+const expandIcon =
+  '<svg class="i" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15 4h5v5M20 4l-6 6M9 20H4v-5M4 20l6-6"/></svg>';
+const fileIcon =
+  '<svg class="i" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5M12 11v6M9 14l3 3 3-3"/></svg>';
+function uploadedMedia(url: URL) {
+  return !url.search && !url.hash
     ? media.exec(url.pathname)?.[1]
     : undefined;
+}
+function previewType(url: URL) {
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return;
+  return /\.(png|jpe?g|gif|webp|avif|bmp|svg|mp4|webm|ogv|mov|m4v)$/i.exec(url.pathname)?.[1].toLowerCase();
 }
 function link(url: URL, label: string, ctx: Context) {
   // A link to somewhere in this app opens here; anything else opens beside it.
@@ -53,14 +62,17 @@ function link(url: URL, label: string, ctx: Context) {
 function image(alt: string, address: string, ctx: Context) {
   const url = safeUrl(address);
   if (!url) return esc(`![${alt}](${address})`);
-  const type = localMedia(url, ctx),
+  if (!ctx.previews || !["http:", "https:"].includes(url.protocol) || url.username || url.password)
+    return link(url, esc(alt || address), ctx);
+  const type = uploadedMedia(url) || previewType(url),
     href = esc(url.href),
     name = esc(alt);
-  if (type === "mp4" || type === "webm")
-    return `<video class="attachment" controls preload="metadata" src="${href}" title="${name}"></video>`;
-  if (type)
-    return `<a class="attachment" href="${href}" target="_blank" rel="noopener noreferrer"><img src="${href}" alt="${name}" title="${name}" loading="lazy" decoding="async"></a>`;
-  return link(url, esc(alt || address), ctx);
+  if (type && ["mp4", "webm", "ogv", "mov", "m4v"].includes(type))
+    return `<span class="attachment video"><video controls playsinline preload="metadata" src="${href}" title="${name}"></video><button type="button" class="icon-button" data-expand aria-label="Expand video" title="Expand">${expandIcon}</button></span>`;
+  // Anything that is not a picture or video is a file to download, under the name it came with.
+  if (type === "bin")
+    return `<a class="attachment file" href="${href}" download="${name}" title="Download ${name}">${fileIcon}<span>${name || "File"}</span></a>`;
+  return `<a class="attachment" href="${href}" target="_blank" rel="noopener noreferrer" aria-haspopup="dialog"><img src="${href}" alt="${name}" title="${name}" loading="lazy" decoding="async" referrerpolicy="no-referrer"></a>`;
 }
 
 // Leftmost first, and where two start together the earlier alternative wins.
@@ -68,7 +80,7 @@ const token = new RegExp(
   [
     /\\([\\`*_~|[\]()!#>+\-.:])/, // 1: an escaped character
     /(`+)([^`]|[^`][\s\S]*?[^`])\2(?!`)/, // 2,3: code
-    /!\[([^\]\n]*)\]\(([^()\s]+)\)/, // 4,5: image or video
+    /!\[([^\]\n]*)\]\(([^()\s]+)\)/, // 4,5: attached file
     /\[([^[\]\n]+)\]\(([^()\s]+)\)/, // 6,7: link
     /<((?:https?|mailto|xmpp):[^\s<>]+)>/, // 8: address in angle brackets
     /\b(https?:\/\/[^\s<>]+)/, // 9: bare address
@@ -113,7 +125,7 @@ function inline(text: string, ctx: Context, depth = 0): string {
         address = address.slice(0, -1);
       const url = safeUrl(address);
       end -= m[9].length - address.length;
-      html += url ? link(url, esc(address), ctx) : esc(address);
+      html += url ? ctx.previews && previewType(url) ? image("", address, ctx) : link(url, esc(address), ctx) : esc(address);
     } else if (m[10] !== undefined) html += emoji(m[10], ctx);
     else if (m[11] !== undefined) html += wrap("strong", m[11]);
     else if (m[12] !== undefined) html += wrap("strong", m[12]);
@@ -214,8 +226,9 @@ export function markdownHtml(
   body: string,
   emojis: CustomEmoji[] = [],
   origin = globalThis.location?.origin ?? "",
+  previews = true,
 ) {
-  return blocks(body.replace(/\r\n?/g, "\n").split("\n"), { emojis, origin }, 0);
+  return blocks(body.replace(/\r\n?/g, "\n").split("\n"), { emojis, origin, previews }, 0);
 }
 // A message as a quotation: each of its lines behind a >, as written.
 export function markdownQuote(body: string) {

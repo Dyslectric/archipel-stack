@@ -38,6 +38,7 @@ import { adoptLayout, renderSidebar, toggleSidebar } from "./sidebar.js";
 import { adoptPrefs } from "./prefs.js";
 import { disablePush, syncPush } from "./notify.js";
 import "./attach.js";
+import "./viewer.js";
 import { showInbox, tickInbox } from "./inbox.js";
 import "./people.js";
 import {

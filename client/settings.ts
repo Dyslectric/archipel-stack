@@ -27,6 +27,7 @@ import {
   when,
   refreshTimes,
   roleLabel,
+  richHtml,
   type Channel,
   type Conversation,
   type CustomEmoji,
@@ -88,7 +89,7 @@ const rolePermissions = [
   ["create_channels", "Create channels"],
   ["federate_channels", "Open their channels to federation"],
   ["direct_messages", "Send direct messages"],
-  ["attachments", "Attach images and videos"],
+  ["attachments", "Attach files"],
   ["xmpp_rooms", "Join XMPP rooms on other servers"],
   ["list_members", "See the list of everyone on this instance"],
   ["federation_send", "Send federated messages"],
@@ -183,7 +184,7 @@ async function drawDirectMessages(root: ParentNode = document) {
     ? messages
         .map(
           (m) =>
-            `<li class="direct-message${m.queued ? ` queued${m.failed ? " failed" : ""}` : ""}"><div class="meta small"><span class="pill ${m.direction === "incoming" ? "new" : ""}">${m.direction === "incoming" ? "From" : "To"}</span> <span class="author">${esc(m.peer)}</span> · ${when(m.created_at)}${m.queued ? ` · <span role="status" class="${m.failed ? "bad-text" : ""}" title="${esc(m.failed || "Waiting for the other server")}">${m.failed ? "Not delivered" : "Sending…"}</span>` : ""}</div><div class="message-body">${emojiHtml(m.body, m.emojis)}</div></li>`,
+            `<li class="direct-message${m.queued ? ` queued${m.failed ? " failed" : ""}` : ""}"><div class="meta small"><span class="pill ${m.direction === "incoming" ? "new" : ""}">${m.direction === "incoming" ? "From" : "To"}</span> <span class="author">${esc(m.peer)}</span> · ${when(m.created_at)}${m.queued ? ` · <span role="status" class="${m.failed ? "bad-text" : ""}" title="${esc(m.failed || "Waiting for the other server")}">${m.failed ? "Not delivered" : "Sending…"}</span>` : ""}</div><div class="message-body markdown">${richHtml(m.body, m.emojis, m.direction === "incoming" ? m.peer : null)}</div></li>`,
         )
         .join("")
     : '<li class="muted">No federated direct messages.</li>';

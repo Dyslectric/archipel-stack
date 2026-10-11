@@ -1,5 +1,51 @@
 import { test, expect, type Locator, type Page } from "@playwright/test";
+import { readFile } from "node:fs/promises";
 
+const homePort = Number(process.env.ARCHIPEL_E2E_PORT || 8790);
+const homeOrigin = `http://127.0.0.1:${homePort}`;
+const peerOrigin = `http://127.0.0.1:${homePort + 1}`;
+const attachmentPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=", "base64");
+
+// A real, browser-playable video so preview and seek checks exercise decoding, not just markup.
+async function attachmentVideo(page: Page) {
+  const bytes = await page.evaluate(async () => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 320; canvas.height = 180;
+    const context = canvas.getContext("2d")!, stream = canvas.captureStream(10);
+    const recorder = new MediaRecorder(stream, { mimeType: "video/webm;codecs=vp8" });
+    const chunks: Blob[] = [];
+    recorder.ondataavailable = event => chunks.push(event.data);
+    const stopped = new Promise<void>(done => recorder.onstop = () => done());
+    let frame = 0;
+    const draw = () => {
+      context.fillStyle = frame++ % 2 ? "#2f5fb3" : "#1f9d74";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+    };
+    draw(); recorder.start();
+    const timer = setInterval(draw, 100);
+    await new Promise(done => setTimeout(done, 1200));
+    recorder.stop(); await stopped;
+    clearInterval(timer); stream.getTracks().forEach(track => track.stop());
+    return Array.from(new Uint8Array(await new Blob(chunks).arrayBuffer()));
+  });
+  return Buffer.from(bytes);
+}
+
+async function uploadAttachment(page: Page, name: string, mimeType: string, buffer: Buffer) {
+  const session = await (await page.request.get("/api/session")).json();
+  const response = await page.request.post("/api/attachments", {
+    headers: { "Content-Type": mimeType, "X-Filename": encodeURIComponent(name), "X-CSRF-Token": session.csrf, Origin: new URL(page.url()).origin },
+    data: buffer,
+  });
+  expect(response.status()).toBe(201);
+  return await response.json() as { url: string; name: string };
+}
+
+async function pickAttachments(page: Page, files: { name: string; mimeType: string; buffer: Buffer }[]) {
+  const chosen = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "Attach a file", exact: true }).click();
+  await (await chosen).setFiles(files);
+}
 async function login(page: Page, name = "alice") {
   await page.goto("/");
   await page.locator(`[data-persona=${name}]`).click();
@@ -782,12 +828,12 @@ test("two browser instances federate a channel and a direct message with admin-c
   test.setTimeout(60000);
   await login(page);
   const peerContext = await browser.newContext({
-      baseURL: "http://127.0.0.1:8791",
+      baseURL: peerOrigin,
     }),
     bob = await peerContext.newPage();
   await login(bob, "bob");
   const adminContext = await browser.newContext({
-      baseURL: "http://127.0.0.1:8791",
+      baseURL: peerOrigin,
     }),
     peerAdmin = await adminContext.newPage();
   await login(peerAdmin);
@@ -821,7 +867,7 @@ test("two browser instances federate a channel and a direct message with admin-c
   await openFederated(bob);
   await bob
     .getByLabel("Channel address", { exact: true })
-    .fill("#federated-lounge@127.0.0.1:8790");
+    .fill(`#federated-lounge@127.0.0.1:${homePort}`);
   await bob
     .getByRole("button", { name: "Subscribe to channel", exact: true })
     .click();
@@ -841,7 +887,7 @@ test("two browser instances federate a channel and a direct message with admin-c
   await expect.poll(() => remotePicture.evaluate(img => (img as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
   // The follower is listed by handle and instance, not by the address of their actor.
   await channelSettings(page, "Federation");
-  await expect(page.locator(".remote-followers li")).toContainText("@bob@127.0.0.1:8791");
+  await expect(page.locator(".remote-followers li")).toContainText(`@bob@127.0.0.1:${homePort + 1}`);
   await page.goto("/#/settings/personal/profile");
   await page.getByRole("button", { name: "Remove picture", exact: true }).click();
   await expect(remotePicture).toHaveCount(0);
@@ -855,6 +901,38 @@ test("two browser instances federate a channel and a direct message with admin-c
   await expect(
     page.locator(".message-body").filter({ hasText: "Remote greeting." }),
   ).toBeVisible();
+  // Uploaded bytes decode across real instance origins in both directions, including videos.
+  const videoBytes = await attachmentVideo(page);
+  const homeImage = await uploadAttachment(page, "home.png", "image/png", attachmentPng);
+  const homeVideo = await uploadAttachment(page, "home.webm", "video/webm", videoBytes);
+  const homeFile = await uploadAttachment(page, "home.json", "application/json", Buffer.from('{"from":"home"}'));
+  const mediaMessage = async (sender: Page, recipient: Page, label: string, image: { name: string; url: string }, video: { name: string; url: string }, file: { name: string; url: string }) => {
+    await sender.getByRole("textbox", { name: "Message", exact: true }).fill(`${label} ![${image.name}](${image.url})\n![${video.name}](${video.url})\n![${file.name}](${file.url})`);
+    await sender.getByRole("button", { name: "Send message" }).click();
+    const body = recipient.locator(".message-body").filter({ hasText: label });
+    await expect(body).toBeVisible();
+    await expect.poll(() => body.locator(".attachment img").evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(1);
+    await expect.poll(() => body.locator(".attachment video").evaluate((el: HTMLVideoElement) => el.readyState)).toBeGreaterThanOrEqual(1);
+    await expect(body.locator(".attachment.file")).toHaveText(file.name);
+    const downloadEvent = recipient.waitForEvent("download");
+    await body.locator(".attachment.file").click();
+    expect((await downloadEvent).suggestedFilename()).toBe(file.name);
+    await body.locator(".attachment img").click();
+    const viewer = recipient.locator("dialog.viewer");
+    await expect(viewer.locator(".viewer-name")).toHaveText(image.name);
+    const saveImage = recipient.waitForEvent("download");
+    await viewer.getByRole("link", { name: "Download", exact: true }).click();
+    expect((await saveImage).suggestedFilename()).toBe(image.name);
+    await viewer.getByRole("button", { name: "Next", exact: true }).click();
+    await expect(viewer.locator(".viewer-name")).toHaveText(video.name);
+    await expect.poll(() => viewer.locator("video").evaluate((el: HTMLVideoElement) => el.readyState)).toBeGreaterThanOrEqual(1);
+    await recipient.keyboard.press("Escape");
+  };
+  await mediaMessage(page, bob, "Home attachments", homeImage, homeVideo, homeFile);
+  const peerImage = await uploadAttachment(bob, "peer.png", "image/png", attachmentPng);
+  const peerVideo = await uploadAttachment(bob, "peer.webm", "video/webm", videoBytes);
+  const peerFile = await uploadAttachment(bob, "peer.json", "application/json", Buffer.from('{"from":"peer"}'));
+  await mediaMessage(bob, page, "Peer attachments", peerImage, peerVideo, peerFile);
   await bob.locator("[data-nav=settings]").click();
   await section(bob, "Appearance");
   for (const name of ["Fusion Compact", "Fusion Cozy"]) {
@@ -869,10 +947,10 @@ test("two browser instances federate a channel and a direct message with admin-c
   await openFederated(bob, "Messages to other servers");
   await bob
     .getByLabel("Remote user address", { exact: true })
-    .fill("alice@127.0.0.1:8790");
+    .fill(`alice@127.0.0.1:${homePort}`);
   await bob
     .getByRole("textbox", { name: "Direct message", exact: true })
-    .fill("A federated private hello.");
+    .fill(`A federated private hello. ![${peerImage.name}](${peerImage.url})\n![${peerVideo.name}](${peerVideo.url})`);
   await bob
     .getByRole("button", { name: "Send federated message", exact: true })
     .click();
@@ -883,6 +961,8 @@ test("two browser instances federate a channel and a direct message with admin-c
   await expect(page.locator("#federated-direct-list")).toContainText(
     "A federated private hello.",
   );
+  await expect.poll(() => page.locator("#federated-direct-list .attachment img").evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(1);
+  await expect.poll(() => page.locator("#federated-direct-list .attachment video").evaluate((el: HTMLVideoElement) => el.readyState)).toBeGreaterThanOrEqual(1);
   await openAdmin(peerAdmin);
   await section(peerAdmin, "Roles");
   const federated = peerAdmin.getByRole("form", { name: "Role Federated", exact: true });
@@ -905,7 +985,7 @@ test("users adopt a remote instance emoji and keep a local copy under their chos
   browser,
 }) => {
   const context = await browser.newContext({
-      baseURL: "http://127.0.0.1:8791",
+      baseURL: peerOrigin,
     }),
     peer = await context.newPage();
   await login(peer);
@@ -922,7 +1002,7 @@ test("users adopt a remote instance emoji and keep a local copy under their chos
   await openPersonalEmoji(page);
   await page
     .getByLabel("Remote instance URL", { exact: true })
-    .fill("http://127.0.0.1:8791");
+    .fill(peerOrigin);
   await page
     .getByRole("button", { name: "Load instance emoji", exact: true })
     .click();
@@ -960,7 +1040,7 @@ test("profile pictures preview, upload, replace and remove across messages and d
   // Use a member account so this test does not share the admin suite's request budget.
   await login(page, "charlie");
   const session = await (await page.request.get("/api/session")).json();
-  const headers = { Origin: "http://127.0.0.1:8790", "X-CSRF-Token": session.csrf };
+  const headers = { Origin: homeOrigin, "X-CSRF-Token": session.csrf };
   const created = await page.request.post("/api/channels", {
     headers,
     data: { name: "profile-pictures", description: "Avatar test", mode: "timeline", visibility: "public", admission: "open" },
@@ -1022,7 +1102,7 @@ test("a name menu blocks and unblocks a user in channel messages and direct conv
   await login(page, "alice");
   const aliceSession = await (await page.request.get("/api/session")).json();
   const create = await page.request.post("/api/channels", {
-    headers: { Origin: "http://127.0.0.1:8790", "X-CSRF-Token": aliceSession.csrf },
+    headers: { Origin: homeOrigin, "X-CSRF-Token": aliceSession.csrf },
     data: { name: "personal-blocks", description: "Block test", mode: "timeline", visibility: "public", admission: "open" },
   });
   expect(create.ok()).toBeTruthy();
@@ -1033,7 +1113,7 @@ test("a name menu blocks and unblocks a user in channel messages and direct conv
   try {
     await login(bob, "bob");
     const bobSession = await (await bob.request.get("/api/session")).json();
-    const headers = { Origin: "http://127.0.0.1:8790", "X-CSRF-Token": bobSession.csrf };
+    const headers = { Origin: homeOrigin, "X-CSRF-Token": bobSession.csrf };
     await bob.request.post(`/api/channels/${channel.id}/join`, { headers });
     await bob.goto(`/#/c/${channel.id}`);
     await bob.locator(".message .name-button").filter({ hasText: "alice" }).first().click();
@@ -1041,7 +1121,7 @@ test("a name menu blocks and unblocks a user in channel messages and direct conv
     await expect(bob.locator(".message-body")).toContainText("hidden because you blocked this user");
     await expect(page.locator(".message-body")).toContainText("Visible before blocking");
     const sendBlocked = await page.request.post("/api/dms", {
-      headers: { Origin: "http://127.0.0.1:8790", "X-CSRF-Token": aliceSession.csrf },
+      headers: { Origin: homeOrigin, "X-CSRF-Token": aliceSession.csrf },
       data: { to: bobSession.user.actor_url, body: "Cannot get through" },
     });
     expect(sendBlocked.status()).toBe(403);
@@ -1175,7 +1255,7 @@ test("XMPP app passwords are shown once, retained per account and revocable", as
 test("external XMPP room browser flow joins, renders safe content, posts and follows room roles", async ({ page, browser }, testInfo) => {
   await login(page);
   const session = await (await page.request.get("/api/session")).json();
-  const headers = { "X-CSRF-Token": session.csrf, Origin: "http://127.0.0.1:8790" };
+  const headers = { "X-CSRF-Token": session.csrf, Origin: homeOrigin };
   expect((await page.request.patch("/api/admin/federation", { headers, data: { enabled: true } })).ok()).toBeTruthy();
   const role = await (await page.request.post("/api/admin/roles", { headers, data: {
     name: "Rooms", federation_receive: true, federation_subscribe: true, federation_send: true, federation_post: true,
@@ -1233,6 +1313,179 @@ test("external XMPP room browser flow joins, renders safe content, posts and fol
   await expect(page.locator("#channel-heading")).toContainText("left");
 });
 
+test("files upload, download and expand on desktop and mobile while unfinished uploads cannot be sent", async ({ page }, testInfo) => {
+  await login(page);
+  await createChannel(page, "file-previews");
+  const box = page.getByRole("textbox", { name: "Message", exact: true });
+  await box.fill("With files: ");
+  let release!: () => void;
+  const waiting = new Promise<void>(done => release = done);
+  await page.route("**/api/attachments", async route => { await waiting; await route.continue(); });
+  const json = Buffer.from('{"a":"file, not an API request"}\n');
+  await pickAttachments(page, [
+    { name: "picture.png", mimeType: "image/png", buffer: attachmentPng },
+    { name: "notes.json", mimeType: "application/json", buffer: json },
+  ]);
+  await expect(box).toHaveAttribute("aria-busy", "true");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.locator("#toast")).toContainText("Wait for your files");
+  await expect(page.locator(".message-body")).toHaveCount(0);
+  await box.press("Enter");
+  await expect(page.locator(".message-body")).toHaveCount(0);
+  release();
+  await expect(box).not.toHaveAttribute("aria-busy", "true");
+  await expect(box).toHaveValue(/!\[notes\.json\]\(.*\.bin\)$/);
+  await page.unroute("**/api/attachments");
+  await page.getByRole("button", { name: "Send message" }).click();
+  const picture = page.locator('.message-body .attachment img[alt="picture.png"]');
+  await expect.poll(() => picture.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(1);
+  const downloadEvent = page.waitForEvent("download");
+  await page.locator(".attachment.file").click();
+  const download = await downloadEvent;
+  expect(download.suggestedFilename()).toBe("notes.json");
+  expect(await readFile((await download.path())!)).toEqual(json);
+  await picture.click();
+  const viewer = page.getByRole("dialog", { name: "Attachment", exact: true });
+  await expect(viewer).toBeVisible();
+  await expect(viewer.locator(".viewer-name")).toHaveText("picture.png");
+  await expect(viewer.getByRole("button", { name: "Next", exact: true })).toBeHidden();
+  const saveEvent = page.waitForEvent("download");
+  await viewer.getByRole("link", { name: "Download", exact: true }).click();
+  expect((await saveEvent).suggestedFilename()).toBe("picture.png");
+  await page.keyboard.press("Escape");
+  await expect(viewer).toHaveCount(0);
+  await expect(picture.locator("..")).toBeFocused();
+
+  // Clipboard images use the same upload path, and keyboard navigation skips download links.
+  await box.evaluate((area, png) => {
+    const data = new DataTransfer();
+    data.items.add(new File([new Uint8Array(png)], "pasted.png", { type: "image/png" }));
+    area.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: data }));
+  }, Array.from(attachmentPng));
+  await expect(box).toHaveValue(/!\[pasted\.png\]\(.*\.png\)$/);
+  await page.getByRole("button", { name: "Send message" }).click();
+  await picture.click();
+  await expect(viewer.locator(".viewer-count")).toHaveText("1 of 2");
+  await page.keyboard.press("ArrowRight");
+  await expect(viewer.locator(".viewer-name")).toHaveText("pasted.png");
+  await page.keyboard.press("ArrowLeft");
+  await expect(viewer.locator(".viewer-name")).toHaveText("picture.png");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(viewer).toBeVisible();
+  const viewerBounds = await viewer.boundingBox();
+  expect(viewerBounds!.width).toBe(390);
+  expect(viewerBounds!.height).toBe(844);
+  expect(await viewer.evaluate(el => el.scrollWidth <= innerWidth)).toBe(true);
+  await viewer.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(viewer.locator(".viewer-name")).toHaveText("pasted.png");
+  await page.screenshot({ path: testInfo.outputPath("viewer-mobile.png") });
+  await viewer.locator(".viewer-stage").click({ position: { x: 20, y: 20 } });
+  await expect(viewer).toHaveCount(0);
+
+  await page.setViewportSize({ width: 1400, height: 850 });
+  const videoBytes = await attachmentVideo(page);
+  await pickAttachments(page, [{ name: "clip.webm", mimeType: "video/webm", buffer: videoBytes }]);
+  await expect(box).toHaveValue(/!\[clip\.webm\]\(.*\.webm\)$/);
+  await page.getByRole("button", { name: "Send message" }).click();
+  const inline = page.locator(".message-body .attachment video");
+  await expect.poll(() => inline.evaluate((video: HTMLVideoElement) => video.readyState)).toBeGreaterThanOrEqual(1);
+  await inline.evaluate((video: HTMLVideoElement) => video.play());
+  await expect.poll(() => inline.evaluate((video: HTMLVideoElement) => video.currentTime)).toBeGreaterThan(0.2);
+  const position = await inline.evaluate((video: HTMLVideoElement) => { video.pause(); video.muted = true; return video.currentTime; });
+  await page.getByRole("button", { name: "Expand video", exact: true }).click();
+  const large = viewer.locator("video");
+  await expect.poll(() => large.evaluate((video: HTMLVideoElement) => video.currentTime)).toBeCloseTo(position, 1);
+  expect((await large.boundingBox())!.width).toBeGreaterThan((await inline.boundingBox())!.width);
+  expect(await large.evaluate((video: HTMLVideoElement) => video.paused && video.muted)).toBe(true);
+  await large.focus();
+  await large.press("ArrowLeft");
+  await expect(viewer.locator(".viewer-name")).toHaveText("clip.webm");
+  await large.evaluate((video: HTMLVideoElement) => video.currentTime = 0.6);
+  await page.screenshot({ path: testInfo.outputPath("viewer-desktop.png") });
+  await viewer.getByRole("button", { name: "Close", exact: true }).click();
+  await expect.poll(() => inline.evaluate((video: HTMLVideoElement) => video.currentTime)).toBeCloseTo(0.6, 1);
+  await expect(page.getByRole("button", { name: "Expand video", exact: true })).toBeFocused();
+
+  // Failed and empty uploads leave no placeholder or stuck sending restriction.
+  await page.route("**/api/attachments", route => route.fulfill({ status: 413, json: { error: "The file is too large." } }));
+  await pickAttachments(page, [{ name: "rejected.txt", mimeType: "text/plain", buffer: Buffer.from("x") }]);
+  await expect(page.locator("#toast")).toContainText("The file is too large.");
+  await expect(box).toHaveValue("");
+  await expect(box).not.toHaveAttribute("aria-busy", "true");
+  await page.unroute("**/api/attachments");
+  await pickAttachments(page, [{ name: "empty.txt", mimeType: "text/plain", buffer: Buffer.alloc(0) }]);
+  await expect(page.locator("#toast")).toContainText("the file is empty");
+  await expect(box).toHaveValue("");
+});
+
+test("external images and videos preview automatically and blocked senders do not load media", async ({ page, browser }) => {
+  await login(page);
+  await createChannel(page, "external-previews");
+  const channelId = new URL(page.url()).hash.split("/")[2];
+  const videoBytes = await attachmentVideo(page);
+  const routeMedia = async (target: Page, seen: string[]) => {
+    await target.route("https://media.example/**", route => {
+      seen.push(route.request().url());
+      return route.fulfill({ contentType: route.request().url().includes(".webm") ? "video/webm" : "image/png", body: route.request().url().includes(".webm") ? videoBytes : attachmentPng });
+    });
+  };
+  const requests: string[] = [];
+  await routeMedia(page, requests);
+  await page.getByRole("textbox", { name: "Message", exact: true }).fill("External preview ![outside](https://media.example/render?id=1)\nhttps://media.example/picture.png?size=large\nhttps://media.example/clip.webm?token=one");
+  await page.getByRole("button", { name: "Send message" }).click();
+  const images = page.locator(".message-body .attachment img"), video = page.locator(".message-body .attachment video");
+  await expect(images).toHaveCount(2);
+  for (const image of await images.all())
+    await expect.poll(() => image.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(1);
+  await expect.poll(() => video.evaluate((el: HTMLVideoElement) => el.readyState)).toBeGreaterThanOrEqual(1);
+  expect(requests.some(url => url.includes("render?id=1"))).toBe(true);
+  await images.first().click();
+  const viewer = page.locator("dialog.viewer");
+  await expect(viewer.locator(".viewer-count")).toHaveText("1 of 3");
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ArrowRight");
+  await expect.poll(() => viewer.locator("video").evaluate((el: HTMLVideoElement) => el.readyState)).toBeGreaterThanOrEqual(1);
+  await page.keyboard.press("Escape");
+
+  const context = await browser.newContext({ baseURL: homeOrigin }), bob = await context.newPage();
+  let unblock: (() => Promise<void>) | undefined;
+  try {
+    const blockedRequests: string[] = [];
+    await routeMedia(bob, blockedRequests);
+    await login(bob, "bob");
+    const aliceSession = await (await page.request.get("/api/session")).json();
+    const session = await (await bob.request.get("/api/session")).json();
+    const headers = { Origin: homeOrigin, "X-CSRF-Token": session.csrf };
+    expect((await bob.request.post(`/api/channels/${channelId}/join`, { headers, data: {} })).ok()).toBeTruthy();
+    expect((await page.request.post("/api/dms", {
+      headers: { Origin: homeOrigin, "X-CSRF-Token": aliceSession.csrf },
+      data: { to: session.user.actor_url, body: "External direct ![outside](https://media.example/render?id=1)\n![clip](https://media.example/clip.webm?token=one)" },
+    })).ok()).toBeTruthy();
+    const block = async (blocked: boolean) => {
+      expect((await bob.request.post("/api/user-blocks", { headers, data: { peer: aliceSession.user.actor_url, blocked } })).ok()).toBeTruthy();
+    };
+    unblock = () => block(false);
+    await block(true);
+    await bob.reload();
+    await bob.goto(`/#/c/${channelId}`);
+    await expect(bob.locator(".message-body")).toContainText("hidden because you blocked");
+    await expect(bob.locator(".message-body .attachment")).toHaveCount(0);
+    expect(blockedRequests).toEqual([]);
+    // Previously received direct messages stay readable, but their blocked sender's media stays a link.
+    await bob.goto(`/#/dm/${aliceSession.user.id}`);
+    await expect(bob.locator(".message-body").filter({ hasText: "External direct" })).toBeVisible();
+    await expect(bob.locator(".message-body .attachment")).toHaveCount(0);
+    expect(blockedRequests).toEqual([]);
+    await block(false);
+    await bob.reload();
+    await expect.poll(() => bob.locator('.attachment img[alt="outside"]').evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(1);
+    await expect.poll(() => bob.locator(".attachment video").evaluate((el: HTMLVideoElement) => el.readyState)).toBeGreaterThanOrEqual(1);
+  } finally {
+    await unblock?.();
+    await context.close();
+  }
+});
+
 test("messages show Markdown and attachments, threads fold whole, and the side panels resize and hide", async ({ page }) => {
   await page.setViewportSize({ width: 1400, height: 850 });
   await login(page);
@@ -1246,7 +1499,7 @@ test("messages show Markdown and attachments, threads fold whole, and the side p
   await expect(body.locator("img")).toHaveCount(0);
   // A dropped picture is uploaded and written into the message where the cursor is.
   const box = page.getByRole("textbox", { name: "Message", exact: true });
-  await expect(page.getByRole("button", { name: "Attach an image or video" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Attach a file" })).toBeVisible();
   await box.evaluate(async (area) => {
     const canvas = document.createElement("canvas");
     canvas.width = canvas.height = 32;
@@ -1256,7 +1509,7 @@ test("messages show Markdown and attachments, threads fold whole, and the side p
     data.items.add(new File([blob], "square.png", { type: "image/png" }));
     area.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: data }));
   });
-  await expect(box).toHaveValue(/^!\[square\.png\]\(http:\/\/127\.0\.0\.1:8790\/media\/[\w-]{43}\.png\)$/);
+  await expect(box).toHaveValue(/^!\[square\.png\]\(http:\/\/127\.0\.0\.1:\d+\/media\/[\w-]{43}\.png\)$/);
   await page.getByRole("button", { name: "Send message" }).click();
   const picture = page.locator(".message-body a.attachment img");
   await expect(picture).toBeVisible();
