@@ -108,6 +108,9 @@ function paint(room: XmppRoom) {
   area.dataset.permission = "post";
   area.innerHTML = `<div class="composer-wrap"><form class="composer" id="xmpp-composer"><textarea name="body" maxlength="8000" rows="2" aria-label="Message" placeholder="Message ${esc(room.room)}" required></textarea><p class="form-error" role="alert"></p><div class="composer-bar">${attachButton('id="xmpp-attach"')}<span class="grow"></span><span class="muted small composer-hint-keys"><kbd>Enter</kbd> to send · <kbd>Shift</kbd> + <kbd>Enter</kbd> for a new line · Markdown</span><button type="submit" aria-label="Send message">${icon("send")}<span>Send</span></button></div></form></div>`;
   const form = $<HTMLFormElement>("#xmpp-composer"), body = $<HTMLTextAreaElement>("textarea", form);
+  $("button[type=submit]", form).addEventListener("pointerdown", e => {
+    if (document.activeElement === body) e.preventDefault();
+  });
   form.querySelector("#xmpp-attach")?.addEventListener("click", () => pickFiles(body));
   onSubmit(form, async data => {
     const id = selected, token = generation;

@@ -1368,7 +1368,6 @@ function renderComposer(keepDraft = true) {
   if (!keepDraft) threadTitleDraft = "";
   else if (titleField) threadTitleDraft = titleField.value;
   const draft = value("#message-body"),
-    title = threadTitleDraft,
     hadFocus = document.activeElement?.id === "message-body";
   let topic = value("#compose-topic");
   if (reply?.topic_id) topic = topicOf(reply.topic_id)?.title || topic;
@@ -1381,19 +1380,20 @@ function renderComposer(keepDraft = true) {
             ?.topic_id ||
           null,
       )?.title || "";
-  const place = isFusion()
+  const place = () => isFusion()
     ? reply ? "Write a reply" : c.mode === "threaded" ? "Start the thread" : "Write a message"
     : reply ? `Reply to ${reply.display_name}…` : c.mode === "threaded"
       ? "Start the thread…"
       : `Message ${c.dm ? "" : "#"}${c.name}…`;
   let thread = reply;
   while (thread?.parent_id) thread = messages.find((m) => m.id === thread!.parent_id) || null;
+  const threadInput = () => `<input id="thread-title" class="thread-input" maxlength="160" placeholder="New thread title${c.optional_titles ? " (optional)" : ""}" aria-label="Thread title" ${c.optional_titles ? "" : "required"} value="${esc(threadTitleDraft)}">`;
   area.innerHTML = `<div class="composer-wrap picker-host"><form id="composer" class="composer">
     <span class="fusion-compose-label">To <strong>${esc(c.name)}</strong></span>
     ${c.mode === "topical" ? `<div class="compose-to">${channelIcon(c)}<span class="compose-channel">${esc(c.name)}</span>${icon("chevron-right", "sep")}<input id="compose-topic" list="topic-options" maxlength="100" placeholder="Topic" aria-label="Topic" autocomplete="off" required value="${esc(topic)}"><datalist id="topic-options"></datalist></div>` : ""}
-    ${c.mode === "threaded" && !reply ? `<input id="thread-title" class="thread-input" maxlength="160" placeholder="New thread title${c.optional_titles ? " (optional)" : ""}" aria-label="Thread title" ${c.optional_titles ? "" : "required"} value="${esc(title)}">` : ""}
+    ${c.mode === "threaded" && !reply ? threadInput() : ""}
     ${reply ? `<div class="reply-banner small">${icon("reply")}<span>Replying to <strong>${esc(reply.display_name)}</strong>${thread?.title ? `<span class="reply-thread"> in <strong>${emojiHtml(thread.title, thread.emojis || [])}</strong></span>` : ""}</span><button type="button" id="cancel-reply" class="icon-button" aria-label="Cancel reply">${icon("x")}</button></div>` : ""}
-    <textarea id="message-body" maxlength="8000" rows="1" placeholder="${esc(place)}" aria-label="Message" required>${esc(draft)}</textarea>
+    <textarea id="message-body" maxlength="8000" rows="1" placeholder="${esc(place())}" aria-label="Message" required>${esc(draft)}</textarea>
     <div class="composer-bar"><button type="button" id="choose-emoji" class="icon-button" aria-label="Choose emoji" title="Emoji" aria-expanded="false">${icon("smile")}</button>${attachButton('id="attach-file"')}<span class="muted small composer-hint-keys" title="Shift + Enter for a new line"><kbd>Enter</kbd> to send</span><button id="send-message" type="submit" aria-label="Send message">${icon("send")}<span>${c.mode === "threaded" && !reply ? "Post thread" : "Send"}</span></button></div></form></div>`;
   const body = $<HTMLTextAreaElement>("#message-body");
   const grow = () => {
@@ -1402,6 +1402,23 @@ function renderComposer(keepDraft = true) {
   };
   body.addEventListener("input", grow);
   grow();
+  // Keep the keyboard attached to the same input throughout a send, including replies.
+  const sent = () => {
+    closePicker();
+    body.value = "";
+    const titleInput = document.querySelector<HTMLInputElement>("#thread-title");
+    if (titleInput) { titleInput.value = ""; threadTitleDraft = ""; }
+    document.querySelector("#composer .reply-banner")?.remove();
+    if (threaded() && !titleInput) body.insertAdjacentHTML("beforebegin", threadInput());
+    updateTopicOptions();
+    body.placeholder = place();
+    $("#send-message span").textContent = threaded() ? "Post thread" : "Send";
+    grow();
+    body.focus({ preventScroll: true });
+  };
+  $("#send-message").addEventListener("pointerdown", e => {
+    if (document.activeElement === body) e.preventDefault();
+  });
   suggestShortcodes(body);
   updateTopicOptions();
   if (hadFocus) body.focus();
@@ -1436,12 +1453,10 @@ function renderComposer(keepDraft = true) {
         if (c.dm) {
           await api("/dms", "POST", { to: c.dm.peer, body: body.value });
           if (generation !== token) return;
-          body.value = "";
+          sent();
           await refreshCurrent();
           if (generation !== token) return;
           render({ bottom: true });
-          renderComposer();
-          $("#message-body").focus();
           return;
         }
         let topicId: string | undefined;
@@ -1471,19 +1486,16 @@ function renderComposer(keepDraft = true) {
           },
         );
         if (generation !== token) return;
-        body.value = "";
-        if (titleInput) titleInput.value = "";
         // A sent reply leaves the Fusion composer free to start a thread again.
         if (reply && threaded() && isFusion()) selectedMessage = null;
         reply = null;
+        sent();
         if (message.queued) pending = [...pending, message];
         else merge(message);
         if (narrow && topicId && narrow !== topicId)
           return go(`#/c/${c.id}/t/${topicId}`);
         renderSidebar();
         render({ bottom: true });
-        renderComposer();
-        $("#message-body").focus();
       } finally {
         button.disabled = false;
       }

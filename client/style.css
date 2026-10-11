@@ -414,7 +414,7 @@ ul.plain.people-list > li { padding: 0; border: none; }
 .rb-topic { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block !important; }
 .rb-date { margin-left: auto; padding-left: 10px; font-weight: 400; font-size: 0.85em; color: var(--muted); white-space: nowrap; }
 .topic-group .group-body { border-radius: 0 0 8px 8px; }
-.group-body > article { position: relative; display: grid; grid-template-columns: 2.25rem minmax(0, 1fr); gap: 0 12px;
+.group-body > article { position: relative; display: grid; grid-template-columns: max(2.75rem, 7ch) minmax(0, 1fr); gap: 0 14px;
   padding: 7px 14px 2px; }
 /* A picture is as big as one on a member's row, against the text: its column stays wide enough for a time.
    Its middle is level with the gap between the name and the first line under it. */
@@ -702,7 +702,6 @@ dialog.share-dialog li + li { margin-top: 6px; }
   #members span { display: none; }
   .feed-inner { padding: 0 8px 12px; }
   #composer-area { padding: 0 8px 8px; }
-  .group-body > article { padding-inline: 10px; gap: 0 10px; }
   .settings-layout { grid-template-columns: minmax(0, 1fr); }
   .settings-layout:not(.at-index) .settings-nav, .settings-layout.at-index .settings-body { display: none; }
   .settings-nav { position: static; max-height: none; padding-right: 0; }
