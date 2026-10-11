@@ -218,10 +218,20 @@ export class Push {
       return true;
     } catch (error) {
       // The browser withdrew the subscription.
-      if (error instanceof Problem && [404, 410].includes(error.status))
+      const dropped = error instanceof Problem && [404, 410].includes(error.status);
+      if (dropped)
         this.store.db
           .prepare("DELETE FROM push_subscriptions WHERE endpoint=?")
           .run(to.endpoint);
+      // Why a device went quiet is otherwise known to nobody. The endpoint is a secret; its host is not.
+      console.error(
+        JSON.stringify({
+          event: dropped ? "push.subscription_dropped" : "push.send_failed",
+          service: to.endpoint.replace(/^\w+:\/\/([^/]*).*$/, "$1"),
+          status: error instanceof Problem ? error.status : null,
+          error: error instanceof Problem ? undefined : (error as Error)?.name,
+        }),
+      );
       return false;
     }
   }

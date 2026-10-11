@@ -35,6 +35,11 @@ function current(sub: PushSubscription, key: string) {
   const used = sub.options.applicationServerKey;
   return !used || new Uint8Array(used).join() === bytes(key).join();
 }
+const subscribe = (worker: ServiceWorkerRegistration, key: string) =>
+  worker.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: bytes(key),
+  });
 async function register(sub: PushSubscription) {
   const { endpoint, keys } = sub.toJSON();
   await api("/push", "PUT", { endpoint, keys });
@@ -56,13 +61,7 @@ export async function enablePush() {
     await sub.unsubscribe();
     sub = null;
   }
-  await register(
-    sub ||
-      (await worker.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: bytes(public_key),
-      })),
-  );
+  await register(sub || (await subscribe(worker, public_key)));
 }
 export async function disablePush() {
   on = false;
@@ -79,21 +78,24 @@ export async function syncPush() {
   if (!pushSupported() || Notification.permission !== "granted") return;
   const worker = await navigator.serviceWorker.getRegistration(),
     sub = await worker?.pushManager.getSubscription();
-  if (!sub) return;
+  if (!worker) return;
+  if (remembered() !== state.session.user?.id) {
+    if (sub) {
+      await sub.unsubscribe();
+      remember(null);
+    }
+    return;
+  }
   const status = await api<{ public_key: string; endpoint: string | null }>(
     "/push",
   );
-  if (
-    remembered() !== state.session.user?.id ||
-    !current(sub, status.public_key)
-  ) {
-    await sub.unsubscribe();
-    remember(null);
-    return;
-  }
-  void worker!.update().catch(() => {});
-  if (status.endpoint === sub.endpoint) on = true;
-  else await register(sub);
+  void worker.update().catch(() => {});
+  if (sub && current(sub, status.public_key) && status.endpoint === sub.endpoint)
+    return void (on = true);
+  // The browser let its subscription go, or the instance holds none for this session: it is
+  // new, or the push service refused what was sent. A subscription made now is one that works.
+  await sub?.unsubscribe();
+  await register(await subscribe(worker, status.public_key));
 }
 export const testPush = () => api("/push/test", "POST", {});
 
