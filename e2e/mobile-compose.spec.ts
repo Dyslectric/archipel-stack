@@ -86,6 +86,7 @@ for (const style of ["default", "fusion-compact", "fusion-cozy"]) {
           const leftPadding = avatar!.x - firstRow!.x;
           const rightPadding = firstText!.x - (avatar!.x + avatar!.width);
           expect(Math.abs(leftPadding - rightPadding)).toBeLessThanOrEqual(1);
+          expect(Math.abs(side.x + side.width / 2 - (avatar!.x + avatar!.width / 2))).toBeLessThanOrEqual(1);
           expect(Math.abs(avatar!.y + avatar!.height / 2 - (meta!.y + meta!.height))).toBeLessThanOrEqual(1);
           if (width === 390 && scale === 100 && theme === "dark")
             await page.screenshot({ path: info.outputPath("default-mobile-spacing.png") });
