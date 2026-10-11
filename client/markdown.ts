@@ -56,6 +56,14 @@ function previewType(url: URL) {
   return /\.(png|jpe?g|gif|webp|avif|bmp|svg|mp4|webm|ogv|mov|m4v)$/i.exec(url.pathname)?.[1].toLowerCase();
 }
 function link(url: URL, label: string, ctx: Context) {
+  // Channel invitations join through the reader's instance, including when sent from elsewhere.
+  if (ctx.origin && url.pathname === "/" && url.hash.startsWith("#/join/") && !url.username && !url.password) {
+    try {
+      const actor = new URL(decodeURIComponent(url.hash.slice("#/join/".length)));
+      if (actor.origin === url.origin && /^\/actors\/channels\/[a-f0-9-]+$/.test(actor.pathname))
+        return `<a href="${esc(`${ctx.origin}/${url.hash}`)}">${label}</a>`;
+    } catch { /* Other links keep their ordinary destination. */ }
+  }
   // A link to somewhere in this app opens here; anything else opens beside it.
   const inside = !!ctx.origin && url.origin === ctx.origin && url.pathname === "/";
   return `<a href="${esc(mediaUrl(url, ctx.origin))}"${inside ? "" : ' target="_blank" rel="noopener noreferrer nofollow"'}>${label}</a>`;

@@ -17,7 +17,7 @@ settings, richer channel views, and the existing ActivityPub federation.
 | Local direct messages | Native clients and browser share history and blocks |
 | XMPP server-to-server direct messages | Certificate-authenticated TLS; instance federation and per-user send/receive grants required |
 | XEP-0045 rooms | Local timeline channels; authorized join, presence, chat, discovery |
-| Occupants from other home servers | Federated public timeline channels; s2s join, bounded join history, live messages, posting, room MAM; moderation in Archipel Web |
+| Occupants from other home servers | Federated public or private timeline channels; s2s join, bounded join history, live messages, posting, room MAM; moderation in Archipel Web |
 | Foreign XEP-0045 rooms | Native client participation; browser join/leave, subjects, speaking roles, live messages and bounded join history |
 | XEP-0313 MAM v2, XEP-0059 paging | Personal and room archives; bounded pages, timestamps, direct peer filter, before/after cursors |
 | XEP-0359 stanza IDs | Stable archive IDs; native stanza IDs and origin IDs retained |
@@ -145,9 +145,9 @@ hold, and each is checked again on every stanza and every delivery cycle:
 - XMPP and federation are enabled on the instance, and the stanza arrived on a
   certificate-authenticated server-to-server stream;
 - the channel is a timeline channel with **Federation** enabled in its
-  settings and **Who can read** set to everyone (public);
-- the channel has open membership, or a moderator has set an *Allow to join*
-  rule for that identity after it was first seen;
+  settings (public and members-only channels are supported);
+- the channel has open membership, or a moderator or member with the
+  **Allow access** permission has allowed that `xmpp:user@domain` identity;
 - neither the sender's domain (administrator instance block) nor its
   `xmpp:user@domain` identity is blocked, and no channel rule blocks it.
 
@@ -375,7 +375,8 @@ uses its unique instance name. In `container` mode, only one instance can bind
 host port 80, so use DNS challenges or Traefik routing for the others.
 The instances federate with each other like any two servers, including when
 they share an address: accounts exchange direct messages and can join the other
-instance's public timeline channels that opted into federation.
+instance's public or private timeline channels that opted into federation,
+subject to the channel's admission rules.
 
 ### Custom listener ports
 

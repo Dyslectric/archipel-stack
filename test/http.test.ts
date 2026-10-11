@@ -9,6 +9,55 @@ import { createApp } from "../src/app.js";
 import { DeviceSignIn } from "../src/device.js";
 import type { Push } from "../src/push.js";
 
+test("channel access grants and invitation messages are separate, delegated, and atomic", async t => {
+  const f = await application(t);
+  const alice = browser(f.origin), bob = browser(f.origin), charlie = browser(f.origin);
+  const owner = await alice.login("alice"), helper = await bob.login("bob"), recipient = await charlie.login("charlie");
+  const c = f.store.createChannel(f.store.user(owner.id), { name: "private", mode: "timeline", visibility: "members", admission: "allowlist" });
+  const access = `/api/channels/${c.id}/access`, invites = `/api/channels/${c.id}/invitations`;
+  assert.equal((await browser(f.origin).request(invites, "POST", {})).status, 401);
+  assert.equal((await alice.request(invites, "POST", { address: "@charlie" }, { "X-CSRF-Token": "" })).status, 403);
+  assert.equal((await bob.request(access, "POST", { address: "@charlie" })).status, 403);
+  f.store.setMember(f.store.user(owner.id), c.id, helper.id, { rule: "allow" });
+  f.store.join(f.store.user(helper.id), c.id);
+  assert.equal((await bob.request(invites, "POST", { address: "@charlie" })).status, 403);
+  const role = f.store.createChannelRole(f.store.user(owner.id), c.id, { name: "Host", allow_access: true });
+  f.store.setMember(f.store.user(owner.id), c.id, helper.id, { channel_role: role.id });
+  assert.equal((await bob.request(access, "POST", { address: "@charlie" })).status, 200);
+  assert.equal(f.store.rule(c.id, recipient.id), "allow");
+  assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM direct_messages").get()!.n, 0);
+  f.store.setMember(f.store.user(owner.id), c.id, recipient.id, { rule: "clear" });
+  // A failed message must not leave behind a grant from the invitation.
+  f.store.setUserBlock(f.store.user(helper.id), `${f.origin}/actors/users/${recipient.id}`, true);
+  assert.equal((await bob.request(invites, "POST", { address: "@charlie" })).status, 403);
+  assert.equal(f.store.rule(c.id, recipient.id), null);
+  f.store.setUserBlock(f.store.user(helper.id), `${f.origin}/actors/users/${recipient.id}`, false);
+  assert.equal((await bob.request(invites, "POST", { address: "@charlie" })).status, 201);
+  assert.equal(f.store.rule(c.id, recipient.id), "allow");
+  assert.equal(f.store.role(c.id, recipient.id), null);
+  const message = f.store.db.prepare("SELECT body FROM direct_messages WHERE direction='incoming'").get()!;
+  assert.match(String(message.body), /You're invited to #private/);
+  assert.ok(String(message.body).includes(`/#/join/${encodeURIComponent(`${f.origin}/actors/channels/${c.id}`)}`));
+  assert.equal((await charlie.request(`/api/channels/${c.id}/join`, "POST", {})).status, 200);
+  f.store.setMember(f.store.user(owner.id), c.id, recipient.id, { rule: "block" });
+  assert.equal((await bob.request(access, "POST", { address: "@charlie" })).status, 403);
+  assert.equal((await bob.request(invites, "POST", { address: "@charlie" })).status, 403);
+  assert.equal(f.store.rule(c.id, recipient.id), "block");
+  assert.equal((await bob.request(`/api/channels/${c.id}/members/${recipient.id}`, "PATCH", { remove: true })).status, 403);
+  f.store.updateChannelRole(f.store.user(owner.id), c.id, role.id, { allow_access: false });
+  assert.equal((await bob.request(access, "POST", { address: "@charlie" })).status, 403);
+  assert.equal((await bob.request(invites, "POST", { address: "@charlie" })).status, 403);
+  // Public invitations from ordinary members send a message without granting access.
+  const publicChannel = f.store.createChannel(f.store.user(owner.id), { name: "public", mode: "timeline", visibility: "public", admission: "allowlist" });
+  f.store.setMember(f.store.user(owner.id), publicChannel.id, helper.id, { rule: "allow" });
+  f.store.join(f.store.user(helper.id), publicChannel.id);
+  assert.equal((await bob.request(`/api/channels/${publicChannel.id}/invitations`, "POST", { address: "@charlie" })).status, 201);
+  assert.equal(f.store.rule(publicChannel.id, recipient.id), null);
+  assert.equal((await charlie.request(`/api/channels/${publicChannel.id}/join`, "POST", {})).status, 403);
+  assert.equal((await charlie.request(`/api/channels/${publicChannel.id}/invitations`, "POST", { address: "@alice" })).status, 201);
+  assert.equal(f.store.rule(publicChannel.id, owner.id), null);
+});
+
 test("remote avatar endpoints require membership and current federation and block permissions", async t => {
   const f = await application(t, { xmppDomain: "chat.example", xmppBridgeSecret: "s".repeat(43) });
   const alice = browser(f.origin), bob = browser(f.origin);
@@ -1186,9 +1235,9 @@ test("media follows current membership and account approval, and removed referen
   assert.equal((await alice.request(path)).status, 403);
 
   // Old databases migrate conservatively: an old URL is never a private draft bypass.
-  f.store.db.exec("ALTER TABLE attachments DROP COLUMN published; PRAGMA user_version=24");
+  f.store.db.exec("ALTER TABLE attachments DROP COLUMN published; ALTER TABLE channel_roles DROP COLUMN allow_access; ALTER TABLE channel_held_roles DROP COLUMN allow_access; PRAGMA user_version=24");
   f.store.db.migrate();
-  assert.equal(f.store.db.version(), 25);
+  assert.equal(f.store.db.version(), 26);
   assert.equal((await bob.request(path)).status, 403);
   const dmFile = f.store.addAttachment(f.store.user(author.id), bytes, "direct.png");
   f.store.sendDirect(f.store.user(author.id), (await alice.session()).user.id, `![direct](${dmFile.url})`);

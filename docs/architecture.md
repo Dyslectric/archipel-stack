@@ -41,8 +41,8 @@ inferred from a handle or a social claim.
 Proposed: a channel has one home instance and one authoritative channel actor.
 Its creator becomes its owner. Owners can appoint moderators, who can manage
 membership and access rules but cannot replace the owner. Owners can also name
-channel roles that let a member remove members, ban people or instances, or
-delete messages, and nothing else. Ownership transfer
+channel roles that let a member allow access, remove members, ban people or
+instances, or delete messages. Ownership transfer
 is a separate action. Instance administrators retain the inspection and
 moderation powers requested in the brief, including over restricted channels.
 
@@ -84,6 +84,13 @@ posting requires active membership even when a public channel can be read
 without joining. Joining an open channel creates membership; allowlisted users
 must still join or accept an invitation. Adding someone to an allowlist does
 not silently enroll them.
+
+Allowing access is separate from sending an invitation. The `allow_access`
+channel-role permission grants an allow-list entry without a message. **Invite**
+in the channel menu sends a direct message with a Join link. Readers can invite
+to public channels; private channels require `allow_access` (or moderation
+rights). An invitation from someone with that permission also grants access.
+Other public-channel invitations leave admission rules unchanged.
 
 Channel ownership and instance administration do not automatically bypass an
 instance block or a disabled local account. Blocked members lose access to

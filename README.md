@@ -285,6 +285,7 @@ another instance. A role grants, separately:
 
 | Grant | Covers |
 | --- | --- |
+| Allow access | Adding local or federated users to the allow list under **Access rules**, and granting access when sending an invitation |
 | Remove members | Taking someone out of the channel; they can join again if it lets them. A follower on another instance has their follow ended |
 | Ban people | Blocking someone from the channel, which removes them too, and lifting such bans under **Access rules** |
 | Ban instances | Channel settings → **Banned instances**: everyone following from that instance is removed and nobody there can follow, post or react until the ban is lifted. `xmpp:example.org` bans an XMPP server from the channel's room |
@@ -294,11 +295,17 @@ Someone acting through a role reaches members who hold no role: not the owner,
 moderators or other role holders. Removing or banning members lets them see the
 member list of a channel that otherwise hides it. Roles are kept on the channel's
 home instance. Someone who holds one while following from another instance
-deletes messages, removes and bans from there: their instance asks the home,
+allows access, deletes messages, removes and bans from there: their instance asks the home,
 which decides from its own roles each time. Banning instances is done on the
 home only. See [federation](docs/federation.md#channel-roles-across-instances). Only the
 owner (or an administrator) creates, changes and gives out roles; leaving or being
 removed gives the role up, and making someone a moderator replaces it.
+
+**Invite someone…** in the channel menu sends a direct message with a Join link.
+Public-channel readers can send invitations. Private channels require the
+allow-access permission (owners and moderators have it). An authorized invitation
+also grants access; granting access on its own sends no message. Recipients
+choose whether to join.
 
 ## Attachments
 

@@ -32,14 +32,35 @@ function denied(fn: () => unknown, status = 403) {
   assert.throws(fn, e => e instanceof Problem && e.status === status);
 }
 
-test("foreign occupants are admitted only over s2s into federated public rooms that current policy allows", () => {
+test("private federated XMPP rooms admit allowed identities and revoke access immediately", t => {
+  const f = fixture(); t.after(() => f.store.close());
+  const c = f.store.createChannel(f.alice, { name: "secret", mode: "timeline", visibility: "members", admission: "allowlist" });
+  f.fed.setChannel(f.alice, c.id, true);
+  const room = `secret@${f.xmpp.rooms}`;
+  const operation = (kind: string) => f.xmpp.operation(f.from(kind, { to: room }));
+  denied(() => operation("join"));
+  const target = f.xmpp.identity(peer)!;
+  f.fed.allowAccess(f.alice, f.store.channel(c.id), target);
+  assert.equal(f.store.role(c.id, target.id), null);
+  assert.equal((operation("join") as { name: string }).name, "secret");
+  assert.equal(f.store.role(c.id, target.id), "member");
+  f.store.setMember(f.alice, c.id, target.id, { rule: "block" });
+  denied(() => operation("read"));
+  denied(() => operation("join"));
+  f.store.setMember(f.alice, c.id, target.id, { rule: "allow" });
+  operation("join");
+  f.fed.setChannel(f.alice, c.id, false);
+  denied(() => operation("read"));
+});
+
+test("foreign occupants are admitted only over s2s into federated rooms that current policy allows", () => {
   const f = fixture();
   denied(() => f.xmpp.operation({ ...f.from("join"), s2s: undefined }));
   assert.equal(f.remote(), undefined);
 
   const local = f.store.createChannel(f.alice, { name: "local", mode: "timeline", visibility: "public", admission: "open" });
   denied(() => f.xmpp.operation(f.from("join", { to: `local@${f.xmpp.rooms}` })));
-  const members = f.store.createChannel(f.alice, { name: "members", mode: "timeline", visibility: "members", admission: "open" });
+  const members = f.store.createChannel(f.alice, { name: "members", mode: "timeline", visibility: "members", admission: "allowlist" });
   f.fed.setChannel(f.alice, members.id, true);
   denied(() => f.xmpp.operation(f.from("join", { to: `members@${f.xmpp.rooms}` })));
   const invite = f.store.createChannel(f.alice, { name: "invite", mode: "timeline", visibility: "public", admission: "allowlist" });

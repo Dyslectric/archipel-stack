@@ -906,6 +906,45 @@ export function createApp(config: Config, store: Store) {
   app.get("/api/channels/:id/rules", (req, res) =>
     res.json(store.rules(user(res), String(req.params.id))),
   );
+  const channelRecipient = async (value: unknown) => {
+    if (typeof value === "string" && value.startsWith("xmpp:")) {
+      xmpp.enabled();
+      const jid = xmpp.remoteJid(value);
+      if (jid.endsWith(`@${config.xmppDomain}`)) return xmpp.local(jid);
+      const target = xmpp.identity(jid);
+      if (!target) throw new Problem(403, "This XMPP identity or domain is blocked.");
+      return target;
+    }
+    return federation.resolveMember(value);
+  };
+  app.post("/api/channels/:id/access", async (req, res) => {
+    const actor = user(res), channel = store.channel(String(req.params.id));
+    store.active(actor.id);
+    if (!store.channelCan(actor, channel, "allow_access"))
+      throw new Problem(403, "Your role does not allow granting channel access.");
+    const target = await channelRecipient(req.body?.address);
+    federation.allowAccess(actor, store.channel(channel.id), target);
+    res.json({ ok: true });
+  });
+  app.post("/api/channels/:id/invitations", async (req, res) => {
+    const actor = user(res), channel = store.channel(String(req.params.id));
+    store.requireInvite(actor, channel);
+    store.requirePermission(actor, "direct_messages");
+    const target = await channelRecipient(req.body?.address);
+    const current = store.channel(channel.id);
+    store.requireInvite(actor, current);
+    const address = federation.channelActor(current);
+    const link = `${new URL(address).origin}/#/join/${encodeURIComponent(address)}`;
+    const body = `You're invited to #${current.name}.\n\n[Join channel](${link})`;
+    const message = store.transaction(() => {
+      if (store.channelCan(actor, current, "allow_access"))
+        federation.allowAccess(actor, current, target);
+      if (target.remote_actor?.startsWith("xmpp:")) return xmpp.sendDirect(actor, target.remote_actor, body);
+      if (target.remote_actor) return federation.sendResolvedDirect(actor, target.remote_actor, body);
+      return store.sendDirect(actor, target.id, body);
+    });
+    res.status(201).json(message);
+  });
   app.get("/api/channels/:id/roles", (req, res) =>
     res.json(store.channelRoles(user(res), String(req.params.id))),
   );

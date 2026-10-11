@@ -36,6 +36,7 @@ export interface User {
   list_members?: boolean;
 }
 export type ChannelPermission =
+  | "allow_access"
   | "kick_members"
   | "ban_members"
   | "ban_instances"
@@ -727,11 +728,12 @@ export function promptDialog(
   label: string,
   value = "",
   action = "Save",
+  options: { maxLength?: number; description?: string } = {},
 ) {
   return new Promise<string | null>((resolve) => {
     const dialog = document.createElement("dialog");
     dialog.className = "card dialog";
-    dialog.innerHTML = `<h2>${esc(title)}</h2><form method="dialog" class="stack"><label>${esc(label)}<input name="value" maxlength="40" required value="${esc(value)}" autocomplete="off"></label><div class="row end"><button type="button" class="secondary" data-cancel>Cancel</button><button value="yes">${esc(action)}</button></div></form>`;
+    dialog.innerHTML = `<h2>${esc(title)}</h2>${options.description ? `<p class="muted">${esc(options.description)}</p>` : ""}<form method="dialog" class="stack"><label>${esc(label)}<input name="value" maxlength="${options.maxLength ?? 40}" required value="${esc(value)}" autocomplete="off"></label><div class="row end"><button type="button" class="secondary" data-cancel>Cancel</button><button value="yes">${esc(action)}</button></div></form>`;
     document.body.append(dialog);
     $("[data-cancel]", dialog).addEventListener("click", () => dialog.close());
     dialog.addEventListener("close", () => {

@@ -110,6 +110,63 @@ function channel(i: Awaited<ReturnType<typeof instance>>, extra = {}) {
   return i.store.channel(c.id);
 }
 
+async function memberApi(i: Awaited<ReturnType<typeof instance>>, username: string, path: string, body: unknown) {
+  const login = await fetch(`${i.origin}/api/dev-login`, { method: "POST", headers: { Origin: i.origin, "Content-Type": "application/json" }, body: JSON.stringify({ username }) });
+  const cookie = login.headers.getSetCookie().map(c => c.split(";")[0]).join("; ");
+  const session = await fetch(`${i.origin}/api/session`, { headers: { Cookie: cookie } }).then(r => r.json());
+  return fetch(i.origin + path, { method: "POST", headers: { Origin: i.origin, Cookie: cookie, "Content-Type": "application/json", "X-CSRF-Token": session.csrf }, body: JSON.stringify(body) });
+}
+
+test("private channel access and invitations work by remote address and by a federated role", async t => {
+  const a = await instance(t), b = await instance(t), c = await instance(t);
+  const home = channel(a, { visibility: "members", admission: "allowlist" });
+  a.store.post(a.alice, home.id, { body: "Private history" });
+  const actor = a.fed.channelActor(home);
+  // Granting access before a follow sends no invitation, and does not create membership.
+  const access = await memberApi(a, "alice", `/api/channels/${home.id}/access`, { address: `@bob@${new URL(b.origin).host}` });
+  assert.equal(access.status, 200, await access.text());
+  const helper = await a.fed.resolveMember(b.fed.userActor(b.bob));
+  assert.equal(a.store.rule(home.id, helper.id), "allow");
+  assert.equal(a.store.db.prepare("SELECT COUNT(*) AS n FROM direct_messages").get()!.n, 0);
+  const sub = await b.fed.subscribe(b.bob, actor);
+  await drain(a, b);
+  assert.equal(b.store.role(sub.channel.id, b.bob.id), "member");
+  const role = a.store.createChannelRole(a.alice, home.id, { name: "Host", allow_access: true });
+  a.store.setMember(a.alice, home.id, helper.id, { channel_role: role.id });
+  await drain(a, b);
+  assert.equal(b.store.channelInfo(b.bob, b.store.channel(sub.channel.id)).permissions.allow_access, true);
+  // A pending private follower is admitted as soon as an authorized invitation grants access.
+  const waiting = await c.fed.subscribe(c.bob, actor);
+  await drain(a, b, c);
+  assert.equal(c.store.role(waiting.channel.id, c.bob.id), null);
+  const invite = await memberApi(b, "bob", `/api/channels/${sub.channel.id}/invitations`, { address: c.fed.userActor(c.bob) });
+  assert.equal(invite.status, 201, await invite.text());
+  await drain(b, a, c);
+  assert.equal(c.store.role(waiting.channel.id, c.bob.id), "member");
+  assert.equal(c.store.messages(c.bob, waiting.channel.id)[0].body, "Private history");
+  const message = c.store.db.prepare("SELECT body FROM direct_messages WHERE user_id=? AND direction='incoming'").get(c.bob.id)!;
+  assert.match(String(message.body), /You're invited to #general/);
+  assert.ok(String(message.body).includes(encodeURIComponent(actor)));
+  // Independent grants also work through the home without sending an invitation.
+  const grantAccess = await memberApi(b, "bob", `/api/channels/${sub.channel.id}/access`, { address: c.fed.userActor(c.alice) });
+  assert.equal(grantAccess.status, 200, await grantAccess.text());
+  await drain(b, a, c);
+  const allowed = await a.fed.resolveMember(c.fed.userActor(c.alice));
+  assert.equal(a.store.rule(home.id, allowed.id), "allow");
+  assert.equal(c.store.db.prepare("SELECT COUNT(*) AS n FROM direct_messages WHERE user_id=?").get(c.alice.id)!.n, 0);
+  // A queued request is rechecked by the home after role revocation.
+  const late = await b.fed.resolveMember(a.fed.userActor(a.bob));
+  b.fed.allowAccess(b.bob, b.store.channel(sub.channel.id), late);
+  a.store.updateChannelRole(a.alice, home.id, role.id, { allow_access: false });
+  await b.fed.tick();
+  assert.equal(a.store.rule(home.id, a.bob.id), null);
+  assert.equal(b.store.db.prepare("SELECT status FROM federation_deliveries ORDER BY id DESC LIMIT 1").get()!.status, "failed");
+  b.store.db.prepare("DELETE FROM federation_deliveries WHERE status='failed'").run();
+  await drain(a, b, c);
+  const refused = await memberApi(b, "bob", `/api/channels/${sub.channel.id}/invitations`, { address: c.fed.userActor(c.alice) });
+  assert.equal(refused.status, 403);
+});
+
 test("media authenticates subscribers through their home, including a third file server and immediate revocation", async t => {
   const a = await instance(t), b = await instance(t), c = await instance(t);
   const home = channel(a), actor = a.fed.channelActor(home);
@@ -563,7 +620,7 @@ test("a role held from another instance deletes, removes and bans through the ch
     assert.deepEqual(left.map((d) => d.status), ["failed"]);
     b.store.db.prepare("DELETE FROM federation_deliveries WHERE status='failed'").run();
   };
-  const everything = ["kick_members", "ban_members", "ban_instances", "delete_messages"] as const;
+  const everything = ["allow_access", "kick_members", "ban_members", "ban_instances", "delete_messages"] as const;
 
   // Without a role nothing is offered, and saying here that Bob holds one moves nothing at the home.
   const first = await said("Not Bob's to remove");
@@ -583,7 +640,7 @@ test("a role held from another instance deletes, removes and bans through the ch
   await drain(a, b);
   assert.deepEqual(mine().channel_role, { id: "", name: "Helper" });
   // Banning instances stays with the home, whatever the role says.
-  assert.deepEqual(mine().permissions, { kick_members: false, ban_members: false, ban_instances: false, delete_messages: true });
+  assert.deepEqual(mine().permissions, { allow_access: false, kick_members: false, ban_members: false, ban_instances: false, delete_messages: true });
   denied(() => b.store.deleteMessage(b.bob, first.away));
   b.fed.deleteRemote(b.bob, first.away);
   await drain(a, b);
@@ -600,7 +657,7 @@ test("a role held from another instance deletes, removes and bans through the ch
   // A changed role reaches its holders. It removes and bans members, not the owner.
   a.store.updateChannelRole(a.alice, home.id, helper.id, { kick_members: true, ban_members: true });
   await drain(a, b);
-  assert.deepEqual(mine().permissions, { kick_members: true, ban_members: true, ban_instances: false, delete_messages: true });
+  assert.deepEqual(mine().permissions, { allow_access: false, kick_members: true, ban_members: true, ban_instances: false, delete_messages: true });
   // Whoever may remove or ban is shown the members a channel keeps to itself, and the list says
   // again what role each of this instance's subscribers holds.
   a.store.setPrivacy(a.alice, home.id, { show_members: false });

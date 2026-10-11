@@ -96,7 +96,7 @@ export class Xmpp {
     if (this.blockedXmppDomains().includes(address.slice(address.lastIndexOf("@") + 1)) ||
       this.store.db.prepare("SELECT 1 FROM federation_blocks WHERE target=?").get(`xmpp:${address}`))
       throw new Problem(403, "This XMPP identity or domain is blocked.");
-    if (!channel.federation_enabled || channel.visibility !== "public")
+    if (!channel.federation_enabled)
       throw new Problem(403, "This room does not admit members of other servers.");
     if (this.store.instanceBanned(channel.id, `xmpp:${address}`))
       throw new Problem(403, "Your server is banned from this channel.");
@@ -108,7 +108,7 @@ export class Xmpp {
     const rule = user && this.store.rule(channel.id, user.id);
     if (rule === "block") throw new Problem(403, "You are blocked from this channel.");
     if (!(user && this.store.role(channel.id, user.id)) && channel.admission !== "open" && rule !== "allow")
-      throw new Problem(403, "This channel requires an invitation.");
+      throw new Problem(403, "You must be allowed access before joining this channel.");
     return user;
   }
   /** Receive grants gate foreign authors; send and post grants gate what foreign occupants are shown. */

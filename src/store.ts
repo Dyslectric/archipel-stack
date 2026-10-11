@@ -114,6 +114,7 @@ const denied: Record<Permission, string> = {
 };
 // What a channel's role lets its members do there; the owner and moderators can do all of it.
 export const channelPermissions = [
+  "allow_access",
   "kick_members",
   "ban_members",
   "ban_instances",
@@ -187,6 +188,7 @@ const everyone = `
 export class Store {
   db: Database;
   federationHooks?: {
+    access?: (channel: Channel, target: User) => void;
     profile: (user: User) => void;
     // An account's role, or what its role grants, changed.
     permissions: (user: User) => void;
@@ -1473,7 +1475,7 @@ export class Store {
       throw new Problem(403, "You are blocked from this channel.");
     if (this.role(id, user.id)) return;
     if (channel.admission === "allowlist" && this.rule(id, user.id) !== "allow")
-      throw new Problem(403, "This channel requires an invitation.");
+      throw new Problem(403, "You must be allowed access before joining this channel.");
     this.db
       .prepare("INSERT INTO memberships VALUES(?,?,?)")
       .run(id, user.id, "member");
@@ -1565,22 +1567,26 @@ export class Store {
     const grants = (["see_members", "see_handles"] as const).filter(
       (key) => input[key] !== undefined,
     );
-    // Removing someone and banning them are what a role can allow; the rest is the moderators'.
+    // Access, removal and bans can be delegated; membership roles and visibility grants cannot.
     const banning =
       input.rule === "block" ||
       (input.rule === "clear" && this.rule(channelId, targetId) === "block");
+    const allowing = input.rule === "allow";
     const delegated = !this.manages(user, channel);
     if (
       delegated &&
       !(
-        (input.remove === true || banning) &&
+        (input.remove === true || banning || allowing) &&
         input.role === undefined &&
         input.channel_role === undefined &&
         !grants.length &&
-        (input.rule === undefined || banning) &&
+        (input.rule === undefined || banning || allowing) &&
         (input.remove !== true ||
           this.channelCan(user, channel, "kick_members")) &&
-        (!banning || this.channelCan(user, channel, "ban_members"))
+        (!banning || this.channelCan(user, channel, "ban_members")) &&
+        (!allowing || this.channelCan(user, channel, "allow_access")) &&
+        // Allowing access cannot lift a ban; that requires the ban permission.
+        (!allowing || this.rule(channelId, targetId) !== "block")
       )
     )
       throw new Problem(
@@ -1662,6 +1668,8 @@ export class Store {
             "INSERT INTO channel_rules VALUES(?,?,?) ON CONFLICT(channel_id,user_id) DO UPDATE SET rule=excluded.rule",
           )
           .run(channelId, targetId, input.rule as string);
+      if (input.rule === "allow")
+        this.federationHooks?.access?.(channel, target);
       for (const key of grants)
         this.db
           .prepare(
@@ -1707,17 +1715,30 @@ export class Store {
   }
   rules(user: User, id: string) {
     const channel = this.channel(id),
-      // Someone whose role lets them ban sees who is banned, not who is invited.
+      // A delegated role sees only the access rules it is allowed to manage.
       all = this.manages(user, channel);
     if (all) this.requireManage(user, channel);
-    else this.requireChannelPermission(user, channel, "ban_members");
+    else {
+      this.active(user.id);
+      if (channel.remote_actor ||
+          (!this.channelCan(user, channel, "ban_members") &&
+           !this.channelCan(user, channel, "allow_access")))
+        throw new Problem(403, "Your role cannot view channel access rules.");
+    }
     return (
       this.db
         .prepare(
           "SELECT r.user_id,r.rule,u.username FROM channel_rules r JOIN users u ON u.id=r.user_id WHERE channel_id=? ORDER BY u.username",
         )
         .all(id) as { user_id: string; rule: string; username: string }[]
-    ).filter((r) => all || r.rule === "block");
+    ).filter((r) => all || this.channelCan(user, channel,
+      r.rule === "block" ? "ban_members" : "allow_access"));
+  }
+  requireInvite(user: User, channel: Channel) {
+    this.active(user.id);
+    this.requireRead(user, channel);
+    if (channel.visibility !== "public" && !this.channelCan(user, channel, "allow_access"))
+      throw new Problem(403, "Your role does not allow inviting people to this private channel.");
   }
   // ---- channel roles: what the owner lets some members do in the channel ----
   private channelRoleRow(channelId: string, id: string) {

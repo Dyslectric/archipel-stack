@@ -21,6 +21,20 @@ yet. Local mirrors are described at the end of this document.
    admit unblocked remote followers automatically. Refresh subscriptions to see
    an approval and open the channel.
 
+Private channels can federate too. Under channel settings → **Access rules**,
+**Allow access** accepts a local handle, a remote `user@instance`, a user actor
+URL, or an `xmpp:user@domain` identity. Allowed followers join automatically;
+allowing someone who already has a pending follow accepts it immediately.
+The owner can grant this capability through a channel role's **Allow people to
+access the channel** permission. It does not grant the ability to lift bans.
+
+**Invite someone…** in the channel menu sends a direct invitation with a Join
+link. Readers can invite to public channels; private channels require
+the allow-access permission. Authorized invitations also grant access, while
+public invitations from ordinary members leave the allow list unchanged.
+Allowing access alone sends no message. Invitations use the sender's usual
+direct-message and federation permissions, and recipients still choose to join.
+
 All switches and grants start disabled, including for admins. They are persisted
 in the database and do not require a restart. Open browsers are told of a change as it happens.
 Admins can block an entire instance origin or a specific remote actor URL and
@@ -71,7 +85,7 @@ someone following from another instance, once their follow is accepted. The
 home tells that person's instance the role's name and what it allows, when it
 is given, changed or taken back, when the follow is accepted again, and in the
 member list. The following instance keeps this only to know what to offer: the
-holder sees the same **Delete**, **Remove** and **Ban** actions as a member at
+holder sees the same **Allow access**, **Invite**, **Delete**, **Remove** and **Ban** actions as a member at
 home, and using one sends the request to the home instead of changing anything
 locally.
 

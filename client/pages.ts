@@ -24,9 +24,32 @@ import { sidebarFrame } from "./sidebar.js";
 import { isFusion } from "./appearance.js";
 import { updateFusionToolbar } from "./chat.js";
 import { windowHtml } from "./windows.js";
-import { channelWindow, federatedWindow, xmppWindow } from "./join.js";
+import { channelWindow, federatedWindow, xmppWindow, subscribeRemote } from "./join.js";
 
 interface FeaturedChannel { id: string; name: string; description: string; mode: string; address: string; joined: boolean; }
+
+export function showChannelInvitation(view: HTMLElement, address: string) {
+  const actor = new URL(address);
+  if (!["http:", "https:"].includes(actor.protocol) || actor.username || actor.password ||
+      !/^\/actors\/channels\/[a-f0-9-]+$/.test(actor.pathname) || actor.search || actor.hash)
+    throw new Error("Invalid channel invitation.");
+  const local = actor.origin === location.origin;
+  const workspace = sidebarFrame(view);
+  workspace.innerHTML = `<div class="page"><section class="card narrow"><h1>Channel invitation</h1><p>Join the channel hosted on <strong>${esc(actor.host)}</strong>.</p><p class="muted">Access is checked when you join.${local ? "" : " Your account must be allowed to subscribe to federated channels."}</p><button type="button" id="accept-channel-invitation">Join channel</button></section></div>`;
+  $("#accept-channel-invitation", workspace).addEventListener("click", () => action(async () => {
+    if (local) {
+      const id = actor.pathname.split("/").pop()!;
+      await api(`/channels/${id}/join`, "POST", {});
+      state.channels = await api<Channel[]>("/channels");
+      go(`#/c/${id}`);
+    } else if (await subscribeRemote(address)) {
+      state.channels = await api<Channel[]>("/channels");
+      const joined = state.channels.find(c => c.remote_actor === address && c.role);
+      go(joined ? `#/c/${joined.id}` : "#/settings/federation/remote");
+      toast("Subscription requested.");
+    }
+  }));
+}
 
 const plainTop = () =>
   `<header class="top"><div class="top-inner"><a class="brand" href="/">${icon("logo", "brand-mark")}<span>Archipel Web</span></a><span class="grow"></span><span class="muted small">${esc(state.session.instance)}</span></div></header>`;
@@ -94,7 +117,7 @@ export function showChannels(view: HTMLElement, create: boolean) {
       <label>Conversation style<select name="mode"><option value="timeline">Timeline: one running conversation</option><option value="topical">Topics: messages grouped by subject</option><option value="threaded">Threads: posts with nested replies</option></select></label>
       <label class="check" id="create-optional-titles" hidden><input type="checkbox" name="optional_titles"> Let threads start without a title</label>
       <label>Who can read?<select name="visibility"><option value="public">Everyone on this instance</option><option value="members">Members only</option></select></label>
-      <label>Who can join?<select name="admission"><option value="open">Anyone on this instance</option><option value="allowlist">Invited users only</option></select></label>
+      <label>Who can join?<select name="admission"><option value="open">Anyone on this instance</option><option value="allowlist">Allowed users only</option></select></label>
       <label class="check"><input type="checkbox" name="show_members" checked> Show the member list</label>
       <label class="check"><input type="checkbox" name="hide_handles"> Hide handles, leaving only display names</label>
       ${federate("check")}
@@ -124,7 +147,7 @@ export function showChannels(view: HTMLElement, create: boolean) {
       ? visible
           .map(
             (c) =>
-              `<li class="browse-channel"><a href="#/c/${c.id}" data-id="${c.id}" class="browse-name">${channelIcon(c)}<strong>${esc(c.name)}</strong></a><span class="pill">${modeLabel(c.mode)}</span>${c.visibility === "members" ? '<span class="pill">Members only</span>' : ""}${c.remote_actor ? '<span class="pill new">Remote</span>' : ""}${c.role ? '<span class="pill good">Joined</span>' : !c.readable ? '<span class="pill warn">Invited</span>' : ""}
+              `<li class="browse-channel"><a href="#/c/${c.id}" data-id="${c.id}" class="browse-name">${channelIcon(c)}<strong>${esc(c.name)}</strong></a><span class="pill">${modeLabel(c.mode)}</span>${c.visibility === "members" ? '<span class="pill">Members only</span>' : ""}${c.remote_actor ? '<span class="pill new">Remote</span>' : ""}${c.role ? '<span class="pill good">Joined</span>' : !c.readable ? '<span class="pill warn">Allowed</span>' : ""}
               <p class="muted">${esc(c.description || "No description.")}</p><span class="muted small">${c.member_count} member${c.member_count === 1 ? "" : "s"}</span></li>`,
           )
           .join("")
@@ -138,7 +161,7 @@ export function showChannels(view: HTMLElement, create: boolean) {
     recommended.hidden = !picks.length;
     recommended.innerHTML = picks.length ? `<h2>Featured from other servers</h2><ul class="plain">${picks.map(c => `<li class="row">${icon("globe")}<div class="grow"><strong>${esc(c.name)}</strong><p class="muted small">${esc(c.description)} · ${esc(new URL(c.address).host)}</p></div>${c.joined ? `<a class="button secondary small" href="#/c/${c.id}">Open</a>` : `<button type="button" class="secondary small" data-featured-join="${esc(c.address)}" ${state.session.federation_enabled && state.session.user?.federation_subscribe && state.session.user?.federation_receive ? "" : "disabled"}>Subscribe</button>`}</li>`).join("")}</ul>` : "";
     const rows = visible.filter(c => !picks.some(p => p.id === c.id)).map(c => row(c.id, `<td><a class="directory-name" href="#/c/${c.id}" data-id="${c.id}">${channelIcon(c, false)}<strong>${esc(c.name)}</strong></a></td><td class="channel-description${c.description ? "" : " muted"}">${esc(c.description || "No description.")}</td><td>${modeLabel(c.mode)}</td><td>${c.member_count}</td>`,
-      c.role ? "Joined" : c.can_join && c.admission === "allowlist" ? "Invited" : c.can_join || c.readable ? "Not joined" : "Invitation required", !!c.role || (c.can_join && c.admission === "allowlist"),
+      c.role ? "Joined" : c.can_join && c.admission === "allowlist" ? "Allowed" : c.can_join || c.readable ? "Not joined" : "Access required", !!c.role || (c.can_join && c.admission === "allowlist"),
       c.role ? `<a class="button secondary small" href="#/c/${c.id}">Open</a>` : c.can_join ? `<button type="button" class="secondary small" data-directory-join="${c.id}">Join</button>` : c.readable ? `<a class="button secondary small" href="#/c/${c.id}">View</a>` : ""));
     const table = $("#channel-table-body");
     const tableHtml = `${section("featured", "Featured from other servers", "Chosen by this instance's administrators", featuredRows)}${section("local", "On this instance", "", rows)}${!rows.length && !featuredRows.length ? '<tr><td colspan="6">No channels match.</td></tr>' : ""}`;
@@ -195,7 +218,7 @@ export function showChannels(view: HTMLElement, create: boolean) {
     if (target.closest("a, button")) return;
     target.closest("[data-directory-row]")?.querySelector<HTMLElement>(".directory-action :is(a, button)")?.click();
   });
-  // An invitation makes a members-only channel readable once it's accepted, so opening it joins.
+  // Allowed access makes a members-only channel readable once joined, so opening it joins.
   list.addEventListener("click", (e) => {
     const link = (e.target as Element).closest<HTMLElement>("[data-id]");
     const channel = state.channels.find((c) => c.id === link?.dataset.id);
@@ -213,7 +236,7 @@ export function showChannels(view: HTMLElement, create: boolean) {
   // The card and the Fusion window ask the same things, each in its own form.
   const summary = (data: FormData) => {
     const style = data.get("mode") === "threaded" ? "Posts with nested replies" : data.get("mode") === "topical" ? "Messages grouped by topic" : "A running conversation";
-    return `${style}. ${data.get("visibility") === "members" ? "Members can read" : "Anyone on this instance can read"}; ${data.get("admission") === "allowlist" ? "joining requires an invitation" : "anyone here can join"}.${data.get("federate") === "on" ? " Other instances can follow it." : ""}`;
+    return `${style}. ${data.get("visibility") === "members" ? "Members can read" : "Anyone on this instance can read"}; ${data.get("admission") === "allowlist" ? "joining requires allowed access" : "anyone here can join"}.${data.get("federate") === "on" ? " Other instances can follow it." : ""}`;
   };
   form.addEventListener("change", () => {
     const data = new FormData(form);
@@ -258,7 +281,7 @@ export function showChannels(view: HTMLElement, create: boolean) {
       <fieldset><legend>Conversation style</legend>${[["timeline", "Timeline", "hash", "one running conversation"], ["topical", "Topics", "folder", "messages grouped by subject"], ["threaded", "Threads", "needle-thread", "posts with nested replies"]].map(([value, label, ico, about]) => `<label class="choice"><input type="radio" name="mode" value="${value}" ${value === "timeline" ? "checked" : ""}>${icon(ico)}<span><strong>${label}</strong> <span class="muted">${about}</span></span></label>`).join("")}
         <label class="choice sub"><input type="checkbox" name="optional_titles" disabled>Let threads start without a title</label></fieldset>
       <fieldset><legend>Access</legend><div class="field-grid"><label for="cc-read">Who can read</label><select id="cc-read" name="visibility"><option value="public">Everyone on this instance</option><option value="members">Members only</option></select>
-        <label for="cc-join">Who can join</label><select id="cc-join" name="admission"><option value="open">Anyone on this instance</option><option value="allowlist">Invited users only</option></select></div></fieldset>
+        <label for="cc-join">Who can join</label><select id="cc-join" name="admission"><option value="open">Anyone on this instance</option><option value="allowlist">Allowed users only</option></select></div></fieldset>
       <fieldset><legend>Members</legend><label class="choice"><input type="checkbox" name="show_members" checked>Show the member list</label>
         <label class="choice"><input type="checkbox" name="hide_handles">Hide handles, leaving only display names</label></fieldset>
       ${state.session.federation_enabled ? `<fieldset><legend>Federation</legend>${federate("choice")}</fieldset>` : ""}

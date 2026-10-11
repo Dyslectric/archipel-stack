@@ -83,6 +83,18 @@ export class Federation {
       )
       .run();
     store.federationHooks = {
+      access: (channel, target) => {
+        if (!target.remote_actor || target.remote_actor.startsWith("xmpp:") ||
+            !this.enabled() || !channel.federation_enabled || channel.remote_actor) return;
+        const follow = store.db.prepare("SELECT follow_id FROM federation_follows WHERE channel_id=? AND actor=? AND status='pending'")
+          .get(channel.id, target.remote_actor) as { follow_id: string } | undefined;
+        if (!follow || store.instanceBanned(channel.id, target.remote_actor)) return;
+        store.active(target.id);
+        this.allowed(target.remote_actor);
+        store.db.prepare("UPDATE federation_follows SET status='accepted' WHERE channel_id=? AND actor=?")
+          .run(channel.id, target.remote_actor);
+        this.followAnswer(channel, target.remote_actor, follow.follow_id, true);
+      },
       profile: (user) => this.profileChanged(user),
       permissions: (user) => this.permissionsChanged(user),
       expelled: (channel, who) => this.expelled(channel, who),
@@ -787,6 +799,23 @@ export class Federation {
       throw new Problem(400, "Peer did not return a home-instance actor.");
     return this.actor(link.href);
   }
+  async resolveMember(value: unknown) {
+    const local = this.store.localRecipient(value);
+    if (local) return this.store.active(local);
+    const actor = await this.resolve(text(value, "User address", 2048).replace(/^@/, ""));
+    if (actor.type !== "Person") throw new Problem(400, "Choose a user, not a channel.");
+    return this.store.active(this.remoteUser(actor).id);
+  }
+  allowAccess(user: User, channel: Channel, target: User) {
+    this.store.active(user.id);
+    if (!this.store.channelCan(user, channel, "allow_access"))
+      throw new Problem(403, "Your role does not allow granting channel access.");
+    if (target.remote_actor && !channel.federation_enabled)
+      throw new Problem(403, "Enable channel federation before allowing remote users.");
+    if (target.remote_actor) this.ensureEnabled();
+    if (channel.remote_actor) this.moderateRemote(user, channel.id, target.id, { rule: "allow" });
+    else this.store.setMember(user, channel.id, target.id, { rule: "allow" });
+  }
   async subscribe(user: User, value: unknown) {
     this.require(user, "federation_subscribe");
     this.require(user, "federation_receive");
@@ -1197,9 +1226,13 @@ export class Federation {
     const peer = await this.resolve(value);
     if (peer.type !== "Person")
       throw new Problem(400, "Direct messages need a remote user actor.");
+    return this.sendResolvedDirect(user, peer.id, bodyValue);
+  }
+  sendResolvedDirect(user: User, peerId: string, bodyValue: unknown) {
+    this.store.requirePermission(user, "direct_messages");
     this.require(user, "federation_send");
-    this.allowed(peer.id);
-    if (this.store.isUserBlocked(user.id, peer.id))
+    this.allowed(peerId);
+    if (this.store.isUserBlocked(user.id, peerId))
       throw new Problem(403, "You blocked this user.");
     const body = text(bodyValue, "Message", 8000),
       id = `${this.config.baseUrl}/federation/objects/${randomUUID()}`,
@@ -1209,7 +1242,7 @@ export class Federation {
         id,
         type: "Note",
         attributedTo: this.userActor(user),
-        to: [peer.id],
+        to: [peerId],
         mediaType: "text/plain",
         content: body,
         published: time(),
@@ -1232,7 +1265,7 @@ export class Federation {
         .run(
           id,
           user.id,
-          peer.id,
+          peerId,
           body,
           JSON.stringify(emojis),
           note.published,
@@ -1242,12 +1275,12 @@ export class Federation {
         "Create",
         this.userActor(user),
         note,
-        [peer.id],
+        [peerId],
         "direct",
         user.id,
         null,
       );
-      return { id, activity, body, peer: peer.id };
+      return { id, activity, body, peer: peerId };
     });
   }
   // Finds the person behind an address, so a conversation with them can be opened.
@@ -1556,19 +1589,20 @@ export class Federation {
     );
     if (!own) this.store.audit(user.id, "message.delete.remote", id);
   }
-  // Removing or banning in a followed channel is asked of its home, for a subscriber whose role
+  // Granting access, removing or banning in a followed channel is asked of its home, for a subscriber whose role
   // there allows it. The home decides, and tells whoever it concerns.
   moderateRemote(user: User, id: string, targetId: string, input: Doc) {
     this.store.active(user.id);
     this.ensureEnabled();
     const channel = this.store.channel(id),
       target = this.store.user(targetId),
-      banning = input.rule === "block" || input.rule === "clear";
+      banning = input.rule === "block" || input.rule === "clear",
+      allowing = input.rule === "allow";
     if (
       !channel.remote_actor ||
       Object.keys(input).length !== 1 ||
-      !(input.remove === true || banning) ||
-      !this.store.channelCan(user, channel, banning ? "ban_members" : "kick_members")
+      !(input.remove === true || banning || allowing) ||
+      !this.store.channelCan(user, channel, allowing ? "allow_access" : banning ? "ban_members" : "kick_members")
     )
       throw new Problem(
         403,
@@ -1579,7 +1613,7 @@ export class Federation {
     if (target.remote_actor?.startsWith("xmpp:"))
       throw new Problem(400, "The channel's home does not know this person.");
     this.queue(
-      banning ? "Block" : "Remove",
+      allowing ? "Add" : banning ? "Block" : "Remove",
       this.userActor(user),
       {
         type: "Person",
@@ -2188,8 +2222,23 @@ export class Federation {
     const channelUpdate = activity.type === "Update" && object?.type === "Group";
     let renamed: Doc | undefined;
     let reactor: Doc | undefined;
+    let accessTarget: Doc | undefined;
     const roleUpdate = activity.type === "Update" && object?.type === "ChannelRole";
-    if (roleUpdate) {
+    if (activity.type === "Add") {
+      const home = `${this.config.baseUrl}/actors/channels/`;
+      if (sender.type !== "Person" || object?.type !== "Person" ||
+          typeof object.id !== "string" || typeof object.channel !== "string" ||
+          !object.channel.startsWith(home))
+        throw new Problem(400, "Name a person to allow into a home channel.");
+      const channel = this.store.channel(object.channel.slice(home.length));
+      const remote = this.remoteUser(sender);
+      if (!channel.federation_enabled || channel.remote_actor ||
+          !this.acceptedFollower(channel.id, sender.id) ||
+          !this.store.channelCan(remote, channel, "allow_access"))
+        throw new Problem(403, "Channel access permission denied.");
+      accessTarget = await this.actor(object.id);
+      if (accessTarget.type !== "Person") throw new Problem(400, "Choose a user actor.");
+    } else if (roleUpdate) {
       if (sender.type !== "Group" || object.channel !== sender.id)
         throw new Problem(403, "A role is told by the channel it is held in.");
     } else if (channelUpdate) {
@@ -2533,7 +2582,7 @@ export class Federation {
             .get(object.id) as { id: string };
           this.relay(this.store.message(message.id), activity.type, remote);
         }
-      } else if (["Remove", "Block"].includes(activity.type)) {
+      } else if (["Remove", "Block", "Add"].includes(activity.type)) {
         const home = `${this.config.baseUrl}/actors/channels/`,
           people = `${this.config.baseUrl}/actors/users/`;
         if (
@@ -2553,7 +2602,7 @@ export class Federation {
           !this.acceptedFollower(channel.id, sender.id)
         )
           throw new Problem(403, "Channel subscription or moderation permission denied.");
-        const target = (
+        const target = activity.type === "Add" ? this.remoteUser(accessTarget!) : (
           object.id.startsWith(people)
             ? this.store.db
                 .prepare("SELECT id FROM users WHERE id=? AND remote_actor IS NULL")
@@ -2567,7 +2616,9 @@ export class Federation {
           remote,
           channel.id,
           target.id,
-          activity.type === "Remove"
+          activity.type === "Add"
+            ? { rule: "allow" }
+            : activity.type === "Remove"
             ? { remove: true }
             : { rule: object.on ? "block" : "clear" },
         );

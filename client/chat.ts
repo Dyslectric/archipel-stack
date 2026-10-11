@@ -572,9 +572,19 @@ function renderHeader() {
 function openChannelOptions(button: HTMLElement) {
   const c = current!;
   const owning = !c.remote_actor && (c.role === "owner" || me().admin);
-  const panel = popup(button, `<div class="menu-section channel-menu-about"><strong>#${esc(c.name)}</strong>${c.description ? `<p class="muted small">${esc(c.description)}</p>` : ""}<p class="muted small">${roleLabel(c.role, c.channel_role)} · ${c.remote_actor ? "Hosted on another server" : c.federation_enabled ? "Shared with other servers" : "People on this instance"}</p></div>${c.role ? prefItems("channel", c.id) : ""}<div class="menu-section" role="menu">${owning ? `<button type="button" class="menu-item" role="menuitem" data-rename-channel>${icon("pencil")}<span class="grow">Rename channel…</span></button>` : ""}<a class="menu-item" role="menuitem" href="#/settings/channel/overview/${c.id}">${icon("settings")}<span class="grow">Channel settings</span></a>${c.role && c.role !== "owner" ? `<button type="button" class="menu-item bad-text" role="menuitem" data-leave-channel>${icon("logout")}<span class="grow">Leave channel…</span></button>` : ""}</div>`);
+  const inviting = c.visibility === "public" || channelCan(c, "allow_access");
+  const panel = popup(button, `<div class="menu-section channel-menu-about"><strong>#${esc(c.name)}</strong>${c.description ? `<p class="muted small">${esc(c.description)}</p>` : ""}<p class="muted small">${roleLabel(c.role, c.channel_role)} · ${c.remote_actor ? "Hosted on another server" : c.federation_enabled ? "Shared with other servers" : "People on this instance"}</p></div>${c.role ? prefItems("channel", c.id) : ""}<div class="menu-section" role="menu">${inviting ? `<button type="button" class="menu-item" role="menuitem" data-invite-channel>${icon("people")}<span class="grow">Invite someone…</span></button>` : ""}${owning ? `<button type="button" class="menu-item" role="menuitem" data-rename-channel>${icon("pencil")}<span class="grow">Rename channel…</span></button>` : ""}<a class="menu-item" role="menuitem" href="#/settings/channel/overview/${c.id}">${icon("settings")}<span class="grow">Channel settings</span></a>${c.role && c.role !== "owner" ? `<button type="button" class="menu-item bad-text" role="menuitem" data-leave-channel>${icon("logout")}<span class="grow">Leave channel…</span></button>` : ""}</div>`);
   panel?.addEventListener("click", (e) => {
     pickPref(e, c.id, () => redrawChat(false, true));
+    if ((e.target as Element).closest("[data-invite-channel]")) action(async () => {
+      const address = await promptDialog(`Invite someone to #${c.name}`, "Person's address (@handle, user@server, actor URL or xmpp:user@server)", "", "Send invitation", {
+        maxLength: 2048,
+        description: channelCan(c, "allow_access") ? "Sends a direct message and grants access to join." : "Sends a direct message. The channel's access rules still apply.",
+      });
+      if (!address) return;
+      await api(`/channels/${c.id}/invitations`, "POST", { address });
+      toast("Invitation sent as a direct message.");
+    });
     if ((e.target as Element).closest("[data-rename-channel]")) action(async () => {
       const name = await promptDialog("Rename channel", "Channel name", c.name, "Rename channel");
       if (!name || name === c.name) return;

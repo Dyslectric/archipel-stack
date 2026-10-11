@@ -97,7 +97,8 @@ protocol.
 
 ## Delegated moderation
 
-A home may give an accepted follower a role that allows some of: removing
+A home may give an accepted follower a role that allows some of: allowing access
+(`allow_access`), removing
 members (`kick_members`), banning people (`ban_members`), banning instances
 (`ban_instances`) and deleting other authors' messages (`delete_messages`).
 
@@ -122,6 +123,7 @@ The holder's instance sends the home, signed as the holder:
 | `Delete` | `Tombstone` with the message `id` and `channel`                           | Remove another author's message |
 | `Remove` | `Person` with the member's actor `id` and `channel`                       | Remove a member or end a follow |
 | `Block`  | `Person` with the actor `id`, `channel` and `on` (`true` ban, `false` lift) | Ban someone, or lift their ban  |
+| `Add`    | `Person` with the actor `id` and `channel`                                | Add a person to the allow list |
 
 The home applies one only when the signer is an accepted follower whose role, in
 the home's own records, grants that action, and never against the owner, a
@@ -129,6 +131,13 @@ moderator or another role holder. It answers anything else with 403. Results are
 distributed as any moderation by the home is: an `Announce` of the `Delete`, and
 a `Reject` of a removed or banned follower's follow. Banning instances has no
 activity in version 1.
+
+An `Add` resolves the named user actor at its home, records an allow-list entry,
+and accepts an existing pending follow. The `allow_access` permission cannot
+replace a block. Invitations are direct `Note` messages with a channel Join
+link; an authorized sender separately requests or grants access. A Join link
+has the form `<channel home>/#/join/<URL-encoded channel actor>` and is opened
+through the reader's own instance by Archipel Web.
 
 Direct messages are delivered from the sender's server to the recipient's inbox.
 They are stored on the participating servers and are not end-to-end encrypted.

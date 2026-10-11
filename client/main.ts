@@ -45,6 +45,7 @@ import {
   renderAdmission,
   renderLogin,
   showChannels,
+  showChannelInvitation,
   tickChannels,
 } from "./pages.js";
 import { showSettings, tickSettings } from "./settings.js";
@@ -277,7 +278,7 @@ async function route() {
     .split("/")
     .filter(Boolean);
   const name =
-    ["channels", "settings", "xmpp"].includes(parts[0]) ? parts[0] : "chat";
+    parts[0] === "join" ? "channels" : ["channels", "settings", "xmpp"].includes(parts[0]) ? parts[0] : "chat";
   const shell = $(".app");
   if (shell.dataset.view !== name) view.innerHTML = "";
   shell.dataset.view = name;
@@ -289,7 +290,8 @@ async function route() {
     else item.removeAttribute("aria-current");
   }
   closePicker();
-  if (name === "channels") showChannels(view, parts[1] === "new");
+  if (parts[0] === "join" && parts[1]) showChannelInvitation(view, decodeURIComponent(parts[1]));
+  else if (name === "channels") showChannels(view, parts[1] === "new");
   else if (name === "xmpp") await showXmppRooms(view, parts[1]);
   else if (name === "settings")
     await showSettings(view, parts[1], parts[2], parts[3]);

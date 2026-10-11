@@ -248,7 +248,7 @@ test("version 8 migration preserves native IDs and archive correction references
   store.db.exec("DROP TABLE channel_held_roles; DROP TABLE channel_instance_bans; DROP TABLE channel_member_roles; DROP TABLE channel_roles; DROP TABLE reaction_emojis; ALTER TABLE channels DROP COLUMN reaction_bans; DROP TABLE device_flows; DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP INDEX xmpp_message_ids_sender; ALTER TABLE xmpp_message_ids DROP COLUMN scope; CREATE UNIQUE INDEX legacy_stanza_ids ON xmpp_message_ids(sender,stanza_id); PRAGMA user_version=8");
   store.close(); store = new Store(path); xmpp = new Xmpp(store, config);
   t.after(() => { store.close(); rmSync(directory, { recursive: true, force: true }); });
-  assert.equal(store.db.version(), 25);
+  assert.equal(store.db.version(), 26);
   assert.equal(xmpp.archive(alice, { room: input.to }).messages[0].stanza_id, "old-id");
   xmpp.operation({ ...input, stream: "new-stream", id: "new-id", replace: "old-id", body: "Migrated correction" });
   assert.equal(store.message(result.id).body, "Migrated correction");

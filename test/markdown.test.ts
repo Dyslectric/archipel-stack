@@ -6,6 +6,13 @@ const origin = "https://chat.example";
 const md = (body: string) => markdownHtml(body, [], origin);
 const file = `${origin}/media/${"a".repeat(43)}`;
 
+test("channel invitation links join through the reader's instance and keep the home actor", () => {
+  const actor = "https://home.example/actors/channels/abcd-1234";
+  const hash = `#/join/${encodeURIComponent(actor)}`;
+  assert.equal(md(`[Join channel](https://home.example/${hash})`), `<p><a href="${origin}/${hash}">Join channel</a></p>`);
+  assert.match(md(`[Join channel](https://other.example/${hash})`), /href="https:\/\/other.example\//);
+});
+
 test("markdown formats emphasis, code, quotes, lists and headings", () => {
   assert.equal(md("plain"), "<p>plain</p>");
   assert.equal(md("one\ntwo\n\nthree"), "<p>one<br>two</p><p>three</p>");

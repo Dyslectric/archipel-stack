@@ -119,6 +119,7 @@ const roleValues = (data: FormData) => ({
 });
 // What a channel's role lets a member do there.
 const channelRolePermissions = [
+  ["allow_access", "Allow people to access the channel"],
   ["kick_members", "Remove members from the channel"],
   ["ban_members", "Ban people from the channel, and lift their bans"],
   ["ban_instances", "Ban other instances and XMPP servers from the channel"],
@@ -726,7 +727,7 @@ const sections: Section[] = [
       el.innerHTML =
         card(
           `${channelIcon(c)} ${esc(c.name)}`,
-          `<dl class="info"><dt>Address</dt><dd><code>${esc(address)}</code></dd><dt>Description</dt><dd>${esc(c.description || "None")}</dd><dt>Conversation style</dt><dd>${modeLabel(c.mode)}${c.mode === "threaded" ? ` · titles ${c.optional_titles ? "optional" : "required"}` : ""}</dd><dt>Who can read</dt><dd>${c.visibility === "members" ? "Members only" : "Everyone on this instance"}</dd><dt>Who can join</dt><dd>${c.admission === "allowlist" ? "Invited users only" : "Anyone on this instance"}</dd><dt>Members</dt><dd><a href="#/settings/channel/members/${c.id}">${c.member_count}</a></dd><dt>Your role</dt><dd>${roleLabel(c.role, c.channel_role)}</dd><dt>Shared with</dt><dd>${c.remote_actor ? "Hosted on another server" : c.federation_enabled ? "Members here and on other servers" : "People on this instance"}</dd></dl><p><a class="button secondary" href="#/c/${c.id}">${icon("chat")} Open channel</a></p>`,
+          `<dl class="info"><dt>Address</dt><dd><code>${esc(address)}</code></dd><dt>Description</dt><dd>${esc(c.description || "None")}</dd><dt>Conversation style</dt><dd>${modeLabel(c.mode)}${c.mode === "threaded" ? ` · titles ${c.optional_titles ? "optional" : "required"}` : ""}</dd><dt>Who can read</dt><dd>${c.visibility === "members" ? "Members only" : "Everyone on this instance"}</dd><dt>Who can join</dt><dd>${c.admission === "allowlist" ? "Allowed users only" : "Anyone on this instance"}</dd><dt>Members</dt><dd><a href="#/settings/channel/members/${c.id}">${c.member_count}</a></dd><dt>Your role</dt><dd>${roleLabel(c.role, c.channel_role)}</dd><dt>Shared with</dt><dd>${c.remote_actor ? "Hosted on another server" : c.federation_enabled ? "Members here and on other servers" : "People on this instance"}</dd></dl><p><a class="button secondary" href="#/c/${c.id}">${icon("chat")} Open channel</a></p>`,
         ) +
         (c.role && c.role !== "owner"
           ? card(
@@ -972,13 +973,34 @@ const sections: Section[] = [
     group: "channel",
     key: "access",
     label: "Access rules",
-    about: "Who is invited to, or blocked from, this channel.",
+    about: "Who is allowed access to, or blocked from, this channel.",
     icon: "lock",
     // A followed channel's rules are kept by its home.
-    show: (c) => canModerate(c) || (!c.remote_actor && channelCan(c, "ban_members")),
+    show: (c) => canModerate(c) || channelCan(c, "allow_access") || (!c.remote_actor && channelCan(c, "ban_members")),
     async draw(el, ctx) {
       const c = ctx.channel!,
-        moderating = canModerate(c);
+        moderating = canModerate(c),
+        allowing = channelCan(c, "allow_access"),
+        banning = channelCan(c, "ban_members");
+      const accessCard = allowing ? card(
+        "Allow access",
+        `<form class="stack narrow-form" id="allow-access"><label>Person's address<input name="address" required maxlength="2048" placeholder="@handle, user@server, actor URL or xmpp:user@server" autocomplete="off"></label>${error}<button>Allow access</button></form>`,
+        "Adds the person to the allow list without sending a message. They still need to join. To send an invitation, use Invite in the channel menu.",
+      ) : "";
+      const bindAccess = () => {
+        const form = el.querySelector<HTMLFormElement>("#allow-access");
+        if (form) onSubmit(form, async (data) => {
+          await api(`/channels/${c.id}/access`, "POST", { address: data.get("address") });
+          toast(c.remote_actor ? "Access requested from the channel's home." : "Access allowed.");
+          ctx.refresh();
+        });
+      };
+      if (c.remote_actor || (!moderating && !banning)) {
+        const rules = c.remote_actor ? [] : await api<{ username: string }[]>(`/channels/${c.id}/rules`);
+        el.innerHTML = accessCard + (c.remote_actor ? "" : card("Allowed access", `<ul class="plain">${rules.map(r => `<li>@${esc(r.username)}</li>`).join("") || '<li class="muted">Nobody has been allowed access yet.</li>'}</ul>`));
+        bindAccess();
+        return;
+      }
       // Without the instance's member list, the person is named by their handle.
       const [users, rules] = await Promise.all([
         listsMembers() ? api<User[]>("/users") : null,
@@ -986,7 +1008,7 @@ const sections: Section[] = [
           `/channels/${c.id}/rules`,
         ),
       ]);
-      el.innerHTML =
+      el.innerHTML = accessCard +
         card(
           moderating ? "Change someone's access" : "Ban someone",
           `<form class="stack narrow-form" id="access-form"><label>Person${
@@ -997,12 +1019,13 @@ const sections: Section[] = [
                   .join("")}</select>`
               : `<span class="input-prefix"><span>@</span><input name="handle" required maxlength="64" placeholder="handle" autocomplete="off"></span>`
           }</label>${moderating ? `<label>Action<select name="action"><option value="allow">Allow to join</option><option value="block">Block and remove membership</option><option value="clear">Clear access rule</option><option value="remove">Remove membership</option>${state.session.user?.admin || c.role === "owner" ? '<option value="moderator">Make moderator</option><option value="member">Make member</option>' : ""}</select></label>` : '<input type="hidden" name="action" value="block">'}${error}<button>${moderating ? "Apply change" : "Ban from channel"}</button></form>`,
-          `${c.visibility === "members" ? "Members-only" : "Public"} · ${c.admission === "allowlist" ? "invitation required" : "open membership"}`,
+          `${c.visibility === "members" ? "Members-only" : "Public"} · ${c.admission === "allowlist" ? "access approval required" : "open membership"}`,
         ) +
         card(
           moderating ? "Access rules" : "Banned",
-          `<ul class="plain rules-list">${rules.length ? rules.map((r) => `<li class="row"><span class="grow">@${esc(r.username)}</span><span class="pill ${r.rule === "block" ? "bad" : "good"}">${esc(r.rule)}</span><button type="button" class="small secondary" data-clear="${r.user_id}">${r.rule === "block" ? "Lift ban" : "Clear"}</button></li>`).join("") : `<li class="muted">${moderating ? "No individual access rules." : "Nobody is banned."}</li>`}</ul>`,
+          `<ul class="plain rules-list">${rules.length ? rules.map((r) => `<li class="row"><span class="grow">@${esc(r.username)}</span><span class="pill ${r.rule === "block" ? "bad" : "good"}">${esc(r.rule)}</span>${moderating || r.rule === "block" ? `<button type="button" class="small secondary" data-clear="${r.user_id}">${r.rule === "block" ? "Lift ban" : "Clear"}</button>` : ""}</li>`).join("") : `<li class="muted">${moderating ? "No individual access rules." : "Nobody is banned."}</li>`}</ul>`,
         );
+      bindAccess();
       const change = async (user: unknown, selected: string) => {
         await api(
           `/channels/${c.id}/members/${user}`,
@@ -1290,7 +1313,7 @@ const sections: Section[] = [
         card(
           "Federation",
           `<form class="stack" id="channel-federation"><label class="check"><input type="checkbox" name="enabled" ${c.federation_enabled ? "checked" : ""}> Allow this channel to federate</label>${error}<button>Save channel federation</button></form>`,
-          "Open channels accept remote subscribers automatically. Invited channels require approval here. Turning federation off stops channel delivery and removes remote admission.",
+          "Public and private channels can federate. Open channels accept remote subscribers automatically. Channels with an allow list accept allowed users; other requests need approval here. Turning federation off stops channel delivery and removes remote admission.",
         ) +
         card(
           "Remote followers",

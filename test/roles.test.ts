@@ -10,6 +10,20 @@ import { sqliteOnly } from "./sqlite-only.js";
 const denied = (fn: () => unknown, status = 403) =>
   assert.throws(fn, (e: unknown) => e instanceof Problem && e.status === status);
 const channel = (name: string) => ({ name, description: "", mode: "timeline", visibility: "public", admission: "open" });
+
+test("access permission migration preserves existing roles and requires an explicit grant", sqliteOnly, t => {
+  const f = fixture(); t.after(() => f.store.close());
+  const c = f.store.createChannel(f.alice, channel("access"));
+  const role = f.store.createChannelRole(f.alice, c.id, { name: "Helper", kick_members: true });
+  f.store.join(f.bob, c.id);
+  f.store.setMember(f.alice, c.id, f.bob.id, { channel_role: role.id });
+  f.store.db.exec("ALTER TABLE channel_roles DROP COLUMN allow_access; ALTER TABLE channel_held_roles DROP COLUMN allow_access; PRAGMA user_version=25");
+  f.store.db.migrate();
+  assert.equal(f.store.channelCan(f.bob, f.store.channel(c.id), "allow_access"), false);
+  assert.equal(f.store.channelCan(f.bob, f.store.channel(c.id), "kick_members"), true);
+  f.store.updateChannelRole(f.alice, c.id, role.id, { allow_access: true });
+  assert.equal(f.store.channelCan(f.bob, f.store.channel(c.id), "allow_access"), true);
+});
 function fixture() {
   const store = new Store(":memory:");
   const config = loadConfig({ DEV_AUTH: "true", XMPP_DOMAIN: "chat.example", XMPP_BRIDGE_SECRET: "s".repeat(43) });
