@@ -430,6 +430,14 @@ ul.plain.people-list > li { padding: 0; border: none; }
 .group-body > article .message-meta .author { font-weight: 700; }
 .group-body > article .message-meta .handle, .group-body > article .message-meta time { font-size: 0.85em; color: var(--muted); }
 .group-body > article .message-meta .handle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Default's picture is centered between the card edge and text. Its vertical center
+   follows the bottom of the name row, including when the handle or time wraps. */
+:root[data-style="default"] .group-body > article:not(.cont) > .message-content { display: contents; }
+:root[data-style="default"] .group-body > article:not(.cont) > .message-content > * { grid-column: 2; min-width: 0; }
+:root[data-style="default"] .msg-gutter:has(.avatar) {
+  grid-column: 1; grid-row: 1; align-self: end; height: 0; padding-top: 0; text-align: center; }
+:root[data-style="default"] .msg-gutter .avatar {
+  width: 2.25rem; height: 2.25rem; border-radius: 9px; font-size: 1.1rem; transform: translateY(-50%); }
 .edited { font-size: 0.85em; color: var(--muted); }
 .message-body { white-space: pre-wrap; overflow-wrap: anywhere; }
 /* Formatted messages: Markdown's blocks sit as close together as lines of chat do. */

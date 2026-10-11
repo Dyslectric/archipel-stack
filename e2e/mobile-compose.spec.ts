@@ -78,10 +78,15 @@ for (const style of ["default", "fusion-compact", "fusion-cozy"]) {
           expect(text!.x - (side!.x + side!.width)).toBeGreaterThanOrEqual(12);
           expect(text!.x + text!.width).toBeLessThanOrEqual(bounds!.x + bounds!.width);
           const first = page.locator("article.message").filter({ hasText: "First mobile message" });
-          const [avatar, firstText] = await Promise.all([
+          const [avatar, firstText, firstRow, meta] = await Promise.all([
             first.locator(".msg-gutter .avatar").boundingBox(), first.locator(".message-body").boundingBox(),
+            first.boundingBox(), first.locator(".message-meta").boundingBox(),
           ]);
           expect(firstText!.x - (avatar!.x + avatar!.width)).toBeGreaterThanOrEqual(14);
+          const leftPadding = avatar!.x - firstRow!.x;
+          const rightPadding = firstText!.x - (avatar!.x + avatar!.width);
+          expect(Math.abs(leftPadding - rightPadding)).toBeLessThanOrEqual(1);
+          expect(Math.abs(avatar!.y + avatar!.height / 2 - (meta!.y + meta!.height))).toBeLessThanOrEqual(1);
           if (width === 390 && scale === 100 && theme === "dark")
             await page.screenshot({ path: info.outputPath("default-mobile-spacing.png") });
         }
