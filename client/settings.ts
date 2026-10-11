@@ -43,6 +43,7 @@ import {
   disablePush,
   enablePush,
   pushBlocked,
+  pushFound,
   pushOn,
   pushSupported,
   testPush,
@@ -329,7 +330,10 @@ const sections: Section[] = [
       el.innerHTML =
         card(
           "This device",
-          device,
+          device +
+            (pushFound()
+              ? `<p class="muted small">When Archipel Web was opened: ${esc(pushFound())}</p>`
+              : ""),
           "You are told when something new is said, even with Archipel Web closed. A notification names the conversation and shows who wrote, their picture and what they said. Each browser and device is turned on by itself, and signing out turns it off.",
         ) +
         card(
