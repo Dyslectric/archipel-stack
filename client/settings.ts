@@ -744,7 +744,7 @@ const sections: Section[] = [
               "Turning reactions off hides them in this channel. Existing reactions are kept and show again if you turn them back on.",
             ) +
             card(
-              "Banned reactions",
+              "Banned emojis",
               `${c.reaction_bans.length ? `<ul class="plain stack">${c.reaction_bans.map((name) => `<li class="row"><span class="grow">${emojiHtml(`:${name}:`)} <code>:${esc(name)}:</code></span><button type="button" class="small secondary" data-unban="${esc(name)}">Allow again</button></li>`).join("")}</ul>` : '<p class="muted">No emoji is banned.</p>'}<form class="stack narrow-form" id="reaction-ban"><label>Emoji shortcode<input name="emoji" required maxlength="66" pattern=":?[a-z0-9_+\\-]+:?" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="eggplant"></label>${error}<button>Ban emoji</button></form>`,
               "A banned emoji is taken off every message in this channel and cannot be given as a reaction again, here or from an instance following the channel. A single unwanted reaction can be removed from its message instead.",
             )
@@ -872,11 +872,14 @@ const sections: Section[] = [
           (u.role === "member" &&
             !u.channel_role &&
             u.id !== state.session.user?.id));
+      // The owner chooses what a member is from a list by their name: a member, one of the channel's
+      // roles, or a moderator. Someone from elsewhere can only be a member, so has no list.
       const roleSelect = (u: User) =>
-        roles.length &&
-        u.role === "member" &&
+        owning &&
+        u.role !== "owner" &&
+        u.held !== false &&
         (!u.actor_url || u.actor_url.startsWith(location.origin))
-          ? `<select class="role-select" data-channel-role-for="${u.id}" aria-label="Role for ${esc(u.display_name)}" title="Role"><option value="">No role</option>${roles.map((r) => `<option value="${r.id}" ${r.id === u.channel_role?.id ? "selected" : ""}>${esc(r.name)}</option>`).join("")}</select>`
+          ? `<select class="role-select" data-member-role-for="${u.id}" data-was="${u.role}" aria-label="Role for ${esc(u.display_name)}" title="Role"><option value="member" ${u.role === "member" && !u.channel_role ? "selected" : ""}>Member</option>${roles.map((r) => `<option value="role:${r.id}" ${u.role === "member" && r.id === u.channel_role?.id ? "selected" : ""}>${esc(r.name)}</option>`).join("")}<option value="moderator" ${u.role === "moderator" ? "selected" : ""}>Moderator</option></select>`
           : "";
       // Where the channel keeps something from its members, a moderator can let one of them see it.
       const allow = (u: User, grant: "see_members" | "see_handles", what: string) =>
@@ -898,9 +901,9 @@ const sections: Section[] = [
           .map((u) =>
             person(
               u,
-              `<span class="pill ${u.role === "owner" ? "kept" : u.role === "moderator" ? "new" : ""}">${roleLabel(u.role, u.channel_role)}</span>${moderating && u.role === "member" && ((!c.show_members && u.see_members) || (c.hide_handles && u.see_handles)) ? ` <span class="pill good">Sees ${[!c.show_members && u.see_members ? "members" : "", c.hide_handles && u.see_handles ? "handles" : ""].filter(Boolean).join(" and ")}</span>` : ""}${u.verified_socials.length ? `<details class="socials"><summary>Shared socials</summary>${socialsHtml(u.verified_socials)}</details>` : ""}`,
+              `${roleSelect(u) || `<span class="pill ${u.role === "owner" ? "kept" : u.role === "moderator" ? "new" : ""}">${roleLabel(u.role, u.channel_role)}</span>`}${moderating && u.role === "member" && ((!c.show_members && u.see_members) || (c.hide_handles && u.see_handles)) ? ` <span class="pill good">Sees ${[!c.show_members && u.see_members ? "members" : "", c.hide_handles && u.see_handles ? "handles" : ""].filter(Boolean).join(" and ")}</span>` : ""}${u.verified_socials.length ? `<details class="socials"><summary>Shared socials</summary>${socialsHtml(u.verified_socials)}</details>` : ""}`,
               reach(u)
-                ? `${moderating && u.held !== false ? `${grants(u)}${roleSelect(u)}${promoting ? `<button type="button" class="small secondary" data-member="${u.id}" data-role="${u.role === "moderator" ? "member" : "moderator"}">${u.role === "moderator" ? "Make member" : "Make moderator"}</button>` : ""}` : ""}${kicking ? `<button type="button" class="small secondary bad-text" data-member="${u.id}" data-remove>Remove</button>` : ""}${banning ? `<button type="button" class="small secondary bad-text" data-member="${u.id}" data-ban>Ban</button>` : ""}`
+                ? `${moderating && u.held !== false ? `${grants(u)}${promoting && !roleSelect(u) ? `<button type="button" class="small secondary" data-member="${u.id}" data-role="${u.role === "moderator" ? "member" : "moderator"}">${u.role === "moderator" ? "Make member" : "Make moderator"}</button>` : ""}` : ""}${kicking ? `<button type="button" class="small secondary bad-text" data-member="${u.id}" data-remove>Remove</button>` : ""}${banning ? `<button type="button" class="small secondary bad-text" data-member="${u.id}" data-ban>Ban</button>` : ""}`
                 : "",
             ),
           )
@@ -911,16 +914,25 @@ const sections: Section[] = [
             ? `Bans are listed, and lifted, under <a href="#/settings/channel/access/${c.id}">Access rules</a>.`
             : "",
       );
-      for (const select of $$<HTMLSelectElement>("[data-channel-role-for]", el))
+      for (const select of $$<HTMLSelectElement>("[data-member-role-for]", el))
         select.addEventListener("change", () =>
           action(async () => {
-            await api(
-              `/channels/${c.id}/members/${select.dataset.channelRoleFor}`,
-              "PATCH",
-              { channel_role: select.value || null },
-            );
-            toast("Role changed.");
-            ctx.refresh();
+            const to = select.value,
+              moderator = select.dataset.was === "moderator";
+            try {
+              await api(
+                `/channels/${c.id}/members/${select.dataset.memberRoleFor}`,
+                "PATCH",
+                to === "moderator"
+                  ? { role: "moderator" }
+                  : to === "member"
+                    ? moderator ? { role: "member" } : { channel_role: null }
+                    : { ...(moderator ? { role: "member" } : {}), channel_role: to.slice(5) },
+              );
+              toast("Role changed.");
+            } finally {
+              ctx.refresh();
+            }
           }),
         );
       if (owning)
