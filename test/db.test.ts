@@ -9,6 +9,26 @@ import { Store } from "../src/store.js";
 
 const postgres = process.env.ARCHIPEL_TEST_POSTGRES;
 
+test("nested and sequential savepoints isolate rollbacks and reuse names safely", t => {
+  const db = new SqliteDatabase(":memory:"); db.migrate(); t.after(() => db.close());
+  const names: string[] = [], original = db.exec.bind(db);
+  db.exec = sql => { if (sql.startsWith("SAVEPOINT")) names.push(sql); original(sql); };
+  const notices: string[] = [];
+  db.onChange = changes => notices.push(...changes.flatMap(c => c.rows.map(r => String(r.key))));
+  const put = (key: string) => db.prepare("INSERT INTO instance_settings VALUES(?,?)").run(key, "yes");
+  db.transaction(() => {
+    db.savepoint(() => {
+      put("outer");
+      assert.throws(() => db.savepoint(() => { put("rolled-back"); throw new Error("nested failure"); }));
+      db.savepoint(() => put("nested-kept"));
+    });
+    db.savepoint(() => put("sequential-kept"));
+  });
+  assert.deepEqual(names, ["SAVEPOINT archipel_s1", "SAVEPOINT archipel_s2", "SAVEPOINT archipel_s2", "SAVEPOINT archipel_s1"]);
+  assert.equal(db.prepare("SELECT 1 FROM instance_settings WHERE key='rolled-back'").get(), undefined);
+  assert.deepEqual(notices, ["outer", "nested-kept", "sequential-kept"]);
+});
+
 test("SQLite's SQL is said the way PostgreSQL understands it", () => {
   assert.equal(
     toPostgres("SELECT * FROM messages WHERE channel_id=? AND seq<? ORDER BY seq DESC LIMIT ?"),
@@ -127,7 +147,7 @@ test("an instance moves from its SQLite file into PostgreSQL whole, and carries 
   again.close();
 
   const moved = new Store(target, origin);
-  assert.equal(target.version(), 26);
+  assert.equal(target.version(), 29);
   assert.deepEqual(moved.messages(moved.user(bob.id), channel.id), expected.messages);
   assert.deepEqual(moved.directHistory(moved.user(bob.id), `${origin}/actors/users/${alice.id}`), expected.dms);
   assert.deepEqual(moved.overview(moved.user(bob.id)), expected.overview);

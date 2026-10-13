@@ -187,6 +187,10 @@ const everyone = `
 
 export class Store {
   db: Database;
+  private messagePageBytes = 0;
+  private messagePages = new Map<string, { version: string; until: number; bytes: number;
+    raw: Message[]; infos: ReturnType<Store["messageInfo"]>[];
+    authors: Map<string, { author: User; avatar: string | null }> }>();
   federationHooks?: {
     access?: (channel: Channel, target: User) => void;
     profile: (user: User) => void;
@@ -353,8 +357,11 @@ export class Store {
   }
   // A session in use lasts: on a day it is used, it is good for that long again. True when it
   // was put off, at most once a day.
-  renewSession(token: string) {
+  renewSession(token: string, currentExpiry?: number) {
     const until = Date.now() + SESSION_LIFE;
+    // The live session lookup already tells us whether renewal is due. Avoid
+    // a no-op UPDATE on every API read; due renewals still recheck in SQL.
+    if (currentExpiry !== undefined && (currentExpiry > until - 86400000 || currentExpiry <= Date.now())) return false;
     return !!this.db
       .prepare(
         "UPDATE sessions SET expires_at=? WHERE token_hash=? AND expires_at>? AND expires_at<?",
@@ -362,14 +369,15 @@ export class Store {
       .run(until, hash(token), Date.now(), until - 86400000).changes;
   }
   session(token: string) {
-    const session = this.db
-      .prepare("SELECT * FROM sessions WHERE token_hash=? AND expires_at>?")
-      .get(hash(token), Date.now()) as
-      | { user_id: string; csrf: string }
-      | undefined;
-    return session
-      ? { user: this.authenticated(session.user_id), csrf: session.csrf }
-      : null;
+    // Authentication is on every API refresh. Fetch the current account with
+    // the live session in one round trip, retaining revocation/expiry checks.
+    const row = this.db.prepare(
+      "SELECT u.*,s.csrf,s.expires_at AS session_expiry FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?",
+    ).get(hash(token), Date.now()) as (User & { csrf: string; session_expiry: number }) | undefined;
+    if (!row) return null;
+    const { csrf, session_expiry:expiresAt, ...account } = row;
+    if (account.banned) throw new Problem(403, "This account has been suspended.");
+    return { user: account as User, csrf, expiresAt };
   }
   logout(token: string) {
     this.db.prepare("DELETE FROM sessions WHERE token_hash=?").run(hash(token));
@@ -1019,10 +1027,11 @@ export class Store {
       throw new Problem(404, "Saved emoji not found.");
   }
   messageEmojiTags(user: User, body: string) {
-    const catalog = new Map(this.emojiCatalog(user).map((e) => [e.name, e]));
     const names = new Set(
       [...body.matchAll(/:([a-z0-9_+\-]{1,64}):/g)].map((m) => m[1]),
     );
+    if (!names.size) return [];
+    const catalog = new Map(this.emojiCatalog(user).map((e) => [e.name, e]));
     return [...names].flatMap((name) => {
       const e = catalog.get(name);
       return e ? [e] : [];
@@ -1258,7 +1267,10 @@ export class Store {
         ? { id: "id" in held ? held.id : "", name: held.name }
         : null,
       permissions: Object.fromEntries(
-        channelPermissions.map((p) => [p, this.channelCan(user, channel, p)]),
+        // The current rule and effective role were already read above. Reuse
+        // this per-response snapshot instead of rereading them for every flag.
+        channelPermissions.map(p=>[p,manages || (rule!=="block" &&
+          (!channel.remote_actor || p!=="ban_instances") && !!held?.[p])]),
       ) as Record<ChannelPermission, boolean>,
       reaction_bans: this.reactionBans(channel),
       bridge_room: this.bridgeRoom(channel.id),
@@ -1296,19 +1308,17 @@ export class Store {
   listChannels(user: User) {
     this.active(user.id);
     const channels = this.db
-      .prepare("SELECT * FROM channels ORDER BY name")
-      .all() as unknown as Channel[];
-    return channels
-      .filter(
-        (c) =>
-          (!c.remote_actor || !!this.role(c.id, user.id)) &&
-          (user.admin ||
-            (this.rule(c.id, user.id) !== "block" &&
-              (c.visibility === "public" ||
-                !!this.role(c.id, user.id) ||
-                this.rule(c.id, user.id) === "allow"))),
-      )
-      .map((c) => this.channelInfo(user, c));
+      // Filter discovery in SQL. Examining every invisible channel with
+      // individual membership/rule queries multiplies remote DB round trips.
+      .prepare(`SELECT c.* FROM channels c
+        LEFT JOIN memberships m ON m.channel_id=c.id AND m.user_id=?
+        LEFT JOIN channel_rules r ON r.channel_id=c.id AND r.user_id=?
+        WHERE (COALESCE(c.remote_actor,'')='' OR m.user_id IS NOT NULL)
+          AND (?=1 OR (COALESCE(r.rule,'')!='block'
+            AND (c.visibility='public' OR m.user_id IS NOT NULL OR r.rule='allow')))
+        ORDER BY c.name`)
+      .all(user.id,user.id,Number(!!user.admin)) as unknown as Channel[];
+    return channels.map(c=>this.channelInfo(user,c));
   }
   private channelName(value: unknown) {
     const name = text(value, "Channel name", 40).toLowerCase();
@@ -2055,12 +2065,12 @@ export class Store {
     if (!result) throw new Problem(404, "Message not found.");
     return this.messageInfo(result);
   }
-  messageInfo(message: Message, viewer?: User) {
-    const author = this.user(message.author_id);
+  messageInfo(message: Message, viewer?: User, metadata?: { author: User; avatar: string | null; contactName?: string | null }) {
+    const author = metadata?.author || this.user(message.author_id);
     return {
       ...message,
       ...(viewer && author.remote_actor
-        ? { display_name: this.contactName(viewer, author.remote_actor) ?? message.display_name }
+        ? { display_name: (metadata?.contactName === undefined ? this.contactName(viewer, author.remote_actor) : metadata.contactName) ?? message.display_name }
         : {}),
       ...(message.history_placeholder
         ? { username: "history", display_name: "Earlier message" }
@@ -2072,7 +2082,7 @@ export class Store {
       author_actor_url:
         author.remote_actor ||
         `${this.baseUrl}/actors/users/${message.author_id}`,
-      avatar_url: message.history_placeholder ? null : this.avatarUrl(message.author_id),
+      avatar_url: message.history_placeholder ? null : metadata ? metadata.avatar : this.avatarUrl(message.author_id),
     };
   }
   // The emoji a message used that still exist, each with whose it is and the host it came from.
@@ -2106,26 +2116,75 @@ export class Store {
     });
   }
   messages(user: User, id: string, before?: number) {
-    this.requireRead(user, this.channel(id));
-    const page = (
-      this.db
-        .prepare(
-          "SELECT m.*,u.username,u.display_name FROM messages m JOIN users u ON u.id=m.author_id WHERE m.channel_id=? AND m.seq<? AND ((m.remote_object IS NULL AND COALESCE(u.remote_actor,'') NOT LIKE 'xmpp:%') OR ?=1) ORDER BY m.seq DESC LIMIT 100",
-        )
-        .all(
-          id,
-          before ?? Number.MAX_SAFE_INTEGER,
-          Number(!!this.active(user.id).federation_receive),
-        ) as unknown as Message[]
-    )
-      .reverse()
-      .map((m) => this.veiled(user, this.messageFor(user, m)));
+    const channel = this.channel(id);
+    this.requireRead(user, channel);
+    const handles = this.sees(user, channel, "handles"), receive = Number(!!this.active(user.id).federation_receive);
+    // Only raw records and public author/avatar metadata are shared. Reader
+    // access, blocks, labels, reactions and hidden threads are fresh on every call.
+    const reusable = this.db.dialect === "sqlite" && before === undefined && !this.db.inTransaction;
+    const key = `${id}:${receive}`;
+    const version = reusable ? ["messages:" + id, "topics:" + id, "users", "user_avatars", "remote_avatars",
+      "custom_emojis", "personal_emojis", "remote_emoji_cache"]
+      .map(table => this.db.revision(table)).join("|") + "|" + this.db.externalRevision() : "";
+    let snapshot = reusable ? this.messagePages.get(key) : undefined;
+    if (!snapshot || snapshot.version !== version || snapshot.until <= Date.now()) {
+      const raw = (this.db.prepare(
+        "SELECT m.*,u.username,u.display_name FROM messages m JOIN users u ON u.id=m.author_id WHERE m.channel_id=? AND m.seq<? AND ((m.remote_object IS NULL AND COALESCE(u.remote_actor,'') NOT LIKE 'xmpp:%') OR ?=1) ORDER BY m.seq DESC LIMIT 100",
+      ).all(id, before ?? Number.MAX_SAFE_INTEGER, receive) as unknown as Message[]).reverse();
+      const authors = new Map<string, { author: User; avatar: string | null }>();
+      const ids = [...new Set(raw.map(m => m.author_id))];
+      if (ids.length) {
+        // A remote database must not incur three round trips per author. Fetch
+        // public author and avatar references in one bounded page-sized query.
+        const rows = this.db.prepare(
+          `SELECT u.*,a.revision AS local_avatar_revision,r.id AS remote_avatar_id,r.revision AS remote_avatar_revision
+           FROM users u LEFT JOIN user_avatars a ON a.user_id=u.id
+           LEFT JOIN remote_avatars r ON r.peer=u.remote_actor
+           WHERE u.id IN (${ids.map(() => "?").join(",")})`,
+        ).all(...ids);
+        for (const row of rows) {
+          const { local_avatar_revision, remote_avatar_id, remote_avatar_revision, ...author } = row;
+          const avatar = author.remote_actor
+            ? remote_avatar_id ? `/api/remote-avatars/${remote_avatar_id}?v=${remote_avatar_revision}` : null
+            : local_avatar_revision ? `/api/avatars/${author.id}?v=${local_avatar_revision}` : null;
+          authors.set(author.id, { author: author as unknown as User, avatar });
+        }
+      }
+      const infos = raw.map(m => this.messageInfo(m, undefined, authors.get(m.author_id)!));
+      snapshot = { raw, infos, authors, version, until: Date.now() + 2000, bytes: 0 };
+      if (reusable) {
+        const previous = this.messagePages.get(key);
+        if (previous) { this.messagePageBytes -= previous.bytes; this.messagePages.delete(key); }
+        snapshot.bytes = 2 * Buffer.byteLength(JSON.stringify({ raw, infos, authors: [...authors.values()] }));
+        if (snapshot.bytes <= 2 * 1024 * 1024) {
+          while (this.messagePages.size && (this.messagePageBytes + snapshot.bytes > 16 * 1024 * 1024 || this.messagePages.size >= 256)) {
+            const oldest = this.messagePages.keys().next().value!;
+            this.messagePageBytes -= this.messagePages.get(oldest)!.bytes; this.messagePages.delete(oldest);
+          }
+          this.messagePages.set(key, snapshot); this.messagePageBytes += snapshot.bytes;
+        }
+      }
+    } else {
+      this.messagePages.delete(key); this.messagePages.set(key, snapshot);
+    }
+    const peers = [...snapshot.authors.values()].map(({ author }) => author.remote_actor || `${this.baseUrl}/actors/users/${author.id}`);
+    const placeholders = peers.map(() => "?").join(",");
+    const blocked = new Set<string>(peers.length ? this.db.prepare(
+      `SELECT peer FROM user_blocks WHERE user_id=? AND peer IN (${placeholders})`,
+    ).all(user.id, ...peers).map(row => row.peer as string) : []);
+    const contacts = new Map<string, string>(peers.length ? this.db.prepare(
+      `SELECT peer,display_name FROM contact_names WHERE user_id=? AND peer IN (${placeholders})`,
+    ).all(user.id, ...peers).map(row => [row.peer as string, row.display_name as string]) : []);
+    const bans = this.emojiBans(channel);
+    const page = snapshot.raw.map((m, index) => {
+      const metadata = snapshot!.authors.get(m.author_id)!;
+      const peer = metadata.author.remote_actor || `${this.baseUrl}/actors/users/${metadata.author.id}`;
+      return this.veiled(user, this.messageFor(user, m, { channel, ...metadata,
+        blocked: blocked.has(peer), contactName: contacts.get(peer) ?? null, bans, info: snapshot!.infos[index] }), handles);
+    });
     this.withReactions(user, page);
-    // Threads this reader hid stay in the page, marked, so they can be shown again.
     const hidden = this.hiddenThreadMessages(user.id, id);
-    return hidden.size
-      ? page.map((m) => (hidden.has(m.id) ? { ...m, hidden_thread: true } : m))
-      : page;
+    return hidden.size ? page.map(m => hidden.has(m.id) ? { ...m, hidden_thread: true } : m) : page;
   }
   // ---- reactions: emoji put on a message, if its channel allows them ----
   // Adds { emoji, count, mine } for each reaction to the messages of a page, in the order first used,
@@ -2237,8 +2296,7 @@ export class Store {
       );
   }
   // What a message says where it is read. It is stored whole, so lifting a ban brings the emoji back.
-  unbanned<T extends { body: string; title: string | null }>(info: T, channel?: Channel): T {
-    const names = this.emojiBans(channel);
+  unbanned<T extends { body: string; title: string | null }>(info: T, channel?: Channel, names = this.emojiBans(channel)): T {
     if (!names.size) return info;
     const body = withoutEmojis(info.body, names),
       title = info.title === null ? null : withoutEmojis(info.title, names);
@@ -2389,15 +2447,20 @@ export class Store {
     return page[0].reactions;
   }
   // Where a channel hides handles, its readers get names alone: nothing to look an author up by.
-  veiled<T extends { channel_id: string; author_id: string }>(user: User, info: T) {
+  veiled<T extends { channel_id: string; author_id: string }>(user: User, info: T, handles?: boolean) {
     return info.author_id === user.id ||
-      this.sees(user, this.channel(info.channel_id), "handles")
+      (handles ?? this.sees(user, this.channel(info.channel_id), "handles"))
       ? info
       : { ...info, username: "", author_actor_url: null };
   }
-  messageFor(user: User, message: Message) {
-    const info = this.messageInfo(message, user);
-    return this.isUserBlocked(user.id, info.author_actor_url)
+  messageFor(user: User, message: Message, context?: { channel: Channel; author: User; avatar: string | null; blocked: boolean; contactName?: string | null; bans?: Set<string>; info?: ReturnType<Store["messageInfo"]> }) {
+    const info = context?.info ? { ...context.info,
+      // Copy the public projection before applying this reader's labels/policy.
+      display_name: context.author.remote_actor && !message.history_placeholder
+        ? context.contactName ?? context.info.display_name : context.info.display_name,
+      emojis: context.info.emojis.map(emoji => ({ ...emoji })),
+    } : this.messageInfo(message, user, context);
+    return (context ? context.blocked : this.isUserBlocked(user.id, info.author_actor_url))
       ? {
           ...info,
           body: "This message is hidden because you blocked this user.",
@@ -2406,7 +2469,7 @@ export class Store {
           emojis: [],
           edited_at: null,
         }
-      : this.unbanned(info, this.channel(message.channel_id));
+      : this.unbanned(info, context?.channel || this.channel(message.channel_id), context?.bans);
   }
   editMessage(user: User, id: string, input: Record<string, unknown>) {
     this.active(user.id);

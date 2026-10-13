@@ -12,3 +12,4 @@ playwright-report
 core.*
 __pycache__
 *.py[cod]
+native/target

@@ -10,7 +10,7 @@ COPY migrations ./migrations
 COPY test ./test
 COPY e2e ./e2e
 COPY playwright.config.ts ./
-RUN npm run build && npm run build:server
+RUN npm run build
 
 FROM build AS browser-tests
 RUN npx playwright install --with-deps chromium

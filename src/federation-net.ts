@@ -1,6 +1,6 @@
 import { lookup } from "node:dns/promises";
-import { request as httpRequest } from "node:http";
-import { request as httpsRequest } from "node:https";
+import { request as httpRequest, Agent as HttpAgent } from "node:http";
+import { request as httpsRequest, Agent as HttpsAgent } from "node:https";
 import { isIP } from "node:net";
 import ipaddr from "ipaddr.js";
 import { createHash, sign, verify, createPublicKey } from "node:crypto";
@@ -8,6 +8,25 @@ import type { Request } from "express";
 import type { Config } from "./config.js";
 import { isLoopback } from "./config.js";
 import { Problem } from "./store.js";
+
+const peerAgents = new Map<string, HttpAgent | HttpsAgent>();
+function peerAgent(url: URL, address: { address: string; family: number }, headers: Record<string, string>, body?: string | Buffer) {
+  // Pin each pool to the currently validated IP, not just a hostname. DNS is
+  // rechecked before every request; a different address selects a different pool.
+  // Discovery, signed reads and POSTs have separate pools so inbox authentication
+  // and signed history callbacks cannot deadlock behind each other's connections.
+  const kind = body !== undefined ? "post" : headers.signature ? "signed-read" : "discovery";
+  const key = `${url.origin}|${address.family}|${address.address}|${kind}`;
+  let agent = peerAgents.get(key);
+  if (agent) { peerAgents.delete(key); peerAgents.set(key, agent); return agent; }
+  if (peerAgents.size >= 64) {
+    const oldest = peerAgents.keys().next().value!;
+    peerAgents.get(oldest)!.destroy(); peerAgents.delete(oldest);
+  }
+  const options = { keepAlive: true, maxSockets: 64, maxFreeSockets: 4, timeout: 5000 };
+  agent = url.protocol === "https:" ? new HttpsAgent(options) : new HttpAgent(options);
+  peerAgents.set(key, agent); return agent;
+}
 
 export function publicAddress(address: string) {
   try {
@@ -117,7 +136,7 @@ export async function peerRequest(
         {
           method: method || (body === undefined ? "GET" : "POST"),
           headers,
-          agent: false,
+          agent: peerAgent(url, address, headers, body),
           family: address.family,
           lookup: (_host, _options, done) =>
             done(null, address.address, address.family),

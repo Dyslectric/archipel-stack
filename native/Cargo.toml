@@ -1,0 +1,31 @@
+[package]
+name = "archipel-chat"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+axum = "0.8.9"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "process", "io-util", "io-std", "time", "sync"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+ipnet = "2"
+httpdate = "1"
+url = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+ring = "0.17"
+pem = "3"
+base64 = "0.22"
+rsa = { version = "0.9", features = ["pem"] }
+rand = "0.8"
+sha2 = "0.10"
+subtle = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+

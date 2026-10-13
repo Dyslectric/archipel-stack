@@ -1,0 +1,19 @@
+FROM rust:1.98-bookworm AS build
+WORKDIR /build
+COPY native/Cargo.toml native/Cargo.lock ./
+COPY native/src ./src
+COPY native/data ./data
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo build --locked --release -j 4 && cp target/release/archipel-chat /build/archipel-chat
+
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --create-home archipel
+COPY --from=build /build/archipel-chat /usr/local/bin/archipel-chat
+ENV NATIVE_HOST=0.0.0.0 NATIVE_PORT=8870 NATIVE_WORKERS=4 NATIVE_DATABASE_POOL=4
+USER archipel
+EXPOSE 8870
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s CMD ["archipel-chat","--check"]
+CMD ["archipel-chat"]

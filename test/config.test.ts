@@ -16,6 +16,9 @@ test("rate limits default sensibly and reject values that are not bounded intege
   for (const key of ["RATE_LIMIT_API", "FEDERATION_SEND_RATE"])
     assert.throws(() => loadConfig({ [key]: "0" }), new RegExp(key));
   assert.throws(() => loadConfig({ FEDERATION_SEND_RATE: "1001" }), /FEDERATION_SEND_RATE/);
+  assert.equal(defaults.federationSendConcurrency, 4);
+  assert.equal(loadConfig({ FEDERATION_SEND_CONCURRENCY: "16" }).federationSendConcurrency, 16);
+  for (const value of ["0", "33", "1.5", "many"]) assert.throws(() => loadConfig({ FEDERATION_SEND_CONCURRENCY: value }), /FEDERATION_SEND_CONCURRENCY/);
 });
 
 test("proxy trust accepts IPv4/IPv6 peers and CIDRs but rejects blanket and hop-count trust", () => {

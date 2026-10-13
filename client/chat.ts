@@ -53,6 +53,9 @@ interface Page {
   messages: Message[];
   older_cursor: number | null;
   pending?: Message[];
+  refresh_cursor?: number;
+  refresh_stamp?: string;
+  incremental?: boolean;
 }
 // A piece of the conversation: its markup, and what goes in its [data-kids] element.
 interface Node {
@@ -65,6 +68,7 @@ let current: Channel | null = null,
   messages: Message[] = [],
   pending: Message[] = [], // written here, still on their way to the channel's home instance
   olderCursor: number | null = null;
+let refreshCursor: number | undefined, refreshStamp: string | undefined, historyExpanded = false;
 let narrow: string | null = null, // the topic being read on its own
   reply: Message | null = null,
   editing: string | null = null;
@@ -161,6 +165,7 @@ export function resetChat() {
   selectedMessage = null; messageSearch = "";
   messages = [];
   pending = [];
+  refreshCursor = undefined; refreshStamp = undefined; historyExpanded = false;
   generation++;
   renderMembers();
 }
@@ -193,10 +198,17 @@ const pagePath = (id: string, before?: number | null) =>
   id.startsWith("dm:")
     ? `/dms/messages?peer=${encodeURIComponent(id.slice(3))}${before ? `&before=${before}` : ""}`
     : `/channels/${id}/messages${before ? `?before=${before}` : ""}`;
-async function load(id: string): Promise<[Channel, Page]> {
+async function load(id: string, metadata = true): Promise<[Channel, Page]> {
   if (id.startsWith("dm:")) {
     const data = await api<Page & { conversation: Conversation }>(pagePath(id));
     return [dmChannel(data.conversation), data];
+  }
+  if (!metadata && current?.id === id) {
+    const list = document.querySelector<HTMLElement>("#message-list");
+    if ((list && list.scrollHeight-list.scrollTop-list.clientHeight>=80) || selectedMessage || editing || reply) historyExpanded=true;
+    const suffix = !historyExpanded && refreshCursor!==undefined && refreshStamp
+      ? `?after=${refreshCursor}&stamp=${encodeURIComponent(refreshStamp)}` : "";
+    return [current, await api<Page>(pagePath(id)+suffix)];
   }
   return Promise.all([
     api<Channel>(`/channels/${id}`),
@@ -317,6 +329,7 @@ async function selectChannel(id: string, topicId?: string) {
   messages = page.messages;
   pending = page.pending || [];
   olderCursor = page.older_cursor;
+  refreshCursor = page.refresh_cursor; refreshStamp = page.refresh_stamp; historyExpanded = false;
   reply = editing = null;
   selectedMessage = null; messageSearch = "";
   narrow = topicOf(topicId || null) ? topicId! : null;
@@ -1323,6 +1336,7 @@ function wireFeed() {
           token = generation;
         const page = await api<Page>(pagePath(id, olderCursor));
         if (token !== generation) return;
+        historyExpanded = true;
         messages = [...page.messages, ...messages];
         olderCursor = page.older_cursor;
         lastSignature = signature();
@@ -1528,11 +1542,11 @@ export function redrawChat(composer = false, header = false) {
   render();
   if (composer) renderComposer();
 }
-export async function refreshCurrent() {
+export async function refreshCurrent(metadata = true) {
   if (!current) return;
   const id = current.id,
     token = generation;
-  const [detail, page] = await load(id);
+  const [detail, page] = await load(id, metadata);
   if (generation !== token) return;
   const roleChanged = detail.role !== current.role,
     federationChanged =
@@ -1549,10 +1563,12 @@ export async function refreshCurrent() {
   current = detail;
   if (narrow && !topicOf(narrow)) return go(`#/c/${id}`);
   // Refresh earlier loaded pages too so edits/removals never remain visible in cached history.
-  let fresh = page.messages,
+  let fresh = page.incremental
+      ? [...messages.filter(message=>!page.messages.some(next=>next.id===message.id)),...page.messages].sort((a,b)=>a.seq-b.seq).slice(-100)
+      : page.messages,
     cursor = page.older_cursor;
   const oldest = messages[0]?.seq;
-  while (cursor && oldest && fresh[0].seq > oldest) {
+  while (!page.incremental && cursor && oldest && fresh[0].seq > oldest) {
     const previous = await api<Page>(pagePath(id, cursor));
     if (generation !== token) return;
     fresh = [...previous.messages, ...fresh];
@@ -1561,6 +1577,7 @@ export async function refreshCurrent() {
   messages = fresh;
   pending = page.pending || [];
   olderCursor = cursor;
+  refreshCursor = page.refresh_cursor; refreshStamp = page.refresh_stamp;
   if (!document.querySelector("#rows")) return;
   markSeen();
   if (roleChanged || federationChanged || headerChanged || topicsChanged)

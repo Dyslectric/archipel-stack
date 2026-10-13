@@ -4,6 +4,7 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
+import pg from "pg";
 import {
   MessageChannel,
   Worker,
@@ -60,8 +61,18 @@ export abstract class Database {
   abstract readonly dialect: "sqlite" | "postgres";
   /** Told what was written once it is committed: never of what was rolled back. */
   onChange?: (changes: Change[]) => void;
+  /** Subscribe to committed writes made by native processes sharing this schema. */
+  async listenExternalChanges() { return false; }
   private depth = 0;
   private pending: Change[] = [];
+  private savepointNumber = 0;
+  private atomicOperations = 0;
+  protected get statementRecovery() { return this.atomicOperations === 0; }
+  private cacheEpoch = 0;
+  private revisions = new Map<string, number>();
+  revision(key: string) { return `${this.cacheEpoch}:${this.revisions.get(key) || 0}`; }
+  externalRevision() { return 0; }
+  protected invalidateCaches() { this.cacheEpoch++; this.revisions.clear(); }
   protected abstract rows(sql: string, values: Value[]): Row[];
   protected abstract first(sql: string, values: Value[]): Row | undefined;
   protected abstract change(sql: string, values: Value[]): number;
@@ -79,7 +90,8 @@ export abstract class Database {
   get inTransaction() {
     return this.depth > 0;
   }
-  prepare(sql: string): Statement {
+  // Silent writes are reserved for bookkeeping that does not change a rendered view.
+  prepare(sql: string, options: { notify?: boolean } = {}): Statement {
     const table = writes.exec(sql)?.[1].toLowerCase(),
       columns =
         table && !/\bRETURNING\b/i.test(sql) ? watched[table] : undefined;
@@ -88,7 +100,7 @@ export abstract class Database {
       all: (...values) => this.rows(sql, values),
       iterate: (...values) => this.rows(sql, values)[Symbol.iterator](),
       run: (...values) => {
-        if (!table) return { changes: this.change(sql, values) };
+        if (!table || options.notify === false) return { changes: this.change(sql, values) };
         let rows: Row[] = [],
           changes: number;
         if (columns) {
@@ -130,15 +142,51 @@ export abstract class Database {
     if (changes.length) this.tell(changes);
     return value;
   }
+  /** Isolates one operation inside a shared transaction, including its notices.
+   * Atomic operations rely on this boundary instead of per-statement PostgreSQL
+   * recovery. SQL failures must escape; swallowing one still prevents release
+   * and commit of the aborted transaction. Ordinary operations retain recovery.
+   */
+  savepoint<T>(fn: () => T, options: { atomic?: boolean } = {}): T {
+    if (!this.depth) return this.transaction(fn);
+    // Sequential operations reuse their depth's name and prepared statements.
+    // Nested savepoints still receive distinct names until their scope exits.
+    const name = `archipel_s${++this.savepointNumber}`, before = this.pending.length;
+    try {
+      this.exec(`SAVEPOINT ${name}`);
+      if (options.atomic) this.atomicOperations++;
+      let value: T;
+      try { value = fn(); } finally { if (options.atomic) this.atomicOperations--; }
+      this.exec(`RELEASE ${name}`); return value;
+    } catch (error) {
+      this.pending.length = before;
+      try { this.exec(`ROLLBACK TO ${name}`); this.exec(`RELEASE ${name}`); } catch {}
+      throw error;
+    } finally { this.savepointNumber--; }
+  }
   private tell(changes: Change[]) {
+    const keys = new Set<string>();
+    for (const change of changes) {
+      keys.add(change.table);
+      for (const row of change.rows) if (row.channel_id) keys.add(`${change.table}:${row.channel_id}`);
+    }
+    for (const key of keys) this.revisions.set(key, (this.revisions.get(key) || 0) + 1);
     try {
       this.onChange?.(changes);
     } catch {
       /* Telling browsers of a change never undoes or fails the change. */
     }
   }
+  /** Committed work from an independent native worker refreshes local viewers. */
+  notifyExternal(changes: Change[]) { this.tell(changes); }
   /** Brings the schema up to this application's version. */
   migrate() {
+    if(this.dialect!=="postgres")return this.migrateLocked();
+    const db=this as unknown as PostgresDatabase;
+    db.native("SELECT pg_advisory_lock(hashtextextended(current_schema()||':archipel-schema',0))");
+    try{this.migrateLocked();}finally{db.native("SELECT pg_advisory_unlock(hashtextextended(current_schema()||':archipel-schema',0))");}
+  }
+  private migrateLocked() {
     const all = migrations(),
       latest = all.at(-1)!.version,
       version = this.version();
@@ -207,13 +255,14 @@ export class SqliteDatabase extends Database {
   }
   exec(sql: string) {
     // A changed schema leaves no prepared statement to be trusted.
-    this.statements.clear();
+    if (!/^(?:SAVEPOINT|RELEASE|ROLLBACK TO) archipel_s\d+$/.test(sql)) { this.statements.clear(); this.invalidateCaches(); }
     this.raw.exec(sql);
   }
   close() {
     this.statements.clear();
     this.raw.close();
   }
+  externalRevision() { return Number(this.statement("PRAGMA data_version").get()!.data_version); }
   version() {
     return Number(this.raw.prepare("PRAGMA user_version").get()!.user_version);
   }
@@ -354,9 +403,14 @@ export class PostgresDatabase extends Database {
   private port: MessagePort;
   private flag: Int32Array;
   private closed = false;
+  private externalClient?: pg.Client;
+  private externalReady?: Promise<boolean>;
+  private externalRetry?: NodeJS.Timeout;
+  private externalConnected = false;
+  private externalChannel?: string;
   /** With a schema, the instance keeps to it instead of the database's default one. */
   constructor(
-    url: string,
+    private url: string,
     private schema: string | null = null,
     private temporary = false,
   ) {
@@ -378,7 +432,9 @@ export class PostgresDatabase extends Database {
     try {
       this.ask({ op: "connect" });
       if (schema) {
-        this.ask({ op: "exec", text: `CREATE SCHEMA IF NOT EXISTS "${schema}"`, tx: false });
+        this.ask({op:"query",text:"SELECT pg_advisory_lock(hashtextextended($1,0))",values:[`${schema}:archipel-schema`],tx:false});
+        try{this.ask({ op: "exec", text: `CREATE SCHEMA IF NOT EXISTS "${schema}"`, tx: false });}
+        finally{this.ask({op:"query",text:"SELECT pg_advisory_unlock(hashtextextended($1,0))",values:[`${schema}:archipel-schema`],tx:false});}
       }
     } catch (error) {
       void this.worker.terminate();
@@ -393,7 +449,7 @@ export class PostgresDatabase extends Database {
     if (Atomics.wait(this.flag, 0, 0, 120000) === "timed-out")
       throw new Error("The database did not answer.");
     const answer = receiveMessageOnPort(this.port)?.message as
-      | { rows?: Row[]; count?: number; error?: { message: string; code?: string; detail?: string } }
+      | { rows?: Row[]; count?: number; statistics?: { statements: number; queries: number; transferredRows: number }; error?: { message: string; code?: string; detail?: string } }
       | undefined;
     if (!answer) throw new Error("The database connection stopped.");
     if (answer.error)
@@ -403,10 +459,15 @@ export class PostgresDatabase extends Database {
       });
     return answer;
   }
-  private query(sql: string, values: Value[]) {
+  private query(sql: string, values: Value[], result: "rows" | "first" | "count" = "rows") {
+    let text = toPostgres(sql);
+    // Bound read-only SELECTs on the database server, not after materializing
+    // and transferring their entire result. CTEs and writes retain their SQL.
+    if (result === "first" && /^\s*SELECT\b/i.test(text) && !/;|--|\/\*/.test(text))
+      text = `SELECT * FROM (${text}) AS archipel_first LIMIT 1`;
     return this.ask({
       op: "query",
-      text: toPostgres(sql),
+      text, result, recover: this.statementRecovery,
       // PostgreSQL keeps no NUL characters in text.
       values: values.map((v) =>
         typeof v === "string" && v.includes("\0") ? v.replaceAll("\0", "") : v,
@@ -418,10 +479,10 @@ export class PostgresDatabase extends Database {
     return this.query(sql, values).rows!;
   }
   protected first(sql: string, values: Value[]) {
-    return this.query(sql, values).rows![0];
+    return this.query(sql, values, "first").rows![0];
   }
   protected change(sql: string, values: Value[]) {
-    return this.query(sql, values).count!;
+    return this.query(sql, values, "count").count!;
   }
   protected begin() {
     this.ask({ op: "begin" });
@@ -433,12 +494,57 @@ export class PostgresDatabase extends Database {
     this.ask({ op: "rollback" });
   }
   exec(sql: string) {
+    if (!/^(?:SAVEPOINT|RELEASE|ROLLBACK TO) archipel_s\d+$/.test(sql)) this.invalidateCaches();
     const text = toPostgres(sql);
     if (text.trim()) this.ask({ op: "exec", text, tx: this.inTransaction });
   }
   /** Runs PostgreSQL's own SQL, untranslated. */
   native(text: string, values: Value[] = []) {
-    return this.ask({ op: "query", text, values, tx: this.inTransaction }).rows!;
+    this.invalidateCaches();
+    return this.ask({ op: "query", text, values, recover: this.statementRecovery, tx: this.inTransaction }).rows!;
+  }
+  statistics() { return this.ask({ op: "statistics" }).statistics!; }
+  override async listenExternalChanges(): Promise<boolean> {
+    if (this.closed) return Promise.reject(new Error("The database is closed."));
+    if (this.externalReady) return this.externalReady;
+    if(!this.externalChannel) {
+      const schema = String(this.native("SELECT current_schema() AS name")[0].name);
+      this.externalChannel = `archipel_native_${createHash("sha256").update(schema).digest("hex").slice(0,32)}`;
+    }
+    const channel=this.externalChannel;
+    const ready = (async()=> {
+      const listener = new pg.Client({connectionString:this.url,application_name:"archipel-notices"});
+      this.externalClient=listener;
+      let lost=false;
+      const disconnected=()=>{
+        if (lost || this.closed || this.externalClient!==listener) return;
+        lost=true;this.externalClient=undefined;this.externalReady=undefined;
+        void listener.end().catch(()=>{});
+        this.externalRetry=setTimeout(()=>{
+          this.externalRetry=undefined;
+          void this.listenExternalChanges().catch(()=>{});
+        },1000);this.externalRetry.unref();
+      };
+      listener.on("error",disconnected);listener.on("end",disconnected);
+      listener.on("notification",notice=>{
+        if (notice.channel!==channel || !notice.payload || this.closed) return;
+        try {
+          const changes=JSON.parse(notice.payload) as Change[];
+          if (!Array.isArray(changes) || changes.some(c=>!c || !["messages","topics","read_marks","federation_outgoing","federation_follows","remote_avatars","users","sessions","audit"].includes(c.table) || !Array.isArray(c.rows))) return;
+          this.notifyExternal(changes);
+        } catch { /* Invalid notifications never grant access or reveal content. */ }
+      });
+      try { await listener.connect();await listener.query(`LISTEN "${channel}"`); }
+      catch(error) { disconnected();throw error; }
+      if (this.closed) { await listener.end().catch(()=>{});return false; }
+      // A reconnect may have missed notices. Existing SSE logic turns this
+      // unknown table into a reconciliation notice; API access is rechecked.
+      if (this.externalConnected) this.notifyExternal([{table:"external_reconnect",rows:[]}]);
+      this.externalConnected=true;
+      return true;
+    })();
+    this.externalReady=ready;
+    return ready;
   }
   close() {
     if (this.closed) return;
@@ -450,6 +556,9 @@ export class PostgresDatabase extends Database {
       /* A connection already gone is closed. */
     }
     this.closed = true;
+    if (this.externalRetry) clearTimeout(this.externalRetry);
+    void this.externalClient?.end().catch(()=>{});
+    this.externalClient=undefined;
     void this.worker.terminate();
   }
   version() {
@@ -506,7 +615,7 @@ export function copyToPostgres(
   for (const table of tables) place(table, []);
   // Names used insensitively to case need the type that compares them so.
   try {
-    to.native("CREATE EXTENSION IF NOT EXISTS citext");
+    to.native("CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA public");
   } catch (error) {
     if (!to.native("SELECT 1 FROM pg_extension WHERE extname='citext'").length)
       throw new Error(

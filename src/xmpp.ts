@@ -1,5 +1,5 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { Router, type RequestHandler } from "express";
+import { Router, json, type RequestHandler } from "express";
 import type { Config } from "./config.js";
 import { Store, Problem, hash, randomToken, text, type User, type Channel, type Message } from "./store.js";
 import { RemoteRooms } from "./xmpp-remote-rooms.js";
@@ -9,6 +9,7 @@ type Account = { user_id: string; node: string };
 type Credential = { id: string; user_id: string; digest: string; revoked_at: string | null };
 type Direct = { id: string; user_id: string; peer: string; direction: string; body: string; created_at: string; seq: number; xmpp_source_id: string | null };
 type Delivery = { id: string; from: string; to: string; body: string; type: string; stamp: string; replace?: string; stanza_id?: string; origin_id?: string; by?: string };
+type ChannelFrame = { packet: Omit<Delivery, "to">; actor: string; removed: boolean };
 function equal(a: string, b: string) {
   const left = Buffer.from(a), right = Buffer.from(b);
   return left.length === right.length && timingSafeEqual(left, right);
@@ -455,17 +456,23 @@ export class Xmpp {
     const origin = input.origin_id === undefined ? null : text(input.origin_id, "Origin ID", 200);
     this.store.db.prepare("INSERT INTO xmpp_direct_ids VALUES(?,?,?)").run(id, String(input.id), origin);
   }
-  channelDelivery(user: User, message: Message, to: string, kind = "Create"): Delivery {
-    const channel = this.store.channel(message.channel_id), view = this.store.messageFor(user, message);
+  private channelFrame(message: Message, kind: string, channel = this.store.channel(message.channel_id)): ChannelFrame {
+    const author = this.store.user(message.author_id);
     const native = this.store.db.prepare("SELECT stanza_id,origin_id FROM xmpp_message_ids WHERE message_id=?")
       .get(message.id) as { stanza_id: string; origin_id: string | null } | undefined;
     // Use a stable nick shared with the presence adapter, even across reconnects.
-    return { id: kind === "Create" ? message.id : `${message.id}-${kind}-${kind === "Delete" ? message.deleted_at : message.edited_at}`,
-      from: `${channel.name}@${this.rooms}/${this.nick(this.store.user(message.author_id))}`,
-      to, type: "groupchat", body: message.deleted_at ? "This message was removed." : view.body,
+    return { actor: author.remote_actor || `${this.store.baseUrl}/actors/users/${author.id}`, removed: !!message.deleted_at,
+      packet: { id: kind === "Create" ? message.id : `${message.id}-${kind}-${kind === "Delete" ? message.deleted_at : message.edited_at}`,
+      from: `${channel.name}@${this.rooms}/${this.nick(author)}`,
+      type: "groupchat", body: message.deleted_at ? "This message was removed." : this.store.unbanned({ body: message.body, title: message.title }, channel).body,
       stamp: message.created_at,
       ...(kind === "Create" && native ? { stanza_id: native.stanza_id, ...(native.origin_id ? { origin_id: native.origin_id } : {}) } : {}),
-      ...(kind !== "Create" ? { replace: native?.stanza_id || message.id } : {}) };
+      ...(kind !== "Create" ? { replace: native?.stanza_id || message.id } : {}) } };
+  }
+  channelDelivery(user: User, message: Message, to: string, kind = "Create", frame = this.channelFrame(message, kind)): Delivery {
+    // Shared protocol metadata is per message/poll; personal blocks are still checked per recipient.
+    return { ...frame.packet, to, body: !frame.removed && this.store.isUserBlocked(user.id, frame.actor)
+      ? "This message is hidden because you blocked this user." : frame.packet.body };
   }
   directDelivery(row: Direct, to: string): Delivery {
     const owner = this.store.user(row.user_id), me = this.jid(owner);
@@ -554,9 +561,10 @@ export class Xmpp {
       catch { disconnect.push(address); }
     }
     const occupants: { room: string; jid: string; user: User }[] = [];
+    const sessionByJid = new Map(sessions.map(session => [session.jid, session]));
     for (const entry of input.occupants as Input[]) {
       const address = text(entry.jid, "Occupant JID", 1024), room = text(entry.room, "Room", 512);
-      const session = sessions.find(s => s.jid === address);
+      const session = sessionByJid.get(address);
       try {
         // Foreign occupants have no local stream; current room policy alone keeps them.
         const user = this.foreign(address) ? this.remoteUser(this.remoteJid(address)) : session?.user;
@@ -570,16 +578,26 @@ export class Xmpp {
     // again from what exists now.
     const issued = this.store.db.sequence("xmpp_events");
     const from = Math.min(after, issued);
-    const events = this.store.db.prepare("SELECT * FROM xmpp_events WHERE seq>? ORDER BY seq LIMIT 100")
+    // Scan past channels with no current native occupants without spending the delivery page.
+    const events = this.store.db.prepare("SELECT * FROM xmpp_events WHERE seq>? ORDER BY seq LIMIT 1000")
       .all(from) as { seq: number; kind: string; object_id: string; sender_id: string | null; recipient: string | null }[];
+    const byRoom = new Map<string, typeof occupants>();
+    for (const occupant of occupants) {
+      const list = byRoom.get(occupant.room) || []; list.push(occupant); byRoom.set(occupant.room, list);
+    }
+    let cursor = from, deliveredEvents = 0;
     const messages: Delivery[] = [], profiles: { jid: string; hash: string }[] = [];
     for (const event of events) {
+      if (deliveredEvents >= 100) break;
+      cursor = event.seq;
       if (event.kind === "Profile") {
+        deliveredEvents++;
         try {
           const user = this.store.active(event.object_id);
           profiles.push({ jid: this.jid(user), hash: this.avatar(user)?.hash || "" });
         } catch { /* Suspended accounts do not publish profiles. */ }
       } else if (event.kind === "Direct") {
+        deliveredEvents++;
         const row = this.store.db.prepare("SELECT * FROM direct_messages WHERE id=?").get(event.object_id) as Direct;
         if (!row) continue;
         if (row.peer.startsWith("xmpp:")) {
@@ -598,9 +616,12 @@ export class Xmpp {
         }
       } else {
         const message = this.store.message(event.object_id), channel = this.store.channel(message.channel_id);
-        for (const occupant of occupants.filter(o => o.room === `${channel.name}@${this.rooms}`))
+        const recipients = byRoom.get(`${channel.name}@${this.rooms}`) || [];
+        if (recipients.length) deliveredEvents++;
+        const frame = recipients.length ? this.channelFrame(message, event.kind, channel) : undefined;
+        for (const occupant of recipients)
           if (this.store.db.prepare(`SELECT 1 FROM messages WHERE id=? AND ${this.visibleAuthors(occupant.user)}`).get(message.id))
-            messages.push(this.channelDelivery(occupant.user, message, occupant.jid, event.kind));
+            messages.push(this.channelDelivery(occupant.user, message, occupant.jid, event.kind, frame));
       }
     }
     const avatarRequests: { peer: string; requester: string; attempt: number }[] = [];
@@ -613,7 +634,7 @@ export class Xmpp {
         if (!access.blocked && (access.incoming || access.outgoing)) avatarRequests.push({ peer: request.peer.slice(5), requester: this.jid(user), attempt });
       } catch { /* Current policy cancels queued remote profile reads. */ }
     }
-    return { after: events.at(-1)?.seq ?? from, messages, disconnect, kick, profiles, avatar_requests: avatarRequests };
+    return { after: cursor, has_more: cursor < issued, messages, disconnect, kick, profiles, avatar_requests: avatarRequests };
   }
   internalRouter() {
     const router = Router();
@@ -622,11 +643,16 @@ export class Xmpp {
         return next(new Problem(401, "XMPP adapter authentication required."));
       next();
     }) as RequestHandler);
+    // Inventory is larger than a chat mutation; authenticate before accepting its bytes.
+    const inventoryBody = json({ limit: "1mb" }), avatarBody = json({ limit: "3mb" }), operationBody = json({ limit: "64kb" });
+    router.use((req, res, next) => (req.path === "/sync" || req.path === "/remote-rooms/sync" || req.path === "/remote-rooms/check"
+      ? inventoryBody : req.path === "/avatars" ? avatarBody : operationBody)(req, res, next));
     router.post("/auth", (req, res) => res.json(this.verify(req.body || {})));
     router.post("/operation", (req, res) => res.json(this.operation(req.body || {})));
     router.post("/sync", (req, res) => res.json(this.sync(req.body || {})));
     router.post("/avatars", (req, res) => res.json(this.cacheAvatar(req.body || {})));
     router.post("/remote-rooms/sync", (req, res) => res.json(this.remoteRooms.sync(req.body || {})));
+    router.post("/remote-rooms/check", (req, res) => res.json({ native_kick: this.remoteRooms.checkNative(req.body?.native) }));
     router.post("/remote-rooms/receive", (req, res) => res.json(this.remoteRooms.receive(req.body || {})));
     router.post("/remote-rooms/dispatched", (req, res) => res.json(this.remoteRooms.dispatched(req.body || {})));
     return router;

@@ -7,13 +7,15 @@ const store = new Store(config.databaseUrl || config.databasePath, config.baseUr
 const app = createApp(config, store);
 // Queued deliveries go out in rounds, as far apart as the instance's settings say.
 let federationTimer: NodeJS.Timeout;
+let federationJob: Promise<void> | undefined, stopping = false;
 const federate = () => {
   clearTimeout(federationTimer);
+  if (stopping) return;
   federationTimer = setTimeout(() => {
-    void app.locals.federation
-      .tick()
+    federationJob = app.locals.federation
+      .tick({wait:false})
       .catch(() => console.error("Federation worker failed."))
-      .finally(federate);
+      .finally(() => { federationJob = undefined; federate(); });
   }, app.locals.federation.sending().interval);
   federationTimer.unref();
 };
@@ -35,7 +37,16 @@ const server = app.listen(config.port, config.host, () => {
   );
 });
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
-  process.on(signal, () => {
+  process.on(signal, () => void (async () => {
+    if (stopping) return;
+    stopping = true;
+    clearTimeout(federationTimer);
+    clearInterval(pushTimer);
+    await federationJob;
+    if (config.nativeChatUrl) {
+      await app.locals.federation.tick({drainOnly:true})
+        .catch(() => console.error("Federation drain failed during shutdown."));
+    }
     // Event streams never finish by themselves, and the server waits for what is open.
     app.locals.events.close();
     server.close(() => {
@@ -44,7 +55,7 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
       store.close();
       process.exit(0);
     });
-  });
+  })());
 }
 server.on("error", (error) => {
   console.error(error.message);

@@ -462,6 +462,27 @@ test("database restart preserves identities, membership, messages and sessions",
   store.close();
   rmSync(directory, { recursive: true });
 });
+
+test("live session metadata renews only when due and never caches account suspension", t => {
+  const {store,bob}=fixture();t.after(()=>store.close());
+  const issued=store.createSession(bob.id),fresh=store.session(issued.token)!;
+  assert.equal(fresh.csrf,issued.csrf);assert.equal(fresh.user.id,bob.id);
+  assert.equal(store.renewSession(issued.token,fresh.expiresAt),false);
+  store.db.prepare("UPDATE sessions SET expires_at=? WHERE user_id=?").run(Date.now()+3600000,bob.id);
+  const due=store.session(issued.token)!;
+  assert.equal(store.renewSession(issued.token,due.expiresAt),true);
+  const renewed=store.session(issued.token)!;
+  assert.ok(renewed.expiresAt>Date.now()+6*86400000);
+  assert.equal(store.renewSession(issued.token,renewed.expiresAt),false);
+  store.db.prepare("UPDATE users SET display_name='Current account' WHERE id=?").run(bob.id);
+  assert.equal(store.session(issued.token)!.user.display_name,"Current account");
+  store.db.prepare("UPDATE users SET banned=1 WHERE id=?").run(bob.id);
+  denied(()=>store.session(issued.token));
+  store.db.prepare("UPDATE users SET banned=0 WHERE id=?").run(bob.id);
+  store.logout(issued.token);
+  assert.equal(store.session(issued.token),null);
+  assert.equal(store.renewSession(issued.token,due.expiresAt),false);
+});
 test("message pages are bounded and cursors preserve chronological order", () => {
   const { store, alice } = fixture();
   const c = store.createChannel(alice, channelInput());
@@ -743,7 +764,7 @@ test("version-two emoji messages keep their image metadata through the federatio
     { id: "asset", name: "island", url: "/api/emojis/asset/image" },
   ]);
   assert.equal(store.user("author").federation_send, 0);
-  assert.equal(store.db.version(), 26);
+  assert.equal(store.db.version(), 29);
 });
 
 test("direct messages reach both members, and only the reader's own are news to them", () => {
@@ -986,7 +1007,7 @@ test("version 9 avatar migration preserves pictures and XMPP cursors and remote 
   store.db.prepare("INSERT INTO xmpp_events(seq,kind,object_id) VALUES(50,'Direct','old-message')").run();
   store.db.exec("DROP TABLE channel_held_roles; DROP TABLE channel_instance_bans; DROP TABLE channel_member_roles; DROP TABLE channel_roles; DROP TABLE reaction_emojis; ALTER TABLE channels DROP COLUMN reaction_bans; DROP TABLE device_flows; DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; PRAGMA user_version=9");
   store.close(); store = new Store(path);
-  assert.equal(store.db.version(), 26);
+  assert.equal(store.db.version(), 29);
   assert.equal(Buffer.from(store.avatarImage(alice.id).image).toString("base64"), image);
   assert.equal(store.db.prepare("SELECT seq FROM xmpp_events WHERE object_id='old-message'").get()?.seq, 50);
   store.db.prepare("INSERT INTO xmpp_events(kind,object_id) VALUES('Profile',?)").run(alice.id);

@@ -381,7 +381,7 @@ function connection(up: boolean) {
 }
 // ---- keeping up: the server says when something on screen may have changed, and the page
 // looks again at what the notice names ----
-type Notice = { all?: true; me?: true; admin?: true; channels?: string[] };
+type Notice = { all?: true; me?: true; admin?: true; channels?: string[]; read?: true; rooms?: true; content?: true; sending?: true };
 const GAP = 1500; // a busy conversation is looked at again this often at most
 let stream: EventSource | null = null,
   news: Notice | null = null,
@@ -395,16 +395,20 @@ async function refresh(notice: Notice) {
     // A notice about conversations alone leaves the account, channel list and emoji as they are.
     if (!notice.all && !notice.me && session.user.admission_status === "approved") {
       const view = document.querySelector<HTMLElement>(".app")?.dataset.view;
-      if (notice.channels) {
+      if (notice.channels || notice.read || notice.sending) {
         await loadOverview();
         renderSidebar();
         if (view === "chat") {
           const open = chatChannel()?.id;
-          if (open && notice.channels.includes(open)) await refreshCurrent();
-          await tickInbox();
+          if (open && notice.channels?.includes(open)) await refreshCurrent(!notice.content || !!notice.rooms);
+          else if (notice.sending) await refreshCurrent(false);
+          if (notice.channels) await tickInbox();
         }
       }
-      if (notice.admin && view === "settings") await tickSettings();
+      if (notice.read || notice.sending) await tickInbox();
+      if (notice.rooms && view === "xmpp") await tickXmppRooms();
+      if (notice.rooms && view === "chat" && !notice.channels?.includes(chatChannel()?.id || "")) await refreshCurrent();
+      if ((notice.admin || notice.sending) && view === "settings") await tickSettings();
       connection(true);
       return;
     }
@@ -468,9 +472,11 @@ async function refresh(notice: Notice) {
 // Notices that arrive while the page is busy, hidden or was only just refreshed are kept
 // together, and looked at in one go.
 function changed(notice: Notice) {
+  const content = (!news?.channels || news.content === true) && (!notice.channels || notice.content === true);
   news = {
     ...news,
     ...notice,
+    content: content ? true : undefined,
     ...(news?.channels || notice.channels
       ? { channels: [...new Set([...(news?.channels || []), ...(notice.channels || [])])] }
       : {}),

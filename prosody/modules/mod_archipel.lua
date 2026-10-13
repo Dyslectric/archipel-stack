@@ -166,7 +166,7 @@ module:hook("pre-stanza", function(event)
   end
 end, 1000);
 
-local busy = false;
+local busy, more = false, false;
 local runner = async.runner(function()
   local sessions, occupants, active = array(), array(), {};
   for address in pairs(assigned_nicks) do if not prosody.full_sessions[address] then assigned_nicks[address] = nil; end end
@@ -184,6 +184,7 @@ local runner = async.runner(function()
   end
   local result = bridge.request("/sync", { after = cursor; sessions = sessions; occupants = occupants });
   if not result then
+    more = false;
     -- No cached policy is accepted during an adapter outage.
     for _, session in pairs(active) do session:close({ condition = "internal-server-error"; text = "Archipel Server policy service is unavailable." }); end
     for _, entry in ipairs(occupants) do
@@ -219,7 +220,8 @@ local runner = async.runner(function()
     end
   end
   cursor = result.after;
+  more = result.has_more == true;
   assert(cursor_store:set(nil, { after = cursor }));
   busy = false;
 end, { error = function(_, err) busy = false; module:log("error", "Archipel Server synchronization failed: %s", err); end });
-module:add_timer(1, function() if not busy then busy = true; runner:run(true); end return 1; end);
+module:add_timer(1, function() if not busy then busy = true; runner:run(true); end return more and 0.1 or 1; end);

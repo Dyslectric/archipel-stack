@@ -26,6 +26,18 @@ function fixture() {
 }
 const denied = (fn: () => unknown, status = 403) => assert.throws(fn, e => e instanceof Problem && e.status === status);
 
+test("batched native foreign-room checks retain current credential and room-policy revocation", t => {
+  const f = fixture(); t.after(() => f.store.close());
+  const credential = f.xmpp.issue(f.bob, "Native"), entry = { jid: `${credential.jid}/native`, credential: credential.id, room: address };
+  assert.deepEqual(f.rooms.sync({ native: [entry] }).native_kick, []);
+  f.store.setUserBlock(f.bob, `xmpp:${address}`, true);
+  assert.deepEqual(f.rooms.sync({ native: [entry] }).native_kick, [{ jid: entry.jid, room: address }]);
+  f.store.setUserBlock(f.bob, `xmpp:${address}`, false);
+  f.xmpp.revoke(f.bob, credential.id);
+  assert.deepEqual(f.rooms.sync({ native: [entry] }).native_kick, [{ jid: entry.jid, room: address }]);
+  denied(() => f.rooms.sync({ native: "invalid" }), 400);
+});
+
 test("external rooms isolate account histories and enforce read, subscribe, send and posting grants", t => {
   const f = fixture(); t.after(() => f.store.close());
   assert.equal(f.rooms.list(f.bob).length, 0);
@@ -183,6 +195,10 @@ test("a bridged channel repeats members in the room as themselves and takes in t
   assert.deepEqual(Object.keys(sessions()).sort(), ["alice", "bob"]);
   assert.deepEqual(rooms.list(bob), []);
   enter("bob");
+  const desired = rooms.sync({ active: active() }).desired;
+  assert.equal(desired.find(d => d.nick === "alice")!.history, 100);
+  assert.equal(desired.find(d => d.nick === "bob")!.history, 0);
+  assert.equal(desired.find(d => d.nick === "alice")!.bridge, desired.find(d => d.nick === "bob")!.bridge);
   const out = rooms.sync({ active: active() }).messages;
   assert.deepEqual(out.map(m => m.body), ["From Bob"]);
   rooms.dispatched({ session: out[0].session, id: out[0].id });
@@ -228,6 +244,22 @@ test("a bridged channel repeats members in the room as themselves and takes in t
   store.deleteChannel(alice, channel.id);
   assert.deepEqual(Object.keys(sessions()), ["carol"]);
   assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM channel_bridges").get()!.n, 0);
+});
+
+test("fresh room heartbeats are silent, stale recovery and policy revocation stay visible", t => {
+  const f = fixture(); t.after(() => f.store.close()); f.joined();
+  const changes: string[] = [];
+  f.store.db.onChange = rows => changes.push(...rows.map(row => row.table));
+  f.rooms.sync({ active: [f.session] });
+  assert.equal(changes.includes("xmpp_remote_rooms"), false);
+  f.store.db.prepare("UPDATE xmpp_remote_rooms SET updated_at=? WHERE session=?").run(Date.now() - 20000, f.session);
+  changes.length = 0;
+  f.rooms.sync({ active: [f.session] });
+  assert.equal(changes.includes("xmpp_remote_rooms"), true);
+  f.store.db.prepare("UPDATE users SET federation_receive=0 WHERE id=?").run(f.alice.id);
+  changes.length = 0;
+  assert.equal(f.rooms.sync({ active: [f.session] }).desired.length, 0);
+  assert.equal(changes.includes("xmpp_remote_rooms"), true);
 });
 
 test("a mirror copies a room the owner joined, attributing authors as the room discloses them", t => {

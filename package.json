@@ -8,16 +8,25 @@
   },
   "scripts": {
     "dev": "npm run build:client && node --env-file-if-exists=.env --import tsx --input-type=module -e \"process.env.DEV_AUTH='true'; await import('./src/server.ts')\"",
-    "start": "node --env-file-if-exists=.env --import tsx src/server.ts",
+    "start": "node --env-file-if-exists=.env build/src/server.js",
     "build:client": "vite build",
     "check": "tsc --noEmit",
     "test": "node --import tsx --test test/*.test.ts",
     "test:browser": "playwright test",
     "test:xmpp": "node --import tsx test/xmpp-integration.mjs",
+    "benchmark": "node scripts/benchmark.mjs",
+    "test:benchmark": "node --test test/benchmark.test.mjs",
+    "benchmark:diagnose": "node --import tsx scripts/diagnose-scale.ts",
+    "benchmark:five": "node scripts/benchmark-five.mjs",
+    "benchmark:fwdxp": "node scripts/benchmark-fwdxp.mjs",
+    "benchmark:postgres": "node --import tsx scripts/benchmark-postgres.ts",
+    "benchmark:postgres-discovery": "node --import tsx scripts/benchmark-postgres-discovery.ts",
+    "benchmark:native": "node --import tsx scripts/benchmark-native.ts",
     "identities": "node --env-file-if-exists=.env --import tsx scripts/identities.ts",
     "migrate:postgres": "node --env-file-if-exists=.env --import tsx scripts/migrate-postgres.ts",
-    "build": "npm run check && npm run build:client",
-    "build:server": "tsc -p tsconfig.build.json"
+    "build": "npm run check && npm run build:client && npm run build:server",
+    "build:server": "tsc -p tsconfig.build.json && node scripts/copy-runtime.mjs",
+    "build:native": "cargo build --manifest-path native/Cargo.toml --locked --release -j 4"
   },
   "dependencies": {
     "express": "5.2.1",

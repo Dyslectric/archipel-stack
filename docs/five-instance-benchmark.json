@@ -1,0 +1,115 @@
+{
+  "kind": "workload specification, not an executable load generator",
+  "instances": 5,
+  "perInstance": {
+    "localMembers": 2000,
+    "foregroundWebUsers": 1500,
+    "nativeXmppUsers": 500,
+    "nativeResourcesPerUser": 1,
+    "homeTimelineChannels": 20,
+    "bridgedForeignChannels": 80,
+    "historyMessagesPerChannel": 100,
+    "messageIntervalSecondsPerUser": 60,
+    "runtime": "one Archipel process, one independent database, one real Prosody service"
+  },
+  "primarySharedTopology": {
+    "authoritativeXmppRooms": 100,
+    "roomsHostedPerInstance": 20,
+    "originsRepresentedInEveryRoom": 5,
+    "membersPerRoom": 100,
+    "membersFromEachOriginPerRoom": 20,
+    "webMembersFromEachOriginPerRoom": 15,
+    "nativeMembersFromEachOriginPerRoom": 5,
+    "foreignRoomSharePerOrigin": 0.8,
+    "foregroundRoomsPerUser": 1,
+    "nativeAccess": "direct native c2s login at home; local MUC or authenticated s2s to the authoritative room host",
+    "webAccess": "normal home channel when hosting the room; explicit channel bridge to its authoritative XMPP room otherwise",
+    "fwDXPFederation": false,
+    "expectedActiveBridgeAuthorResourcesPerOriginAfterAllUsersPost": 1200,
+    "expectedNativeOccupantsPerRoomHost": 500,
+    "expectedForeignBridgeOccupantsPerRoomHost": 1200,
+    "expectedTotalMucOccupantsPerRoomHost": 1700,
+    "expectedAuthoritativeRoomPostsPerSecondPerInstance": 33.333333333333336,
+    "expectedUniqueForeignBridgeRoomMessagesPerSecondPerInstance": 133.33333333333334,
+    "expectedXmppProjectionEventsPerSecondPerInstanceIncludingBridgeCopies": 166.66666666666666,
+    "projectionRateAssumption": "local room commits and bridged foreign message copies each append xmpp_events; relay echoes of already saved local posts are suppressed",
+    "occupancyAssumption": "one resource/room per native user; bridge owners are benchmark web members, with no extra administrative listener accounts"
+  },
+  "phases": [
+    {
+      "name": "cold-start",
+      "purpose": "measure authentication, channel bootstrap, MAM and presence separately",
+      "connectionRampSeconds": 120,
+      "readiness": "all SSE streams open, all native clients bound and room-joined, initial web history and native archive loads completed"
+    },
+    {
+      "name": "local-steady-state",
+      "role": "comparison baseline; primary workload is the shared-room phase",
+      "webOpenHomeChannelsPerUser": 1,
+      "nativeHomeRoomsPerUser": 1,
+      "expectedNativeSessionsPerInstance": 500,
+      "expectedNativeOccupanciesPerInstance": 500,
+      "fwDXPFederation": false,
+      "warmupSecondsAfterReadiness": 120,
+      "measuredSeconds": 600
+    },
+    {
+      "name": "shared-rooms-all-five-instances",
+      "role": "primary workload requested by user",
+      "topology": "primarySharedTopology",
+      "webOpenChannelsPerUser": 1,
+      "nativeRoomsPerUser": 1,
+      "foreignRoomRouting": "each of the 100 authoritative rooms contains 15 web and 5 native users from every instance",
+      "writes": "each user writes in their assigned shared room, one total message per user per minute",
+      "expectedNativeSessionsPerInstance": 500,
+      "expectedNativeOccupanciesPerInstance": 500,
+      "expectedTotalMucOccupanciesPerInstanceIncludingBridges": 1700,
+      "transport": "real certificate-authenticated Prosody s2s, native c2s, MUC and explicit Archipel channel bridges",
+      "fwDXPFederation": false,
+      "warmupSecondsAfterReadiness": 120,
+      "measuredSeconds": 600
+    },
+    {
+      "name": "denser-shared-rooms",
+      "role": "follow-up fan-out stress phase after the primary workload",
+      "authoritativeRooms": 10,
+      "roomsHostedPerInstance": 2,
+      "membersPerRoom": 1000,
+      "membersFromEachOriginPerRoom": 200,
+      "webMembersFromEachOriginPerRoom": 150,
+      "nativeMembersFromEachOriginPerRoom": 50,
+      "foregroundRoomsPerUser": 1,
+      "messageIntervalSecondsPerUser": 60,
+      "expectedTotalMucOccupanciesPerInstanceIncludingBridges": 1700,
+      "measuredSeconds": 600
+    },
+    {
+      "name": "optional-fwdxp",
+      "purpose": "measure signed FWDXP channel replication separately from XMPP s2s",
+      "webUsersWithForeignChannelMembershipPerInstance": 300,
+      "foreignChannelRouting": "spread evenly over 20 channels and four peers",
+      "measuredSeconds": 600,
+      "requirements": "real signed subscriptions and deliveries, default pacing baseline and an explicitly labelled tuned pacing run"
+    }
+  ],
+  "metrics": [
+    "offered, admitted, dropped, committed and failed writes by transport and instance",
+    "unique senders, native joins/disconnects, MAM latency, room membership and presence stability",
+    "message commit-to-first-visible latency using stable IDs; missing and duplicate live deliveries",
+    "bootstrap completion; refresh admission delay separately from request service latency",
+    "native sync payload bytes, duration, HTTP errors, cursor lag and event backlog",
+    "bridge virtual-resource count, remote-room sync duration, receive callbacks and duplicate per-resource processing",
+    "projection event production including bridge copies versus native sync drain rate; silent bridge-heartbeat updates versus user-visible notices",
+    "federation queued deliveries, distinct peer hosts, retries, duplicate delivery attempts and queue age",
+    "CPU, RSS, event-loop delay and database operations per instance plus generator lag"
+  ],
+  "constraints": [
+    "never count a socket write as successful room delivery",
+    "a phase without completed initial bootstrap is not steady state",
+    "keep native XMPP, browser-XMPP virtual occupants and FWDXP subscriptions distinct",
+    "all five origins must receive the same shared-room conversation through explicit supported bridges, not presumed FWDXP/XMPP forwarding",
+    "report every instance separately; cluster averages cannot hide a failed room host",
+    "preserve admission, blocking, revocation, room privacy and per-viewer filtering",
+    "use fresh data, private test credentials and an isolated network; do not use production instances"
+  ]
+}

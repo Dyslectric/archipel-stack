@@ -7,6 +7,9 @@ export interface Config {
   databasePath: string;
   /** A postgres:// address; when set, PostgreSQL is used instead of the SQLite file. */
   databaseUrl: string;
+  /** Optional native Rust chat process pool during the incremental server port. */
+  nativeChatUrl: string;
+  nativeBridgeSecret: string;
   devAuth: boolean;
   oidcIssuer: string;
   oidcClientId: string;
@@ -31,6 +34,8 @@ export interface Config {
    */
   federationSendRate: number;
   federationSendInterval: number;
+  /** Independent recipient heads in flight; recipient order is preserved. */
+  federationSendConcurrency: number;
   /** Outbound federation deliveries per minute to one peer host; 0 is unlimited. */
   federationPeerSendRate: number;
 }
@@ -66,6 +71,15 @@ export function loadConfig(env = process.env): Config {
   const databaseUrl = env.DATABASE_URL || "";
   if (databaseUrl && !/^postgres(ql)?:\/\/./.test(databaseUrl))
     throw new Error("DATABASE_URL must be a postgres:// address");
+  const nativeBridgeSecret = env.NATIVE_BRIDGE_SECRET || "";
+  let nativeChatUrl = env.NATIVE_CHAT_URL || "";
+  if (nativeChatUrl) {
+    const url = new URL(nativeChatUrl);
+    if (!databaseUrl || !["http:","https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash || url.pathname !== "/")
+      throw new Error("NATIVE_CHAT_URL requires PostgreSQL and an HTTP(S) service origin");
+    if (!/^[A-Za-z0-9_-]{43,128}$/.test(nativeBridgeSecret)) throw new Error("NATIVE_BRIDGE_SECRET must be a random base64url secret of at least 43 characters");
+    nativeChatUrl = url.origin;
+  }
   const registrationMode = env.REGISTRATION_MODE || "open";
   if (!["open", "invite_only"].includes(registrationMode))
     throw new Error("REGISTRATION_MODE must be open or invite_only");
@@ -126,6 +140,7 @@ export function loadConfig(env = process.env): Config {
     baseUrl: base.origin,
     databasePath: env.DATABASE_PATH || "./data/archipel.sqlite",
     databaseUrl,
+    nativeChatUrl, nativeBridgeSecret,
     devAuth,
     oidcIssuer,
     oidcClientId,
@@ -143,6 +158,7 @@ export function loadConfig(env = process.env): Config {
     rateLimitFederation: rate("RATE_LIMIT_FEDERATION", 120),
     federationSendRate: rate("FEDERATION_SEND_RATE", 20, 1, 1000),
     federationSendInterval: rate("FEDERATION_SEND_INTERVAL", 1000, 100, 600000),
+    federationSendConcurrency: rate("FEDERATION_SEND_CONCURRENCY", 4, 1, 32),
     federationPeerSendRate: rate("FEDERATION_PEER_SEND_RATE", 100, 0),
     adminSubjects: (env.ADMIN_SUBJECTS || "")
       .split(",")

@@ -19,6 +19,12 @@ The original product brief lives in [ARCHIPEL.md](ARCHIPEL.md). The
 [architecture proposal](docs/architecture.md) and [milestones](docs/milestones.md)
 describe the longer-term direction.
 
+A [native Rust server refactor](docs/native-server.md) is underway. The first
+PostgreSQL chat slice uses isolated native worker processes; the existing API
+remains the compatibility front end until its remaining features are ported.
+For host production startup, run `npm run build` followed by `npm start`; the
+compatibility server launches compiled JavaScript without a TypeScript loader.
+
 ## Run with Docker
 
 Requires Python 3.9 or newer, Docker, and Docker Compose 2.30 or newer on the host.
@@ -425,6 +431,14 @@ Browser tests use isolated temporary databases and two separate local servers.
 The Docker build checks TypeScript and compiles both client and server. The browser
 test image installs Chromium and its dependencies inside Docker. Setup tests run
 with Python only; Compose integration checks also run when Compose is installed.
+
+For an isolated HTTP/SSE workload with 10,000 connected, actively chatting users,
+run `npm run benchmark`. It saves throughput, errors, latency and process resource
+measurements without touching the instance database. See [benchmarking](docs/benchmark.md)
+for the traffic model, variants and limitations; `npm run test:benchmark` validates the harness.
+For five real Archipel/Prosody stacks with 1,500 web and 500 native XMPP members
+per instance sharing rooms, use `npm run benchmark:five`; see the
+[measured scale review](docs/scale-review.md).
 
 ## Next
 

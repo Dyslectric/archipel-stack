@@ -134,6 +134,39 @@ async function application(t: TestContext, override: Partial<Config> = {}) {
   });
   return { store, origin, config, observed, app };
 }
+test("private XMPP inventory accepts 500 clients after authentication without enlarging public mutation limits", async t => {
+  const secret = "s".repeat(43), domain = "inventory.test";
+  const f = await application(t, { xmppDomain: domain, xmppBridgeSecret: secret });
+  const room = f.store.transaction(() => {
+    const owner = f.store.loginIdentity("urn:archipel:development", "inventory-owner", "inventory-owner", []);
+    return f.store.createChannel(owner, { name: "inventory", mode: "timeline", visibility: "members", admission: "open" });
+  });
+  const sessions: { jid: string; credential: string }[] = [], occupants: { jid: string; room: string }[] = [];
+  f.store.transaction(() => {
+    for (let i = 0; i < 500; i++) {
+      const member = f.store.loginIdentity("urn:archipel:development", `inventory-${i}`, `inventory-${i}`, []);
+      f.store.join(member, room.id);
+      const credential = f.app.locals.xmpp.issue(member, "Native test");
+      sessions.push({ jid: `${credential.jid}/native-test`, credential: credential.id });
+      occupants.push({ jid: `${credential.jid}/native-test`, room: `inventory@channels.${domain}` });
+    }
+  });
+  const body = JSON.stringify({ after: 0, sessions, occupants });
+  assert.ok(Buffer.byteLength(body) > 65536);
+  const send = (path: string, payload: string, authorized = true) => fetch(f.origin + path, {
+    method: "POST", headers: { "Content-Type": "application/json", ...(authorized ? { Authorization: `Bearer ${secret}` } : {}) }, body: payload,
+  });
+  assert.equal((await send("/internal/xmpp/sync", body, false)).status, 401);
+  const response = await send("/internal/xmpp/sync", body);
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.deepEqual([result.disconnect, result.kick], [[], []]);
+  assert.equal((await send("/internal/xmpp/sync", JSON.stringify({ extra: "x".repeat(1048576) }))).status, 413);
+  assert.equal((await send("/internal/xmpp/operation", body)).status, 413);
+  assert.equal((await send("/internal/xmpp/remote-rooms/check", '{"native":[]}', false)).status, 401);
+  assert.deepEqual(await (await send("/internal/xmpp/remote-rooms/check", '{"native":[]}')).json(), { native_kick: [] });
+  assert.equal((await send("/api/channels", body)).status, 413);
+});
 function browser(origin: string) {
   const cookies = new Map<string, string>();
   let csrf = "";
@@ -1237,7 +1270,7 @@ test("media follows current membership and account approval, and removed referen
   // Old databases migrate conservatively: an old URL is never a private draft bypass.
   f.store.db.exec("ALTER TABLE attachments DROP COLUMN published; ALTER TABLE channel_roles DROP COLUMN allow_access; ALTER TABLE channel_held_roles DROP COLUMN allow_access; PRAGMA user_version=24");
   f.store.db.migrate();
-  assert.equal(f.store.db.version(), 26);
+  assert.equal(f.store.db.version(), 29);
   assert.equal((await bob.request(path)).status, 403);
   const dmFile = f.store.addAttachment(f.store.user(author.id), bytes, "direct.png");
   f.store.sendDirect(f.store.user(author.id), (await alice.session()).user.id, `![direct](${dmFile.url})`);
@@ -1432,14 +1465,14 @@ test("open browsers are told what changed for them: their channels, their own me
 
   // A channel kept to its members is news to them and to administrators, and to nobody else.
   assert.equal((await bob.request(`/api/channels/${quiet}/messages`, "POST", { body: "Among members" })).status, 201);
-  assert.deepEqual(await member.take(), [{ channels: [quiet] }]);
-  assert.deepEqual(await admin.take(), [{ channels: [quiet] }]);
+  assert.deepEqual(await member.take(), [{ channels: [quiet], content: true }]);
+  assert.deepEqual(await admin.take(), [{ channels: [quiet], content: true }]);
   assert.deepEqual(await outsider.take(), []);
   // A public one is news to everyone; several changes at once are told of once.
   f.store.transaction(() => {
     for (const body of ["One", "Two", "Three"]) f.store.post(f.store.user(bobUser.id), open, { body });
   });
-  for (const stream of [member, admin, outsider]) assert.deepEqual(await stream.take(), [{ channels: [open] }]);
+  for (const stream of [member, admin, outsider]) assert.deepEqual(await stream.take(), [{ channels: [open], content: true }]);
   // What was undone is not announced.
   assert.throws(() => f.store.transaction(() => {
     f.store.post(f.store.user(bobUser.id), open, { body: "Never said" });
@@ -1453,12 +1486,27 @@ test("open browsers are told what changed for them: their channels, their own me
   assert.deepEqual(await admin.take(), []);
   const last = (await (await bob.request(`/api/channels/${open}/messages`)).json()).messages.at(-1).seq;
   assert.equal((await bob.request("/api/read", "POST", { target: open, seq: last })).status, 200);
-  assert.deepEqual(await member.take(), [{ me: true }]);
+  assert.deepEqual(await member.take(), [{ read: true }]);
   // Reading no further than before changes nothing, and what only fetches is silent.
   assert.equal((await bob.request("/api/read", "POST", { target: open, seq: last })).status, 200);
   for (const path of ["/api/session", "/api/overview", "/api/channels", "/api/emojis", "/api/inbox", `/api/channels/${open}`, `/api/channels/${open}/messages`])
     assert.equal((await bob.request(path)).status, 200);
   for (const stream of [member, admin, outsider]) assert.deepEqual(await stream.take(), []);
+  // Queue progress refreshes only the sender's conversation/status, not account metadata.
+  const outgoing = `${f.origin}/federation/activities/queue-notice`;
+  f.store.transaction(() => {
+    f.store.db.prepare("INSERT INTO federation_outgoing VALUES(?,?,?,?,?,?,?)")
+      .run(outgoing, "{}", `${f.origin}/actors/users/${bobUser.id}`, bobUser.id, open, "post", Date.now());
+    f.store.db.prepare("INSERT INTO federation_deliveries(activity_id,recipient) VALUES(?,?)")
+      .run(outgoing, "https://peer.example/actors/channels/room");
+  });
+  assert.deepEqual(await member.take(), [{ sending: true }]);
+  assert.deepEqual(await admin.take(), [{ admin: true }]);
+  assert.deepEqual(await outsider.take(), []);
+  f.store.db.prepare("UPDATE federation_deliveries SET status='sent' WHERE activity_id=?").run(outgoing);
+  assert.deepEqual(await member.take(), [{ sending: true }]);
+  assert.deepEqual(await admin.take(), [{ admin: true }]);
+  assert.deepEqual(await outsider.take(), []);
   // What changes the instance for everyone asks everyone to look again.
   assert.equal((await charlie.request(`/api/channels/${open}/join`, "POST", {})).status, 200);
   for (const stream of [member, admin, outsider]) assert.deepEqual(await stream.take(), [{ all: true }]);

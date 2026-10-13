@@ -17,6 +17,9 @@ import { Xmpp } from "./xmpp.js";
 import { Mirrors } from "./mirrors.js";
 import { Push } from "./push.js";
 import { Events } from "./events.js";
+import { ReadMarks } from "./read-marks.js";
+import { WriteBatch } from "./write-batch.js";
+import { NativeChat } from "./native-chat.js";
 import { DeviceSignIn, devicePages } from "./device.js";
 
 function cookie(req: Request, name: string) {
@@ -34,15 +37,19 @@ export function createApp(config: Config, store: Store) {
     config.devAuth,
   );
   store.initializeRegistration(config.registrationMode);
-  const federation = new Federation(store, config);
+  const writes = new WriteBatch(store);
+  const federation = new Federation(store, config, writes);
   const media = new Media(store, federation, config);
   const xmpp = new Xmpp(store, config);
   const mirrors = new Mirrors(store, xmpp);
   const push = new Push(store, config);
-  const events = new Events(store);
+  const readMarks = new ReadMarks(store, writes);
+  const native = new NativeChat(store, config);
+  const events = new Events(store,native);
   const device = new DeviceSignIn(store, config.baseUrl);
   const app = express();
   app.locals.events = events;
+  app.locals.nativeChat = native;
   app.locals.mirrors = mirrors;
   app.locals.push = push;
   app.locals.federation = federation;
@@ -78,7 +85,6 @@ export function createApp(config: Config, store: Store) {
     express.json({ limit: "360kb" }),
   );
   app.use("/api/profile/avatar", express.json({ limit: "3mb" }));
-  app.use("/internal/xmpp/avatars", express.json({ limit: "3mb" }));
   // Federation authenticates with signed requests; browser APIs keep Origin/CSRF.
   app.use(
     "/federation",
@@ -159,7 +165,7 @@ export function createApp(config: Config, store: Store) {
       .type("application/activity+json")
       .json(federation.roster(actor, String(req.params.id)));
   });
-  app.get("/actors/:kind/:id", (req, res, next) => {
+  app.get("/actors/:kind/:id", async (req, res, next) => {
     if (
       !/application\/(activity\+json|ld\+json)/i.test(req.headers.accept || "")
     )
@@ -170,7 +176,7 @@ export function createApp(config: Config, store: Store) {
       .setHeader("Cache-Control", "no-store")
       .type("application/activity+json")
       .json(
-        federation.publicActor(
+        await federation.exportedActor(
           req.params.kind as "users" | "channels",
           String(req.params.id),
         ),
@@ -218,7 +224,8 @@ export function createApp(config: Config, store: Store) {
   });
   const jsonBody = express.json({ limit: "64kb" });
   // A JSON file is still an attachment: leave its bytes for the upload route's raw parser.
-  app.use((req, res, next) => req.path === "/api/attachments" ? next() : jsonBody(req, res, next));
+  app.use((req, res, next) => req.path === "/api/attachments" || req.path.startsWith("/internal/xmpp/")
+    ? next() : jsonBody(req, res, next));
   // Private bearer-authenticated adapter, before browser Origin/session checks.
   app.use("/internal/xmpp", xmpp.internalRouter());
   app.use(
@@ -226,7 +233,15 @@ export function createApp(config: Config, store: Store) {
     rateLimit({
       windowMs: 60000,
       limit: config.rateLimitApi,
-      keyGenerator: (req) => {
+      keyGenerator: async (req,res) => {
+        const path=req.originalUrl.split("?")[0];
+        if(config.nativeChatUrl && path.startsWith("/api/")) {
+          res.locals.nativeAuth=true;
+          try {
+            const session=await native.session(cookie(req,authCookie),true);
+            res.locals.nativeSession=session;return `user:${session.user.id}`;
+          } catch(error) {res.locals.nativeAuthError=error;return ipKeyGenerator(req.ip || "unknown");}
+        }
         try {
           const session = store.session(cookie(req, authCookie));
           if (session) return `user:${session.user.id}`;
@@ -279,7 +294,7 @@ export function createApp(config: Config, store: Store) {
       );
     next();
   });
-  app.get("/health", (_req, res) => res.json({ status: "ok" }));
+  app.get("/health", async (_req, res) => { await native.health(); res.json({ status: "ok" }); });
   // Browsers authenticate locally; home instances sign on behalf of their own users.
   app.get(
     "/media/:file",
@@ -298,7 +313,9 @@ export function createApp(config: Config, store: Store) {
       media.serve(req, res, file);
     },
   );
-  app.get("/api/session", (req, res) => {
+  app.get("/api/session", async (req, res) => {
+    const current=await native.account("session",cookie(req,authCookie));
+    if(current) return void res.json({...current,dev_auth:config.devAuth,oidc_enabled:!!config.oidcIssuer,instance:new URL(config.baseUrl).host});
     const session = store.session(cookie(req, authCookie));
     res.json({
       user: session ? store.profile(session.user, true) : null,
@@ -432,12 +449,14 @@ export function createApp(config: Config, store: Store) {
     }
   });
   app.use(["/api", "/actors", "/objects"], (req, res, next) => {
-    const session = store.session(cookie(req, authCookie));
+    if(res.locals.nativeAuthError) return next(res.locals.nativeAuthError);
+    const session = res.locals.nativeAuth ? res.locals.nativeSession : store.session(cookie(req, authCookie));
     if (!session) return next(new Problem(401, "Sign in to continue."));
     res.locals.user = session.user;
+    res.locals.csrf = session.csrf;
     // Using a session keeps it, and the notifications that go with it, for another week.
     const token = cookie(req, authCookie);
-    if (store.renewSession(token))
+    if (store.renewSession(token,session.expiresAt))
       res.cookie(authCookie, token, { ...cookieOptions, maxAge: SESSION_LIFE });
     if (
       !["GET", "HEAD"].includes(req.method) &&
@@ -450,10 +469,20 @@ export function createApp(config: Config, store: Store) {
   });
   // What changed is pushed to open browsers. An account still waiting for approval listens
   // too: being let in is news to it.
-  app.get("/api/events", (req, res) => {
-    events.open(req, res, cookie(req, authCookie));
+  app.get("/api/events", async (req, res) => {
+    await events.open(req, res, cookie(req, authCookie));
   });
   const user = (res: Response) => res.locals.user as User;
+  // Unsupported native features re-enter compatibility with a fresh session,
+  // rather than using an account snapshot from before the async RPC.
+  const legacyUser=(req:Request,res:Response)=>{
+    if(!res.locals.nativeAuth)return user(res);
+    const session=store.session(cookie(req,authCookie));
+    if(!session)throw new Problem(401,"Sign in to continue.");
+    if(!["GET","HEAD"].includes(req.method) && req.headers["x-csrf-token"]!==session.csrf)
+      throw new Problem(403,"Your session changed. Refresh and try again.");
+    res.locals.user=session.user;return session.user;
+  };
   // Unapproved identities can inspect their session and sign out, but cannot
   // access members, messages, actor/object endpoints, or management APIs.
   app.use(["/api", "/actors", "/objects"], (req, res, next) => {
@@ -463,7 +492,8 @@ export function createApp(config: Config, store: Store) {
       req.method === "POST"
     )
       return next();
-    store.active(user(res).id);
+    if(!res.locals.nativeAuth)store.active(user(res).id);
+    else if(user(res).admission_status!=="approved")return next(new Problem(403,"Instance membership approval is required."));
     next();
   });
   app.get("/api/emojis", (_req, res) =>
@@ -657,13 +687,19 @@ export function createApp(config: Config, store: Store) {
   app.post("/api/dms/close", (req, res) =>
     res.json(store.setDirectClosed(user(res), req.body?.peer, req.body?.closed)),
   );
-  app.get("/api/overview", (_req, res) => res.json({ ...store.overview(user(res)), xmpp_enabled: !!config.xmppDomain, xmpp_rooms: xmpp.remoteRooms.list(user(res)) }));
+  app.get("/api/overview", async (req, res) => {
+    const raw=await native.rawOverview(cookie(req,authCookie),res.locals.csrf || "");
+    if(raw!==undefined)return void res.type("application/json").send(raw);
+    res.json({...store.overview(legacyUser(req,res)),xmpp_enabled:!!config.xmppDomain,
+      xmpp_rooms:xmpp.remoteRooms.list(user(res))});
+  });
   app.post("/api/user-blocks", (req, res) =>
     res.json(store.setUserBlock(user(res), req.body?.peer, req.body?.blocked)),
   );
   app.get("/api/inbox", (_req, res) => res.json(store.inbox(user(res))));
-  app.post("/api/read", (req, res) => {
-    store.markRead(user(res), req.body || {});
+  app.post("/api/read", async (req, res) => {
+    if (!await native.mark(cookie(req,authCookie),String(req.headers["x-csrf-token"] || ""),req.body || {}))
+      await readMarks.mark(legacyUser(req,res), req.body || {});
     res.json({ ok: true });
   });
   app.put("/api/sidebar", (req, res) =>
@@ -755,18 +791,19 @@ export function createApp(config: Config, store: Store) {
       ),
     ),
   );
-  app.patch("/api/messages/:id", async (req, res) =>
-    res.json(
-      await (store.channel(store.message(String(req.params.id)).channel_id)
+  app.patch("/api/messages/:id", async (req, res) => {
+    const edited=await native.edit(cookie(req,authCookie),String(req.headers["x-csrf-token"]||""),String(req.params.id),req.body||{});
+    if(edited!==undefined)return void res.json(edited);
+    const actor=legacyUser(req,res);
+    res.json(await (store.channel(store.message(String(req.params.id)).channel_id)
         .remote_actor
         ? federation.editRemote(
-            user(res),
+            actor,
             String(req.params.id),
             req.body || {},
           )
-        : store.editMessage(user(res), String(req.params.id), req.body || {})),
-    ),
-  );
+        : store.editMessage(actor, String(req.params.id), req.body || {})));
+  });
   app.get("/actors/users/:id", (req, res) =>
     res.json(store.profile(store.user(String(req.params.id)))),
   );
@@ -783,8 +820,8 @@ export function createApp(config: Config, store: Store) {
       );
     res.json(store.veiled(user(res), store.messageFor(user(res), message)));
   });
-  app.post("/api/logout", (req, res) => {
-    store.logout(cookie(req, authCookie));
+  app.post("/api/logout", async (req, res) => {
+    if(!await native.account("logout",cookie(req,authCookie),String(req.headers["x-csrf-token"]||""))) store.logout(cookie(req, authCookie));
     res.clearCookie(authCookie, cookieOptions);
     res.json({ ok: true });
   });
@@ -997,34 +1034,43 @@ export function createApp(config: Config, store: Store) {
         store.createTopic(user(res), String(req.params.id), req.body?.title),
       ),
   );
-  app.get("/api/channels/:id/messages", (req, res) => {
+  app.get("/api/channels/:id/messages", async (req, res) => {
     const before =
       req.query.before === undefined ? undefined : Number(req.query.before);
     if (before !== undefined && (!Number.isSafeInteger(before) || before < 1))
       throw new Problem(400, "Invalid message cursor.");
-    const messages = store.messages(user(res), String(req.params.id), before);
+    const after = req.query.after === undefined ? undefined : Number(req.query.after);
+    const stamp = req.query.stamp;
+    if (after !== undefined && (!Number.isSafeInteger(after) || after<0 || before!==undefined || typeof stamp!=="string" || !/^[a-f0-9]{32}$/i.test(stamp)))
+      throw new Problem(400,"Invalid refresh cursor.");
+    const nativePage = await native.rawMessages(cookie(req,authCookie),res.locals.csrf || "",String(req.params.id),before,after,typeof stamp==="string"?stamp:undefined);
+    if (nativePage !== undefined) return void res.type("application/json").send(nativePage);
+    const viewer=legacyUser(req,res);
+    const messages = store.messages(viewer, String(req.params.id), before);
     res.json({
       messages,
+      ...(after!==undefined?{incremental:false}:{}),
       older_cursor: messages.length === 100 ? messages[0].seq : null,
       pending:
         before === undefined
-          ? federation.pendingPosts(user(res), String(req.params.id))
+          ? federation.pendingPosts(viewer, String(req.params.id))
           : [],
     });
   });
-  app.post("/api/channels/:id/messages", async (req, res) =>
+  app.post("/api/channels/:id/messages", async (req, res) => {
+    const result = await native.post(cookie(req,authCookie),String(req.headers["x-csrf-token"] || ""),String(req.params.id),req.body || {});
     res
       .status(201)
       .json(
-        await (store.channel(String(req.params.id)).remote_actor
-          ? federation.remotePost(
-              user(res),
+        result ?? await writes.run(() => (store.channel(String(req.params.id)).remote_actor
+          ? federation.createRemotePost(
+              legacyUser(req,res),
               String(req.params.id),
               req.body || {},
             )
-          : store.post(user(res), String(req.params.id), req.body || {})),
-      ),
-  );
+          : store.post(legacyUser(req,res), String(req.params.id), req.body || {}))),
+      );
+  });
   app.delete("/api/messages/:id", (req, res) => {
     if (
       store.channel(store.message(String(req.params.id)).channel_id)
@@ -1035,8 +1081,8 @@ export function createApp(config: Config, store: Store) {
     res.json({ ok: true });
   });
   app.get("/api/users", (_req, res) => res.json(store.directory(user(res))));
-  app.patch("/api/profile", (req, res) =>
-    res.json(store.updateProfile(user(res), req.body || {})),
+  app.patch("/api/profile", async (req, res) =>
+    res.json(await native.account("profile",cookie(req,authCookie),String(req.headers["x-csrf-token"]||""),req.body||{}) ?? store.updateProfile(user(res), req.body || {})),
   );
   app.post("/api/profile/avatar", (req, res) =>
     res.json(store.setAvatar(user(res), req.body?.image)),

@@ -6,6 +6,7 @@ import {
   createPublicKey,
 } from "node:crypto";
 import { standardEmojis } from "./emojis.js";
+import { WriteBatch } from "./write-batch.js";
 import type { Request } from "express";
 import type { Config } from "./config.js";
 import {
@@ -64,6 +65,7 @@ type Outgoing = {
   channel_id: string | null;
   purpose: string;
 };
+type Delivery = Outgoing & { delivery_id: number; recipient: string; attempts: number };
 const time = () => new Date().toISOString();
 
 export class Federation {
@@ -71,11 +73,29 @@ export class Federation {
   private busy = false;
   private peerSends = new Map<string, number[]>();
   private rosterAsked = new Map<string, number>();
+  private actorRequests = new Map<string, Promise<Doc>>();
+  private actorFreshness = new Map<string, { digest: string; at: number }>();
+  private async nativeRequest(operation: string, input: Record<string,unknown>): Promise<Doc> {
+    const response=await fetch(`${this.config.nativeChatUrl}/v1/federation/${operation}`,{
+      method:"POST",redirect:"error",signal:AbortSignal.timeout(operation === "tick" ? 120000 : 25000),
+      headers:{Authorization:`Bearer ${this.config.nativeBridgeSecret}`,"Content-Type":"application/json"},body:JSON.stringify(input),
+    }).catch(()=>{throw new Problem(503,"Native federation worker unavailable.");});
+    const value=await response.json().catch(()=>{throw new Problem(502,"Invalid native federation response.");}) as Doc;
+    if(operation === "receive" && response.status === 501 && value.code === "native_unsupported") return {supported:false};
+    if(!response.ok) throw new Problem(response.status,value.error || "Native federation operation failed.");
+    return value;
+  }
+  /** Physical POST attempts, separate from per-recipient delivery audit rows. */
+  readonly deliveryStats = { requests: 0, recipientAttempts: 0 };
+  readonly nativeStats = { authenticated:0, received:0, unsupported:0, ticks:0,
+    senderSelectionMs:0, senderDeliveryMs:0, senderJobs:0, senderActive:0, senderErrors:0,
+    stages:{} as Record<string,{calls:number;totalMs:number;maxMs:number}> };
   /** Called when an administrator changes how often deliveries go out. */
   paceChanged?: () => void;
   constructor(
     readonly store: Store,
     readonly config: Config,
+    private writes = new WriteBatch(store),
   ) {
     store.db
       .prepare(
@@ -207,14 +227,16 @@ export class Federation {
         publicKeyEncoding: { type: "spki", format: "pem" },
       });
       this.store.db
-        .prepare("INSERT INTO federation_keys VALUES(1,?,?)")
+        .prepare("INSERT OR IGNORE INTO federation_keys VALUES(1,?,?)")
         .run(generated.privateKey, generated.publicKey);
-      keys = {
-        private_key: generated.privateKey,
-        public_key: generated.publicKey,
-      };
+      // Native workers may initialize the same persistent key concurrently.
+      // Always use the committed winner, never an unpersisted generated key.
+      keys = this.store.db.prepare("SELECT * FROM federation_keys WHERE id=1").get() as { private_key: string; public_key: string };
     }
     return keys;
+  }
+  async exportedActor(kind: "users" | "channels", id: string): Promise<Doc> {
+    return this.config.nativeChatUrl ? this.nativeRequest("actor",{kind,id}) : this.publicActor(kind,id);
   }
   publicActor(kind: "users" | "channels", id: string): Doc {
     this.ensureEnabled();
@@ -288,8 +310,18 @@ export class Federation {
     const cache = this.store.db
       .prepare("SELECT * FROM federation_actors WHERE id=?")
       .get(id) as { document: string; fetched_at: number } | undefined;
-    if (!refresh && cache && cache.fetched_at > Date.now() - 60000)
+    const verified = this.actorFreshness.get(id);
+    const fetchedAt = verified && cache && verified.digest === hash(cache.document) ? verified.at : cache?.fetched_at;
+    if (!refresh && cache && (fetchedAt ?? 0) > Date.now() - 60000)
       return JSON.parse(cache.document) as Doc;
+    const pending = !refresh && this.actorRequests.get(id);
+    if (pending) return pending;
+    const job = this.fetchActor(id, url, refresh, cache);
+    if (!refresh) this.actorRequests.set(id, job);
+    try { return await job; }
+    finally { if (this.actorRequests.get(id) === job) this.actorRequests.delete(id); }
+  }
+  private async fetchActor(id: string, url: URL, refresh: boolean, cache?: { document: string; fetched_at: number }) {
     const actor = await peerJson(url, this.config);
     if (
       actor.id !== id ||
@@ -317,11 +349,20 @@ export class Federation {
         "Actor must use an RSA signing key of at least 2048 bits.",
       );
     await this.syncAvatar(actor, refresh);
-    this.store.db
+    const document = JSON.stringify(actor);
+    if (cache?.document === document) {
+      // The network validation still occurs every minute. An unchanged public
+      // document needs no durable rewrite merely to advance its cache timestamp.
+      // After restart, the old disk timestamp requires fresh network validation.
+      if (this.actorFreshness.size >= 4096) this.actorFreshness.delete(this.actorFreshness.keys().next().value!);
+      this.actorFreshness.set(id, { digest: hash(document), at: Date.now() });
+      return actor;
+    }
+    await this.writes.run(() => this.store.db
       .prepare(
         "INSERT INTO federation_actors VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET document=excluded.document,fetched_at=excluded.fetched_at",
       )
-      .run(id, JSON.stringify(actor), Date.now());
+      .run(id, document, Date.now()));
     return actor;
   }
   private async syncAvatar(actor: Doc, refresh = false) {
@@ -413,6 +454,12 @@ export class Federation {
       .run(actor);
   }
   async authenticate(req: Request, rawBody?: Buffer) {
+    if (this.config.nativeChatUrl) {
+      const headers: Record<string,string> = {};
+      for (const [key,value] of Object.entries(req.headers)) if (typeof value === "string") headers[key]=value;
+      const actor=await this.nativeRequest("authenticate",{headers,method:req.method,target:req.originalUrl,body:rawBody?.toString("base64") ?? null});
+      this.nativeStats.authenticated++; return actor;
+    }
     this.ensureEnabled();
     const values = signatureKey(req),
       id = values.keyId.slice(0, -"#main-key".length);
@@ -956,12 +1003,13 @@ export class Federation {
         purpose,
         Date.now(),
       );
-    for (const recipient of new Set(recipients))
-      this.store.db
-        .prepare(
-          "INSERT INTO federation_deliveries(activity_id,recipient) VALUES(?,?)",
-        )
-        .run(activity.id, recipient);
+    const unique = [...new Set(recipients)];
+    for (let offset = 0; offset < unique.length; offset += 500) {
+      const chunk = unique.slice(offset, offset + 500);
+      this.store.db.prepare(
+        `INSERT INTO federation_deliveries(activity_id,recipient) VALUES ${chunk.map(() => "(?,?)").join(",")}`,
+      ).run(...chunk.flatMap(recipient => [activity.id, recipient]));
+    }
     return activity.id;
   }
   private signNote(note: Doc, actor: string): Doc {
@@ -1318,6 +1366,9 @@ export class Federation {
       }));
   }
   async remotePost(user: User, id: string, input: Doc) {
+    return this.createRemotePost(user, id, input);
+  }
+  createRemotePost(user: User, id: string, input: Doc) {
     this.require(user, "federation_send");
     this.require(user, "federation_post");
     this.require(user, "federation_subscribe");
@@ -2188,6 +2239,14 @@ export class Federation {
       .run(note.id, user.id, this.channelActor(channel), JSON.stringify(note));
   }
   async receive(req: Request, raw: Buffer) {
+    if (this.config.nativeChatUrl && !this.config.xmppDomain) {
+      await this.store.db.listenExternalChanges();
+      const headers: Record<string,string>={};
+      for(const [key,value] of Object.entries(req.headers)) if(typeof value === "string") headers[key]=value;
+      const result=await this.nativeRequest("receive",{headers,method:req.method,target:req.originalUrl,body:raw.toString("base64")});
+      if(result.supported) { this.nativeStats.received++; this.store.mirrorHooks?.pull(); return; }
+      this.nativeStats.unsupported++;
+    }
     const sender = await this.authenticate(req, raw);
     let activity: Doc;
     try {
@@ -2305,9 +2364,9 @@ export class Federation {
       snapshot = await this.snapshot(this.store.channel(sub.channel_id), user);
       roster = await this.askRoster(this.store.channel(sub.channel_id), user);
     }
-    this.ensureEnabled();
-    this.allowed(sender.id);
-    this.store.transaction(() => {
+    await this.writes.run(() => this.store.transaction(() => {
+      this.ensureEnabled();
+      this.allowed(sender.id);
       const duplicate = this.store.db
         .prepare("SELECT digest FROM federation_incoming WHERE id=?")
         .get(activity.id) as { digest: string } | undefined;
@@ -2516,12 +2575,12 @@ export class Federation {
           .prepare("SELECT * FROM channels WHERE remote_actor=?")
           .get(sender.id) as unknown as Channel | undefined;
         if (!channel) throw new Problem(403, "Unknown remote channel.");
-        const subscribers = this.store.db
+        const subscriber = this.store.db
           .prepare(
-            "SELECT u.id FROM federation_subscriptions s JOIN users u ON u.id=s.user_id WHERE s.channel_id=? AND s.status='accepted' AND u.banned=0 AND u.admission_status='approved' AND u.federation_receive=1 AND u.federation_subscribe=1",
+            "SELECT 1 FROM federation_subscriptions s JOIN users u ON u.id=s.user_id WHERE s.channel_id=? AND s.status='accepted' AND u.banned=0 AND u.admission_status='approved' AND u.federation_receive=1 AND u.federation_subscribe=1 LIMIT 1",
           )
-          .all(channel.id);
-        if (!subscribers.length)
+          .get(channel.id);
+        if (!subscriber)
           throw new Problem(403, "No permitted recipients for this channel.");
         this.importNote(channel, prepared!);
       } else if (
@@ -2671,7 +2730,7 @@ export class Federation {
       this.store.db
         .prepare("INSERT INTO federation_incoming VALUES(?,?,?)")
         .run(activity.id, hash(raw.toString()), Date.now());
-    });
+    }));
     this.store.mirrorHooks?.pull();
   }
   private deliveryAllowed(outgoing: Outgoing, recipient: string) {
@@ -2750,86 +2809,179 @@ export class Federation {
     this.peerSends.set(host, recent);
     return limit && recent.length >= limit ? null : recent;
   }
-  async tick() {
+  /** A fresh policy snapshot for the followers sharing one announcement. */
+  private followerPolicies(channel: string, recipients: string[]) {
+    const result=new Map<string,Problem | null>();
+    const candidates:{actor:string;origin:string}[]=[];
+    for(const actor of recipients) {
+      try { candidates.push({actor,origin:peerUrl(actor,this.config).origin}); }
+      catch(error) { result.set(actor,error as Problem); }
+    }
+    for(let offset=0;offset<candidates.length;offset+=400) {
+      const chunk=candidates.slice(offset,offset+400);
+      const rows=this.store.db.prepare(`WITH candidates(actor,origin) AS (VALUES ${chunk.map(()=>"(?,?)").join(",")})
+        SELECT c.actor,
+          CASE WHEN EXISTS(SELECT 1 FROM federation_blocks b WHERE b.target=c.actor OR b.target=c.origin) THEN 1 ELSE 0 END AS blocked,
+          CASE WHEN EXISTS(SELECT 1 FROM federation_follows f JOIN users u ON u.remote_actor=f.actor
+            WHERE f.channel_id=? AND f.actor=c.actor AND f.status='accepted'
+              AND u.banned=0 AND u.admission_status='approved'
+              AND NOT EXISTS(SELECT 1 FROM channel_rules r WHERE r.channel_id=f.channel_id AND r.user_id=u.id AND r.rule='block'))
+            THEN 1 ELSE 0 END AS admitted
+        FROM candidates c`).all(...chunk.flatMap(c=>[c.actor,c.origin]),channel);
+      for(const row of rows) result.set(row.actor,row.blocked ? new Problem(403,"This remote instance or actor is blocked.")
+        : !row.admitted ? new Problem(403,"Recipient no longer has channel access.") : null);
+    }
+    return result;
+  }
+  private async deliver(delivery: Delivery, peers: Delivery[]) {
+    let group = [delivery];
+    try {
+      this.deliveryAllowed(delivery, delivery.recipient);
+      const actor = await this.actor(delivery.recipient), url = this.allowed(actor.inbox);
+      // Only channel-wide Announce activities share a POST, and only when the
+      // current actor documents advertise exactly the same inbox URL.
+      for (let offset = 0; offset < peers.length; offset += 8) {
+        const candidates = await Promise.all(peers.slice(offset, offset + 8).map(async row => {
+          if (row.delivery_id === delivery.delivery_id) return null;
+          try {
+            const destination = await this.actor(row.recipient);
+            return this.allowed(destination.inbox).href === url.href ? row : null;
+          } catch { return null; } // Record an unavailable/denied peer independently at its own head.
+        }));
+        group.push(...candidates.filter((row): row is Delivery => row !== null));
+      }
+      // Discovery yields to other requests. Recheck every member synchronously
+      // just before transmission; revocation cancels only that recipient's row.
+      const shared = ["relay", "moderation"].includes(delivery.purpose) && JSON.parse(delivery.activity).type === "Announce";
+      const followerPolicies=shared?this.followerPolicies(delivery.channel_id!,group.map(row=>row.recipient)):null;
+      let commonAuthorized = false;
+      group = group.filter(row => {
+        try {
+          if (!shared || !commonAuthorized) {
+            this.deliveryAllowed(row, row.recipient);
+            commonAuthorized = true;
+          } else {
+            // These rows share the exact channel/author/activity. No await occurs
+            // during this pass, so common policy stays current while each distinct
+            // follower's instance/actor block and admission are still checked.
+            const denied=followerPolicies!.get(row.recipient);
+            if(denied) throw denied;
+            if(!followerPolicies!.has(row.recipient)) throw new Problem(403,"Recipient no longer has channel access.");
+          }
+          return true;
+        }
+        catch (error) {
+          this.store.db.prepare("UPDATE federation_deliveries SET status='cancelled',error=? WHERE id=?")
+            .run(String((error as Error).message).slice(0, 200), row.delivery_id);
+          return false;
+        }
+      });
+      if (!group.length) return;
+      // Other in-flight groups may have spent the last allowance during discovery.
+      const sends = this.peerAllowance(delivery.recipient);
+      if (!sends) return;
+      sends.push(Date.now());
+      this.deliveryStats.requests++;
+      this.deliveryStats.recipientAttempts += group.length;
+      await peerRequest(url, this.config,
+        signedHeaders(url, "POST", delivery.signer, this.keys().private_key, delivery.activity), delivery.activity);
+      await this.writes.run(() => this.store.transaction(() => {
+        for (let offset = 0; offset < group.length; offset += 500) {
+          const ids = group.slice(offset, offset + 500).map(row => row.delivery_id);
+          this.store.db.prepare(
+            `UPDATE federation_deliveries SET status='sent',attempts=attempts+1,error=NULL WHERE id IN (${ids.map(() => "?").join(",")})`,
+          ).run(...ids);
+        }
+      }));
+    } catch (error) {
+      const problem = error as Problem;
+      const permanent = problem instanceof Problem && [400, 401, 403, 404, 409, 410, 413].includes(problem.status);
+      const failedAt = Date.now();
+      await this.writes.run(() => this.store.transaction(() => { for (const row of group) {
+        let cancelled = false;
+        try { this.deliveryAllowed(row, row.recipient); } catch { cancelled = true; }
+        this.store.db.prepare(
+          "UPDATE federation_deliveries SET status=?,attempts=attempts+1,next_attempt=?,error=? WHERE id=?",
+        ).run(cancelled ? "cancelled" : permanent || row.attempts >= 11 ? "failed" : "pending",
+          failedAt + Math.min(3600000, 5000 * 2 ** row.attempts),
+          String(problem.message || "Network delivery failed").slice(0, 200), row.delivery_id);
+      } }));
+    }
+  }
+  async tick(options: {wait?:boolean;drainOnly?:boolean} = {}) {
     if (this.busy) return;
     this.busy = true;
+    if (this.config.nativeChatUrl) {
+      try {
+        const result = await this.nativeRequest("tick",options);
+        this.nativeStats.ticks++;
+        this.nativeStats.senderSelectionMs += result.selectionMs || 0;
+        this.nativeStats.senderDeliveryMs += result.deliveryMs || 0;
+        this.nativeStats.senderJobs += result.jobs || 0;
+        this.nativeStats.senderActive = result.active || 0;
+        if(result.stages) this.nativeStats.stages = result.stages;
+        this.deliveryStats.requests += result.requests;
+        this.deliveryStats.recipientAttempts += result.recipientAttempts;
+      } catch (error) { this.nativeStats.senderErrors++; throw error; }
+      finally { this.busy = false; }
+      return;
+    }
+    const active = new Set<Promise<void>>(), claimed = new Set<number>(), exhausted = new Set<string>();
     try {
-      for (let step = 0, batch = this.sending().batch; step < batch; step++) {
-        // Preserve recipient order without allowing an offline or rate-limited peer to hold other peers.
-        let delivery:
-          | (Outgoing & {
-              delivery_id: number;
-              recipient: string;
-              attempts: number;
-            })
-          | undefined,
-          sends: number[] = [];
-        for (const row of this.store.db
-          .prepare(
-            "SELECT d.id AS delivery_id,d.recipient,d.attempts,o.* FROM federation_deliveries d JOIN federation_outgoing o ON o.id=d.activity_id WHERE d.status='pending' AND d.next_attempt<=? AND NOT EXISTS (SELECT 1 FROM federation_deliveries earlier WHERE earlier.recipient=d.recipient AND earlier.id<d.id AND earlier.status='pending') ORDER BY d.id",
-          )
-          .iterate(Date.now())) {
-          const allowance = this.peerAllowance(String(row.recipient));
-          if (!allowance) continue;
-          delivery = row as NonNullable<typeof delivery>;
-          sends = allowance;
-          break;
+      const batch = this.sending().batch;
+      const deadline = Date.now() + 1000;
+      let work = 0;
+      while ((work < batch && Date.now() < deadline) || active.size) {
+        if (work >= batch || Date.now() >= deadline || active.size >= this.config.federationSendConcurrency) {
+          // The clock can cross the deadline between the loop condition and
+          // this guard. Promise.race([]) would never settle and stall the sender.
+          if(!active.size)break;
+          await Promise.race(active); continue;
         }
-        if (!delivery) break;
-        try {
-          this.deliveryAllowed(delivery, delivery.recipient);
-          const actor = await this.actor(delivery.recipient),
-            url = this.allowed(actor.inbox);
-          this.deliveryAllowed(delivery, delivery.recipient);
-          sends.push(Date.now());
-          await peerRequest(
-            url,
-            this.config,
-            signedHeaders(
-              url,
-              "POST",
-              delivery.signer,
-              this.keys().private_key,
-              delivery.activity,
-            ),
-            delivery.activity,
-          );
-          this.store.db
-            .prepare(
-              "UPDATE federation_deliveries SET status='sent',attempts=attempts+1,error=NULL WHERE id=?",
-            )
-            .run(delivery.delivery_id);
-        } catch (error) {
-          const problem = error as Problem;
-          let cancelled = false;
-          try {
-            this.deliveryAllowed(delivery, delivery.recipient);
-          } catch {
-            cancelled = true;
-          }
-          const permanent =
-            problem instanceof Problem &&
-            [400, 401, 403, 404, 409, 410, 413].includes(problem.status);
-          this.store.db
-            .prepare(
-              "UPDATE federation_deliveries SET status=?,attempts=attempts+1,next_attempt=?,error=? WHERE id=?",
-            )
-            .run(
-              cancelled
-                ? "cancelled"
-                : permanent || delivery.attempts >= 11
-                  ? "failed"
-                  : "pending",
-              Date.now() + Math.min(3600000, 5000 * 2 ** delivery.attempts),
-              String(problem.message || "Network delivery failed").slice(
-                0,
-                200,
-              ),
-              delivery.delivery_id,
-            );
+        const omit = [...exhausted].flatMap(host => ["http", "https"].map(scheme =>
+          `${scheme}://${host}/`.replace(/[\\%_]/g, "\\$&") + "%"));
+        const ids = [...claimed];
+        // The adapter's iterate() materializes all rows. Fetch just one narrow
+        // recipient head instead of copying every eligible activity in the backlog.
+        const head = this.store.db.prepare(
+          "SELECT d.id,d.recipient FROM federation_deliveries d " +
+          (this.store.db.dialect === "sqlite" ? "INDEXED BY federation_pending_order " : "") +
+          "WHERE d.status='pending' AND d.next_attempt<=? " +
+          (omit.length ? `AND NOT (${omit.map(() => "d.recipient LIKE ? ESCAPE '\\'").join(" OR ")}) ` : "") +
+          (ids.length ? `AND d.id NOT IN (${ids.map(() => "?").join(",")}) ` : "") +
+          "AND NOT EXISTS (SELECT 1 FROM federation_deliveries earlier WHERE earlier.recipient=d.recipient AND earlier.id<d.id AND earlier.status='pending') ORDER BY d.id LIMIT 1",
+        ).get(Date.now(), ...omit, ...ids);
+        if (!head) {
+          if (!active.size) break;
+          await Promise.race(active); continue;
         }
+        if (!this.peerAllowance(head.recipient)) { exhausted.add(new URL(head.recipient).host); continue; }
+        const delivery = this.store.db.prepare(
+          "SELECT d.id AS delivery_id,d.recipient,d.attempts,o.* FROM federation_deliveries d JOIN federation_outgoing o ON o.id=d.activity_id WHERE d.id=?",
+        ).get(head.id) as Delivery;
+        const peers: Delivery[] = [];
+        if (["relay", "moderation"].includes(delivery.purpose) && JSON.parse(delivery.activity).type === "Announce") {
+          const origin = new URL(delivery.recipient).origin;
+          const rows = this.store.db.prepare(
+            "SELECT d.id AS delivery_id,d.recipient,d.attempts FROM federation_deliveries d WHERE d.activity_id=? AND d.status='pending' AND d.next_attempt<=? " +
+            "AND NOT EXISTS (SELECT 1 FROM federation_deliveries earlier WHERE earlier.recipient=d.recipient AND earlier.id<d.id AND earlier.status='pending') ORDER BY d.id",
+          ).all(delivery.id, Date.now());
+          for (const row of rows) if (!claimed.has(row.delivery_id) && new URL(row.recipient).origin === origin)
+            peers.push({ ...delivery, ...row } as Delivery);
+        }
+        if (!peers.length) peers.push(delivery);
+        // Claim before any async discovery: another worker must not send this
+        // announcement to the same inbox or advance a recipient past its head.
+        for (const row of peers) claimed.add(row.delivery_id);
+        work++;
+        const job = this.deliver(delivery, peers).finally(() => {
+          for (const row of peers) claimed.delete(row.delivery_id);
+          active.delete(job);
+        });
+        active.add(job);
       }
     } finally {
+      await Promise.all(active);
       this.busy = false;
     }
   }

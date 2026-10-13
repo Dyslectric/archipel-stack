@@ -25,6 +25,15 @@ const permissions = {
 };
 const image =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
+
+test("sender deadline crossing with no active deliveries settles instead of waiting forever",async t=>{
+  const f=await instance(t);
+  const times=[0,999,1000];let calls=0;
+  t.mock.method(Date,"now",()=>times[Math.min(calls++,times.length-1)]);
+  await Promise.race([f.fed.tick(),new Promise((_,fail)=>setTimeout(()=>fail(new Error("Sender stalled on an empty race")),100))]);
+  t.mock.restoreAll();
+  await f.fed.tick();
+});
 async function instance(t: TestContext, env: Record<string, string> = {}) {
   const directory = mkdtempSync(join(tmpdir(), "archipel-federation-"));
   const server = createServer();
@@ -343,6 +352,151 @@ test("delivery honours the configured overall and per-peer send rates", async (t
   await a.fed.tick();
   assert.deepEqual(statuses(b.origin), ["sent:1", "sent:1", "sent:1", "sent:1", "sent:1"]);
   assert.equal(b.fed.directMessages(b.bob).length, 5);
+});
+
+test("channel announcements share one inbox POST and peer allowance while preserving every follower row", async t => {
+  const a = await instance(t), b = await instance(t), c = await instance(t);
+  const home = channel(a), address = a.fed.channelActor(home);
+  const sub = await b.fed.subscribe(b.bob, address);
+  await b.fed.subscribe(b.alice, address); await c.fed.subscribe(c.bob, address);
+  await drain(a, b, c);
+  let bRequests = 0, cRequests = 0;
+  b.server.on("request", req => { if ((req.url === "/federation/inbox" || req.url === "/inbox")) bRequests++; });
+  c.server.on("request", req => { if ((req.url === "/federation/inbox" || req.url === "/inbox")) cRequests++; });
+  a.config.federationPeerSendRate = 1;
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() + 60001 });
+  a.store.post(a.alice, home.id, { body: "First shared announcement" });
+  a.store.post(a.alice, home.id, { body: "Second shared announcement" });
+  await a.fed.tick();
+  assert.deepEqual([bRequests, cRequests], [1, 1], JSON.stringify(a.store.db.prepare("SELECT status,error FROM federation_deliveries WHERE status!='sent'").all()));
+  const status = () => a.store.db.prepare("SELECT d.status,d.attempts FROM federation_deliveries d JOIN federation_outgoing o ON o.id=d.activity_id WHERE o.purpose='relay' ORDER BY d.id").all();
+  assert.deepEqual(status().map(r => `${r.status}:${r.attempts}`), ["sent:1", "sent:1", "sent:1", "pending:0", "pending:0", "pending:0"]);
+  assert.deepEqual(b.store.messages(b.bob, sub.channel.id).map(m => m.body), ["First shared announcement"]);
+  t.mock.timers.tick(60001); await a.fed.tick();
+  assert.deepEqual([bRequests, cRequests], [2, 2]);
+  assert.ok(status().every(r => r.status === "sent" && r.attempts === 1));
+  assert.deepEqual(b.store.messages(b.bob, sub.channel.id).map(m => m.body), ["First shared announcement", "Second shared announcement"]);
+});
+
+test("shared-inbox retries survive restart and hold later announcements behind each follower's head", async t => {
+  const a = await instance(t), b = await instance(t), home = channel(a);
+  const sub = await b.fed.subscribe(b.bob, a.fed.channelActor(home));
+  await b.fed.subscribe(b.alice, a.fed.channelActor(home)); await drain(a, b);
+  let requests = 0;
+  b.server.on("request", req => { if ((req.url === "/federation/inbox" || req.url === "/inbox")) requests++; });
+  b.offline(true); a.store.post(a.alice, home.id, { body: "Retried first" }); await a.fed.tick();
+  assert.equal(requests, 1);
+  const first = a.store.db.prepare("SELECT d.attempts,d.next_attempt,d.status FROM federation_deliveries d JOIN federation_outgoing o ON o.id=d.activity_id WHERE o.purpose='relay'").all();
+  assert.equal(first.length, 2); assert.ok(first.every(r => r.status === "pending" && r.attempts === 1));
+  assert.equal(first[0].next_attempt, first[1].next_attempt);
+  a.restart(); b.offline(false); a.store.post(a.alice, home.id, { body: "Ordered second" });
+  await a.fed.tick(); assert.equal(requests, 1); assert.equal(b.store.messages(b.bob, sub.channel.id).length, 0);
+  a.store.db.prepare("UPDATE federation_deliveries SET next_attempt=0 WHERE status='pending'").run();
+  await a.fed.tick(); assert.equal(requests, 3, JSON.stringify(a.store.db.prepare("SELECT status,error FROM federation_deliveries WHERE status!='sent'").all()));
+  assert.deepEqual(b.store.messages(b.bob, sub.channel.id).map(m => m.body), ["Retried first", "Ordered second"]);
+});
+
+test("unchanged actor revalidation shares concurrent fetches, keeps the one-minute TTL, and avoids timestamp-only commits", async t => {
+  const a = await instance(t), b = await instance(t), id = b.fed.userActor(b.bob);
+  await a.fed.actor(id);
+  const old = a.store.db.prepare("SELECT fetched_at FROM federation_actors WHERE id=?").get(id)!.fetched_at;
+  let fetches = 0;
+  b.server.on("request", req => { if (req.url === `/actors/users/${b.bob.id}`) fetches++; });
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() + 60001 });
+  await Promise.all(Array.from({ length: 8 }, () => a.fed.actor(id)));
+  assert.equal(fetches, 1);
+  assert.equal(a.store.db.prepare("SELECT fetched_at FROM federation_actors WHERE id=?").get(id)!.fetched_at, old);
+  await a.fed.actor(id); assert.equal(fetches, 1);
+  t.mock.timers.tick(60001); await a.fed.actor(id); assert.equal(fetches, 2);
+  b.store.db.prepare("UPDATE users SET display_name='New remote name' WHERE id=?").run(b.bob.id);
+  assert.equal((await a.fed.actor(id, true)).name, "New remote name");
+  assert.equal(fetches, 3);
+  assert.equal((await a.fed.actor(id)).name, "New remote name");
+  assert.ok(a.store.db.prepare("SELECT fetched_at FROM federation_actors WHERE id=?").get(id)!.fetched_at > old);
+  a.fed.block(a.alice, { kind: "instance", target: b.origin, blocked: true });
+  await assert.rejects(a.fed.actor(id), Problem);
+});
+
+test("peer discovery reuses its validated connection and rechecks URL policy before any reuse", async t => {
+  const a = await instance(t), b = await instance(t), url = new URL(b.fed.userActor(b.bob));
+  const sockets = new Set();
+  b.server.on("request", req => { if (req.url === url.pathname) sockets.add(req.socket); });
+  const first = await peerRequest(url, a.config, { accept: "application/activity+json" });
+  const second = await peerRequest(url, a.config, { accept: "application/activity+json" });
+  assert.equal(first.status, 200); assert.equal(second.status, 200);
+  assert.equal(sockets.size, 1);
+  await assert.rejects(peerRequest(url, loadConfig({ BASE_URL: "https://production.example", HOST: "0.0.0.0" }),
+    { accept: "application/activity+json" }), Problem);
+  assert.equal(sockets.size, 1);
+});
+
+test("shared-inbox consolidation cancels a revoked follower without cancelling an allowed follower", async t => {
+  const a = await instance(t), b = await instance(t), home = channel(a);
+  const sub = await b.fed.subscribe(b.bob, a.fed.channelActor(home));
+  await b.fed.subscribe(b.alice, a.fed.channelActor(home)); await drain(a, b);
+  a.store.post(a.alice, home.id, { body: "One remaining follower" });
+  a.fed.decideFollow(a.alice, home.id, b.fed.userActor(b.bob), "blocked");
+  await drain(a, b);
+  const rows = a.store.db.prepare("SELECT d.recipient,d.status FROM federation_deliveries d JOIN federation_outgoing o ON o.id=d.activity_id WHERE o.purpose='relay'").all();
+  assert.equal(rows.find(r => r.recipient === b.fed.userActor(b.bob))?.status, "cancelled");
+  assert.equal(rows.find(r => r.recipient === b.fed.userActor(b.alice))?.status, "sent");
+  assert.throws(() => b.store.messages(b.bob, sub.channel.id), Problem);
+  assert.equal(b.store.messages(b.alice, sub.channel.id)[0].body, "One remaining follower");
+});
+
+test("followers on the same origin with different advertised inboxes are delivered separately", async t => {
+  const a = await instance(t), b = await instance(t), home = channel(a);
+  const sub = await b.fed.subscribe(b.bob, a.fed.channelActor(home));
+  await b.fed.subscribe(b.alice, a.fed.channelActor(home)); await drain(a, b);
+  const actor = await a.fed.actor(b.fed.userActor(b.alice));
+  actor.inbox += "?recipient=alice";
+  a.store.db.prepare("UPDATE federation_actors SET document=?,fetched_at=? WHERE id=?")
+    .run(JSON.stringify(actor), Date.now(), actor.id);
+  const requests: string[] = [];
+  b.server.on("request", req => { if (req.url?.startsWith("/federation/inbox") || req.url?.startsWith("/inbox")) requests.push(req.url.replace(/^\/federation/, "")); });
+  a.store.post(a.alice, home.id, { body: "Separate inbox endpoints" }); await a.fed.tick();
+  assert.deepEqual(requests.sort(), ["/inbox", "/inbox?recipient=alice"], JSON.stringify(a.store.db.prepare("SELECT status,error FROM federation_deliveries WHERE status!='sent'").all()));
+  assert.equal(b.store.messages(b.bob, sub.channel.id).length, 1);
+});
+
+test("authorization is checked again after asynchronous inbox discovery for a shared announcement", async t => {
+  const a = await instance(t), b = await instance(t), home = channel(a);
+  await b.fed.subscribe(b.bob, a.fed.channelActor(home));
+  await b.fed.subscribe(b.alice, a.fed.channelActor(home)); await drain(a, b);
+  const original = a.fed.actor.bind(a.fed); let revoked = false, requests = 0;
+  t.mock.method(a.fed, "actor", async (id: string, refresh = false) => {
+    const actor = await original(id, refresh);
+    if (!revoked) { revoked = true; grant(a.store, a.alice, a.alice.id, { ...permissions, federation_send: false }); }
+    return actor;
+  });
+  b.server.on("request", req => { if ((req.url === "/federation/inbox" || req.url === "/inbox")) requests++; });
+  a.store.post(a.alice, home.id, { body: "Revoked during discovery" }); await a.fed.tick();
+  assert.equal(requests, 0);
+  const rows = a.store.db.prepare("SELECT d.status FROM federation_deliveries d JOIN federation_outgoing o ON o.id=d.activity_id WHERE o.purpose='relay'").all();
+  assert.equal(rows.length, 2); assert.ok(rows.every(r => r.status === "cancelled"));
+});
+
+test("a slow delivery does not hold an independent recipient or allow its own later message to overtake", async t => {
+  const a = await instance(t), b = await instance(t), c = await instance(t);
+  let release!: () => void, reached!: () => void;
+  const gate = new Promise<void>(done => { release = done; });
+  const arrived = new Promise<void>(done => { reached = done; });
+  const slow = b.fed.receive.bind(b.fed), fast = c.fed.receive.bind(c.fed);
+  t.mock.method(b.fed, "receive", async (...args: Parameters<typeof slow>) => { await gate; await slow(...args); });
+  t.mock.method(c.fed, "receive", async (...args: Parameters<typeof fast>) => { await fast(...args); reached(); });
+  await a.fed.sendDirect(a.bob, b.fed.userActor(b.bob), "Slow first");
+  await a.fed.sendDirect(a.bob, b.fed.userActor(b.bob), "Ordered second");
+  await a.fed.sendDirect(a.bob, c.fed.userActor(c.bob), "Independent fast");
+  const job = a.fed.tick();
+  let deadline!: NodeJS.Timeout;
+  try {
+    await Promise.race([arrived, new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error("Independent delivery was held behind a slow peer")), 2000); })]);
+    assert.deepEqual(c.fed.directMessages(c.bob).map(m => m.body), ["Independent fast"]);
+    assert.equal(b.fed.directMessages(b.bob).length, 0);
+    assert.deepEqual(a.store.db.prepare("SELECT attempts,status FROM federation_deliveries WHERE recipient=? ORDER BY id").all(b.fed.userActor(b.bob))
+      .map(r => `${r.status}:${r.attempts}`), ["pending:0", "pending:0"]);
+  } finally { clearTimeout(deadline); release(); await job; }
+  assert.deepEqual(b.fed.directMessages(b.bob).map(m => m.body), ["Slow first", "Ordered second"]);
 });
 
 test("personal remote blocks reject incoming messages and cancel queued sends until unblocked", async (t) => {

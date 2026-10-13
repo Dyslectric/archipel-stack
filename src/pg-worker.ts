@@ -5,10 +5,12 @@ import { workerData, type MessagePort } from "node:worker_threads";
 import pg from "pg";
 
 type Request = {
-  op: "connect" | "begin" | "commit" | "rollback" | "close" | "exec" | "query";
+  op: "connect" | "begin" | "commit" | "rollback" | "close" | "exec" | "query" | "statistics";
   text?: string;
   values?: unknown[];
   tx?: boolean; // the server believes a transaction is open
+  recover?: boolean;
+  result?: "rows" | "first" | "count";
 };
 
 const { port, shared, url, schema } = workerData as {
@@ -27,6 +29,12 @@ pg.types.setTypeParser(16, (value) => (value === "t" ? 1 : 0));
 
 let client: pg.Client | null = null,
   open = false; // a transaction is open on this connection
+// statements counts driver calls (a multi-command migration is one call).
+const statistics = { statements: 0, queries: 0, transferredRows: 0 };
+function execute(db: pg.Client, text: string, values?: unknown[]) {
+  statistics.statements++;
+  return db.query(text, values);
+}
 
 async function connect(patient: boolean) {
   for (let attempt = 0; ; attempt++) {
@@ -54,6 +62,7 @@ async function connect(patient: boolean) {
 }
 
 async function handle(request: Request) {
+  if (request.op === "statistics") return { statistics: { ...statistics } };
   if (request.op === "close") {
     const last = client;
     client = null;
@@ -74,26 +83,32 @@ async function handle(request: Request) {
   }
   const db = client!;
   if (request.op === "begin" || request.op === "commit" || request.op === "rollback") {
-    await db.query(request.op.toUpperCase());
+    await execute(db, request.op.toUpperCase());
     open = request.op === "begin";
     return {};
   }
   if (request.tx && !open)
     throw new Error("The database connection was lost during a transaction.");
   if (request.op === "exec") {
-    await db.query(request.text!);
+    await execute(db, request.text!);
     return {};
   }
   // A failed statement would leave the whole transaction refusing everything after it;
   // behind a savepoint only the statement is undone, as in the embedded database.
-  if (open) await db.query("SAVEPOINT statement");
+  const recover = open && request.recover !== false;
+  if (recover) await execute(db, "SAVEPOINT statement");
   try {
-    const result = await db.query(request.text!, request.values);
-    if (open) await db.query("RELEASE SAVEPOINT statement");
-    return { rows: result.rows, count: result.rowCount ?? 0 };
+    statistics.queries++;
+    const result = await execute(db, request.text!, request.values);
+    if (recover) await execute(db, "RELEASE SAVEPOINT statement");
+    const rows = request.result === "count" ? [] : request.result === "first" ? result.rows.slice(0, 1) : result.rows;
+    statistics.transferredRows += rows.length;
+    return { rows, count: result.rowCount ?? 0 };
   } catch (error) {
-    if (open && client === db)
-      await db.query("ROLLBACK TO SAVEPOINT statement").catch(() => {});
+    if (recover && client === db) {
+      await execute(db, "ROLLBACK TO SAVEPOINT statement").catch(() => {});
+      await execute(db, "RELEASE SAVEPOINT statement").catch(() => {});
+    }
     throw error;
   }
 }

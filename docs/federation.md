@@ -127,7 +127,9 @@ must preserve the Host, Date, Digest and Signature headers and the request body.
 
 Outbound requests use a fifteen-second timeout, bounded response sizes, and no
 redirect following. DNS results are checked for private/reserved addresses and
-the selected public address is pinned to the connection. Public HTTPS is required
+the selected public address is pinned to the connection. Keep-alive pools are
+separated by validated address and request purpose; DNS and URL policy are still
+checked for every request. Public HTTPS is required
 in production. Local two-instance testing permits loopback HTTP only when
 development authentication is enabled on a loopback listener and base URL.
 
@@ -139,7 +141,17 @@ once, is audited, and is kept with the instance. Until it is set there, the pace
 comes from `FEDERATION_SEND_INTERVAL` (milliseconds between rounds, default
 1000) and `FEDERATION_SEND_RATE` (deliveries per round, default 20). A slower
 or smaller pace is gentler on small peers; a faster or larger one makes posts in
-federated channels arrive sooner. Whatever the pace, no more
+federated channels arrive sooner. `FEDERATION_SEND_CONCURRENCY` controls independent
+deliveries in flight (default 4, range 1–32). A round admits work for at most one
+second, then waits for its active requests before the next interval. Earlier
+pending work still blocks later work for the same recipient, while independent
+recipients can proceed.
+
+Channel-wide Announce activities for followers advertising the exact same inbox
+share one signed POST. Their individual durable delivery rows, current admission
+and block checks, retries and ordering are retained. Direct messages and other
+recipient-specific activities are delivered individually. Round and peer limits
+count physical POST attempts, including failed attempts. Whatever the pace, no more
 than `FEDERATION_PEER_SEND_RATE` deliveries per minute (default 100; 0 removes
 the cap) go to any one peer host. A peer at its cap keeps its queue in order
 while other peers continue. Incoming `/federation` requests are limited to

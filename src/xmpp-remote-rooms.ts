@@ -260,12 +260,29 @@ export class RemoteRooms {
     this.store.db.prepare("INSERT INTO messages(id,channel_id,author_id,body,created_at) VALUES(?,?,?,?,?)").run(messageId, bridge.channel_id, author.id, body, stamp);
     this.store.db.prepare("INSERT INTO xmpp_events(kind,object_id) VALUES('Create',?)").run(messageId);
   }
+  checkNative(native: unknown) {
+    if (!Array.isArray(native) || native.length > 4000) throw new Problem(400, "Invalid native remote room inventory.");
+    const nativeKick: { jid: string; room: string }[] = [], authorized = new Map<string, User>();
+    for (const entry of native as Input[]) {
+      const address = text(entry.jid, "Session JID", 1024), room = text(entry.room, "Room", 512);
+      try {
+        const key = `${address}\n${String(entry.credential)}`;
+        let user = authorized.get(key);
+        if (!user) { user = this.xmpp.authorize({ from: address, credential: entry.credential }); authorized.set(key, user); }
+        this.check(user, this.address(room));
+      } catch { nativeKick.push({ jid: address, room }); }
+    }
+    return nativeKick;
+  }
   sync(input: Input) {
-    const active = Array.isArray(input.active) ? input.active : [];
-    if (active.length > 10000) throw new Problem(400, "Invalid remote room inventory.");
-    const desired: { session: string; from: string; room: string; nick: string }[] = [];
+    const inventory = Array.isArray(input.active) ? input.active : [];
+    if (inventory.length > 10000) throw new Problem(400, "Invalid remote room inventory.");
+    const nativeKick = this.checkNative(input.native === undefined ? [] : input.native);
+    const active = new Set(inventory);
+    const bridges = new Map(this.store.db.prepare("SELECT room,created_by,channel_id,created_at FROM channel_bridges").all().map(row => [row.room as string, row]));
+    const desired: { session: string; from: string; room: string; nick: string; history: number; bridge?: string }[] = [];
     const messages: { session: string; id: string; body: string }[] = [];
-    for (const row of this.store.db.prepare("SELECT * FROM xmpp_remote_rooms WHERE desired=1").all() as Room[]) {
+    this.store.transaction(() => { for (const row of this.store.db.prepare("SELECT * FROM xmpp_remote_rooms WHERE desired=1").all() as Room[]) {
       try { this.check(this.store.user(row.user_id), row.room); }
       catch {
         this.failPending(row.id, "Room federation access was revoked.");
@@ -277,15 +294,17 @@ export class RemoteRooms {
         this.store.db.prepare("UPDATE xmpp_remote_rooms SET state='joining',role='none',retry_at=NULL,updated_at=? WHERE id=?").run(Date.now(), row.id);
         row.state = "joining";
       }
-      desired.push({ session: row.session, from: `${this.xmpp.jid(this.store.user(row.user_id))}/archipel-room-${row.session}`, room: row.room, nick: row.nick });
-      if (active.includes(row.session)) this.store.db.prepare("UPDATE xmpp_remote_rooms SET updated_at=? WHERE id=?").run(Date.now(), row.id);
-      if (row.state !== "joined" || !active.includes(row.session) || !["participant", "moderator"].includes(row.role)) continue;
+      const bridge = bridges.get(row.room), history = !row.bridged || bridge?.created_by === row.user_id;
+      desired.push({ session: row.session, from: `${this.xmpp.jid(this.store.user(row.user_id))}/archipel-room-${row.session}`, room: row.room, nick: row.nick, history: history ? 100 : 0,
+        ...(row.bridged && bridge ? { bridge: `${bridge.channel_id}:${bridge.created_at}` } : {}) });
+      if (active.has(row.session)) this.store.db.prepare("UPDATE xmpp_remote_rooms SET updated_at=? WHERE id=?", { notify: Date.now() - row.updated_at > 15000 }).run(Date.now(), row.id);
+      if (row.state !== "joined" || !active.has(row.session) || !["participant", "moderator"].includes(row.role)) continue;
       try { this.check(this.store.user(row.user_id), row.room, true); }
       catch { this.failPending(row.id, "Posting permission was revoked."); continue; }
       for (const message of this.store.db.prepare("SELECT id,body FROM xmpp_remote_messages WHERE subscription_id=? AND status='queued' ORDER BY seq LIMIT 50").all(row.id) as Message[])
         messages.push({ session: row.session, id: message.id, body: message.body });
-    }
-    return { desired, messages };
+    } });
+    return { desired, messages, native_kick: nativeKick };
   }
   dispatched(input: Input) {
     const room = this.store.db.prepare("SELECT * FROM xmpp_remote_rooms WHERE session=? AND desired=1").get(String(input.session)) as Room | undefined;

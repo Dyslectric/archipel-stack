@@ -1,0 +1,38 @@
+# Native chat and FWDXP workers; add alongside compose.yaml and compose.postgres.yaml.
+# Set a random NATIVE_BRIDGE_SECRET in .env.container; both services read it.
+services:
+  archipel:
+    environment:
+      NATIVE_CHAT_URL: http://native-chat:8870
+  native-chat:
+    build:
+      context: .
+      dockerfile: Dockerfile.native
+    restart: unless-stopped
+    init: true
+    env_file:
+      - path: .env.container
+        format: raw
+      - path: .env.postgres
+        format: raw
+    environment:
+      DATABASE_URL: postgres://archipel@postgres:5432/archipel
+      BASE_URL: ${BASE_URL:-http://127.0.0.1:8788}
+      DEV_AUTH: "false"
+      HOST: 0.0.0.0
+      FEDERATION_SEND_RATE: ${FEDERATION_SEND_RATE:-}
+      FEDERATION_SEND_CONCURRENCY: ${FEDERATION_SEND_CONCURRENCY:-}
+      FEDERATION_PEER_SEND_RATE: ${FEDERATION_PEER_SEND_RATE:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - default
+      - database
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true

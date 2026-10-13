@@ -9,19 +9,28 @@ local api_url = module:get_option_string("archipel_api_url");
 local secret = module:get_option_string("archipel_api_secret");
 assert(api_url and secret and #secret >= 43, "Archipel Server adapter configuration required");
 local domain = module:get_option_string("archipel_domain");
+-- The pinned Prosody HTTP client has unsafe pool cleanup on cancellation.
+-- Retain its verified default transport until that dependency is corrected.
+local adapter_http = http.default;
+local last_warning = {};
 
 local function request(path, input)
   local wait, done = async.waiter();
-  local result, status, completed, reason;
-  local pending = http.request(api_url .. path, {
+  local result, status, completed, reason, watchdog;
+  local pending = adapter_http:request(api_url .. path, {
     method = "POST";
     headers = { ["Content-Type"] = "application/json"; ["Authorization"] = "Bearer " .. secret };
     body = json.encode(input); timeout = 5;
   }, function(body, code)
     if completed then return; end
     completed = true;
+    if watchdog then watchdog:stop(); end
     status = code;
-    if code == 200 then result = json.decode(body);
+    if code == 200 then
+      local ok, decoded = pcall(json.decode, body);
+      if ok and type(decoded) == "table" then result = decoded;
+      else reason = "Invalid adapter JSON response"; end
+    elseif code == 0 then reason = tostring(body):sub(1, 120);
     elseif body then
       -- Archipel Server says why it refused, in words meant for the member.
       local ok, refusal = pcall(json.decode, body);
@@ -29,15 +38,23 @@ local function request(path, input)
     end
     done();
   end);
-  module:add_timer(5, function()
+  if not completed then watchdog = module:add_timer(5, function()
     if not completed then
       completed = true; status = 0;
+      reason = pending and pending.conn and "Adapter response timed out" or "Adapter connection timed out";
       if pending and pending.cancel then pending:cancel("Archipel Server request timed out");
       elseif pending then http.destroy_request(pending, true); end
       done();
     end
-  end);
+  end); end
   wait();
+  if not result then
+    local key = path .. ":" .. tostring(status);
+    if not last_warning[key] or os.time() - last_warning[key] >= 10 then
+      last_warning[key] = os.time();
+      module:log("warn", "Adapter %s failed (status %s): %s", path, tostring(status), reason or "transport failure");
+    end
+  end
   return result, status, reason;
 end
 local function operation(event, op, extras)

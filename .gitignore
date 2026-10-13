@@ -2,6 +2,7 @@ node_modules/
 dist/
 build/
 data/
+!native/data/
 .env
 .env.*
 !.env.example
@@ -12,3 +13,4 @@ playwright-report/
 core.*
 __pycache__/
 *.py[cod]
+native/target/

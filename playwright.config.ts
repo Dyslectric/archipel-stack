@@ -10,6 +10,7 @@ process.env.ARCHIPEL_E2E_DATABASE ||= join(
 );
 export default defineConfig({
   testDir: "./e2e",
+  outputDir: "./test-results/browser",
   workers: 1,
   timeout: 30000,
   expect: { timeout: 8000 },
