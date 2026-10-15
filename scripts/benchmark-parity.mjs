@@ -21,6 +21,8 @@ const o = {
   history: Number(option('history', 10)), idle: Number(option('idle', 15)), timeout: Number(option('timeout', 60)),
   inflight: Number(option('inflight', 64)), profile: option('profile', '0') === '1', cpus: option('cpus', ''), nativeWorkers: Number(option('native-workers', 4)),
   nativePool: Number(option('native-pool', 4)), label: option('label', ''),
+  // Demonstrations: readable message bodies, and the service reachable from this host.
+  funny: option('funny', '0') === '1', publish: Number(option('publish', 0)),
 };
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const output = resolve(root, 'test-results/parity', `${stamp}-${o.target}`);
@@ -52,7 +54,13 @@ const total = (sample, key) => Object.values(sample.containers).reduce((n, c) =>
 
 const report = { options: o, started: new Date().toISOString(), phases: {}, samples: [] };
 try {
-  await docker('run', '--detach', '--name', anchor, '--ulimit', 'nofile=262144:262144', 'node:24-bookworm-slim', 'sleep', 'infinity');
+  // Published ports reach the namespace's Ethernet address; forward them to the loopback
+  // listener the service uses, so a browser on this host can open it at 127.0.0.1.
+  const forward = `const net=require('net'),os=require('os');const a=Object.values(os.networkInterfaces()).flat().find(x=>!x.internal&&x.family==='IPv4').address;
+    net.createServer(s=>{const u=net.connect(${o.target === 'archipel' ? 8788 : 5222},'127.0.0.1');s.pipe(u).pipe(s);s.on('error',()=>u.destroy());u.on('error',()=>s.destroy());}).listen(${o.publish},a);`;
+  await docker('run', '--detach', '--name', anchor, '--ulimit', 'nofile=262144:262144',
+    ...(o.publish ? ['--publish', `127.0.0.1:${o.publish}:${o.publish}`] : []), 'node:24-bookworm-slim',
+    ...(o.publish ? ['node', '-e', forward] : ['sleep', 'infinity']));
   containers.push(anchor);
   let host = '127.0.0.1', port = 5222, users;
   const roomOf = i => i % o.rooms;

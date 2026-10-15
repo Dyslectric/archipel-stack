@@ -116,15 +116,30 @@ async function serve(o: Options) {
   const controlTimer = setInterval(() => {
     if (!profiling && o.profile && existsSync(join(o.output, "profile-start"))) {
       profiling = true;
-      void (async () => {
+      const only: number[] = JSON.parse(readFileSync(join(o.output, "profile-start"), "utf8")).instances ?? [];
+      if (!only.length || only.includes(o.instance)) void (async () => {
         const { Session } = await import("node:inspector/promises");
         const session = new Session(); session.connect();
+        // Count the main thread's blocking database round trips by statement while profiling.
+        const db = store.db as unknown as { ask?: (request: Record<string, unknown>) => unknown };
+        const ask = db.ask, calls = new Map<string, { calls: number; ms: number }>();
+        if (ask) db.ask = function (this: unknown, request: Record<string, unknown>) {
+          const begun = performance.now();
+          try { return ask.call(this, request); }
+          finally {
+            const key = String(request.text ?? request.op), row = calls.get(key) ?? { calls: 0, ms: 0 };
+            row.calls++; row.ms += performance.now() - begun; calls.set(key, row);
+          }
+        };
         try {
           await session.post("Profiler.enable"); await session.post("Profiler.start");
           await new Promise(done => setTimeout(done, o.profile! * 1000));
           const { profile } = await session.post("Profiler.stop");
+          if (ask) db.ask = ask;
+          writeFileSync(join(o.output, `sql-${o.instance}.json`), JSON.stringify({ seconds: o.profile,
+            statements: [...calls].map(([text, row]) => ({ text, ...row })).sort((a, b) => b.ms - a.ms) }));
           writeFileSync(join(o.output, `cpu-${o.instance}.cpuprofile`), JSON.stringify(profile));
-        } finally { session.disconnect(); }
+        } finally { if (ask) db.ask = ask; session.disconnect(); }
       })().catch(e => console.error(e));
     }
     if (!paused && existsSync(join(o.output, "pause-deliveries"))) {

@@ -1369,6 +1369,8 @@ test("files upload, download and expand on desktop and mobile while unfinished u
   }, Array.from(attachmentPng));
   await expect(box).toHaveValue(/!\[pasted\.png\]\(.*\.png\)$/);
   await page.getByRole("button", { name: "Send message" }).click();
+  // The viewer gathers what is on screen when it opens, so the sent picture has to be there first.
+  await expect(page.locator('.message-body .attachment img[alt="pasted.png"]')).toBeVisible();
   await picture.click();
   await expect(viewer.locator(".viewer-count")).toHaveText("1 of 2");
   await page.keyboard.press("ArrowRight");

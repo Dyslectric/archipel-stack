@@ -183,7 +183,16 @@ Implemented: push notifications name the conversation and carry the author, the
 author's picture and the message text, encrypted to the browser so the push
 service cannot read them; logout, session expiry and revocation stop delivery to that
 subscription. A worker in the server process finds new messages by sequence
-number, so every way a message arrives (local, federated, bridged) notifies.
+number, so every way a message arrives (local, federated, bridged) notifies. It
+runs only while some browser is subscribed, and skips members who have Archipel
+Web open, since they already see what arrives.
+
+Unread state is derived, not maintained. Each member has one read position per
+conversation; unread counts and the inbox are counted from it when a client asks.
+Posting writes nothing per reader. Watching a channel writes nothing either: when
+the event stream that watched it closes (switching conversation, hiding the page,
+disconnecting) the server records the reader's position up to the last message
+the stream was told of.
 
 [ConsortStack](https://github.com/ConsortChat/ConsortStack) checks membership on
 the server and issues Jitsi JWTs scoped to a conversation's derived room.

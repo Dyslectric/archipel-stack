@@ -175,6 +175,9 @@ export const state = {
   xmppRooms: [] as XmppRoom[],
   // New messages per conversation: a channel's id, or dm:<peer>.
   unread: {} as Record<string, number>,
+  // How far this page showed each channel. The server records it when the stream watching the
+  // channel closes; until its read notice arrives, counts and the inbox take it from here.
+  readHere: {} as Record<string, number>,
   layout: null as Layout | null,
   userBlocks: [] as string[],
   prefs: {} as Record<string, Pref>,

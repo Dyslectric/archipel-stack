@@ -30,6 +30,7 @@ interface Subscription {
   auth: string;
 }
 const FRESH = 15 * 60000; // history that arrives late (a mirror, a backfill) is not news
+const EVERY = 1500;
 
 // RFC 8291: the payload encrypted to the browser's keys, as one aes128gcm record.
 export function encryptPush(
@@ -75,10 +76,31 @@ export function encryptPush(
 export class Push {
   private busy = false;
   private key?: { private: KeyObject; public: string };
+  private running = false;
+  private timer?: NodeJS.Timeout;
+  /** Whether a member has Archipel Web open: they see what arrives there, so no push. */
+  live: (user: string) => boolean = () => false;
   constructor(
     private store: Store,
     private config: Config,
   ) {}
+  // The worker runs only while some browser has asked to be notified.
+  start() {
+    this.running = true;
+    this.wake();
+  }
+  stop() {
+    this.running = false;
+    clearInterval(this.timer);
+    this.timer = undefined;
+  }
+  private wake() {
+    if (!this.running || this.timer) return;
+    this.timer = setInterval(() => {
+      void this.tick().catch(() => console.error("Notification worker failed."));
+    }, EVERY);
+    this.timer.unref();
+  }
   private setting(key: string) {
     return (
       this.store.db
@@ -146,6 +168,9 @@ export class Push {
           "DELETE FROM push_subscriptions WHERE session_hash=? OR endpoint=?",
         )
         .run(hash(token), endpoint);
+      // The first browser to ask starts from now: the worker slept through what came before.
+      if (!this.store.db.prepare("SELECT 1 FROM push_subscriptions LIMIT 1").get())
+        for (const table of ["messages", "direct_messages"]) this.since(table, "0");
       this.store.db
         .prepare("INSERT INTO push_subscriptions VALUES(?,?,?,?,?,?)")
         .run(
@@ -157,6 +182,7 @@ export class Push {
           new Date().toISOString(),
         );
     });
+    this.wake();
     return this.status(token);
   }
   unsubscribe(token: string) {
@@ -248,8 +274,7 @@ export class Push {
       ),
       from = this.setting(key);
     const rows =
-      from === undefined ||
-      !this.store.db.prepare("SELECT 1 FROM push_subscriptions LIMIT 1").get()
+      from === undefined
         ? []
         : (this.store.db
             .prepare(
@@ -261,10 +286,16 @@ export class Push {
     return rows;
   }
   // Called every second or so: tells subscribed browsers what was said since the last call.
+  // With no subscription left the worker stops; the next browser to subscribe wakes it.
   async tick() {
     if (this.busy) return;
     this.busy = true;
     try {
+      if (!this.store.db.prepare("SELECT 1 FROM push_subscriptions LIMIT 1").get()) {
+        clearInterval(this.timer);
+        this.timer = undefined;
+        return;
+      }
       const fresh = new Date(Date.now() - FRESH).toISOString(),
         notices = new Map<string, { user: string; notice: Notice; lines: string[] }>();
       const add = (
@@ -297,7 +328,7 @@ export class Push {
             "SELECT DISTINCT s.user_id FROM push_subscriptions s JOIN memberships m ON m.user_id=s.user_id AND m.channel_id=? WHERE s.user_id!=?",
           )
           .all(message.channel_id, message.author_id) as { user_id: string }[])
-          add(user_id, this.store.channelNotice(user_id, message));
+          if (!this.live(user_id)) add(user_id, this.store.channelNotice(user_id, message));
       }
       for (const row of this.since<{
         seq: number;
@@ -307,6 +338,7 @@ export class Push {
       }>("direct_messages", "direction='incoming'"))
         if (
           row.created_at >= fresh &&
+          !this.live(row.user_id) &&
           this.store.db
             .prepare("SELECT 1 FROM push_subscriptions WHERE user_id=?")
             .get(row.user_id)

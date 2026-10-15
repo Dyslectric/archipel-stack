@@ -74,7 +74,13 @@ async function loadOverview() {
   state.xmppRooms = overview.xmpp_rooms;
   state.dms = overview.dms;
   state.userBlocks = overview.user_blocks;
+  // A channel this page read keeps the count it kept since: the overview may predate the server
+  // recording that read.
+  const before = state.unread;
   state.unread = { ...overview.unread };
+  for (const id of Object.keys(state.readHere))
+    if (before[id]) state.unread[id] = before[id];
+    else delete state.unread[id];
   adoptMessageOverview(overview.message_cursor);
   for (const c of overview.dms)
     if (c.unread) state.unread[`dm:${c.peer}`] = c.unread;
@@ -326,6 +332,7 @@ async function boot() {
   state.xmppEnabled = false;
   state.xmppRooms = [];
   state.unread = {};
+  state.readHere = {};
   state.layout = null;
   state.userBlocks = [];
   state.prefs = {};
@@ -401,6 +408,7 @@ async function refresh(notice: Notice) {
     if (!notice.all && !notice.me && session.user.admission_status === "approved") {
       const view = document.querySelector<HTMLElement>(".app")?.dataset.view;
       if (notice.channels || notice.read || notice.sending) {
+        if (notice.read) state.readHere = {};
         await loadOverview();
         renderSidebar();
         if (view === "chat") {

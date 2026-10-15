@@ -1,4 +1,4 @@
-import { fork, execFile } from 'node:child_process';
+import { fork, execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createServer } from 'node:net';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, unlinkSync, readdirSync, appendFileSync, copyFileSync } from 'node:fs';
@@ -14,13 +14,13 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const options = { instances: 3, members: 1000, rooms: 99, history: 10, ramp: 20, bootRamp: 20,
   warmup: 120, duration: 120, messageInterval: 60, inflight: 64, timeout: 20, bootstrapTimeout: 300,
   peerRate: 1000, inboxRate: 2000, batch: 20, interval: 1000, concurrency: 4, profile: 0, postgres:0,nativeChat:0,
-  nativeWorkers: 4, nativePool: 4, nativeHistory: 0, postgresBuffers:128, channelTransport:"stream", listenerOnlyPeers:0, webWorkers:1,connectRetries:0 };
+  nativeWorkers: 4, nativePool: 4, nativeHistory: 0, postgresBuffers:128, channelTransport:"stream", listenerOnlyPeers:0, webWorkers:1,connectRetries:0, webClients:"host", profileInstances:[], statementLimit:40 };
 const names = { instances: 'instances', members: 'members', rooms: 'rooms', history: 'history', ramp: 'ramp',
   'boot-ramp': 'bootRamp', warmup: 'warmup', duration: 'duration', 'message-interval': 'messageInterval',
   inflight: 'inflight', timeout: 'timeout', 'bootstrap-timeout': 'bootstrapTimeout',
   'peer-rate': 'peerRate', 'inbox-rate': 'inboxRate', batch: 'batch', interval: 'interval', concurrency: 'concurrency', profile: 'profile',postgres:'postgres','native-chat':'nativeChat',
   'native-workers': 'nativeWorkers', 'native-pool': 'nativePool', 'native-history':'nativeHistory', 'postgres-buffers':'postgresBuffers',
-  'listener-only-peers':'listenerOnlyPeers','web-workers':'webWorkers','connect-retries':'connectRetries' };
+  'listener-only-peers':'listenerOnlyPeers','web-workers':'webWorkers','connect-retries':'connectRetries','statement-limit':'statementLimit' };
 const args = process.argv.slice(2);
 if (args.includes('--help')) {
   console.log(`Signed FWDXP shared-channel benchmark; no Prosody or native XMPP clients.
@@ -31,6 +31,8 @@ All members are web protocol clients. Rooms are global and divide evenly across 
   --listener-only-peers 1 (only room-host users connect/post; other instances replicate without web clients)
   --web-workers 1 (1–32 generator shards per active instance, with the same total offered rate)
   --connect-retries 0 (0–5 retries for initial SSE connection failures, recorded separately)
+  --web-clients host (host: generators on this machine reach instances through Docker's port relay and the
+    loopback TCP forwarder; docker: generators run in containers inside the instances' network namespace)
 Options: --history 10 --ramp 20 --boot-ramp 20 --warmup 120 --duration 120
   --message-interval 60 --inflight 64 --timeout 20 --bootstrap-timeout 300
   --peer-rate 1000 (deliveries/minute/peer; 0 disables cap) --inbox-rate 2000 (requests/minute/address)
@@ -38,6 +40,8 @@ Options: --history 10 --ramp 20 --boot-ramp 20 --warmup 120 --duration 120
   --concurrency 4 (independent deliveries in flight; 1–32)
   --channel-transport stream (off, batch, stream; same durable log for batch and stream)
   --profile 0 (optional CPU profile seconds during measured chat; adds overhead)
+  --profile-instance 0,1 (profile only these zero-based instances; every instance by default)
+  --statement-limit 40 (PostgreSQL statements saved, by total time; 0 saves all)
   --postgres 1 (isolated PostgreSQL 17 instead of SQLite)
   --native-chat 1 (native Rust chat/auth/overview/FWDXP receipt and delivery; requires --postgres 1 and archipel-native:dev)
   --native-workers 4 --native-pool 4 (processes/instance and SQL connections/process)
@@ -50,6 +54,8 @@ Exit 0: target met; 2: target missed; 1: harness error.`); process.exit(0);
 }
 for (let i = 0; i < args.length; i += 2) {
   if (args[i] === '--channel-transport') { options.channelTransport = args[i+1]; if(!['off','batch','stream'].includes(options.channelTransport))throw new Error('Invalid channel transport.'); continue; }
+  if (args[i] === '--web-clients') { options.webClients = args[i+1]; if(!['host','docker'].includes(options.webClients))throw new Error('Invalid web client placement.'); continue; }
+  if (args[i] === '--profile-instance') { options.profileInstances = (args[i+1] ?? '').split(',').map(Number); continue; }
   if (args[i] === '--members-per-instance') {
     options.membersPerInstance = (args[i + 1] ?? '').split(',').map(Number); continue;
   }
@@ -148,6 +154,23 @@ function waitFor(p, type, ms) {
     p.on('message', message); p.once('exit', exit); p.once('error', error);
   });
 }
+// A generator in the instances' network namespace, with the forked process's interface:
+// messages are JSON lines over the container's stdin/stdout (see benchmark-web-bridge.mjs).
+function containerGenerator(name, entry) {
+  containers.push(name);
+  const p = spawn('docker', ['run', '--rm', '-i', '--name', name, '--network', `container:${anchor}`,
+    '--mount', `type=bind,src=${resolve(root, 'scripts')},dst=/bench,readonly`,
+    'node:24-bookworm-slim', 'node', '/bench/benchmark-web-bridge.mjs', `/bench/${entry}`], { stdio: ['pipe', 'pipe', 'inherit'] });
+  let buffered = '';
+  p.stdout.setEncoding('utf8').on('data', chunk => {
+    const lines = (buffered + chunk).split('\n'); buffered = lines.pop();
+    for (const line of lines) if (line.trim()) p.emit('message', JSON.parse(line));
+  });
+  p.stdin.on('error', () => {});
+  Object.defineProperty(p, 'connected', { get: () => p.exitCode === null && p.signalCode === null && p.stdin.writable });
+  p.send = (message, done) => p.stdin.write(JSON.stringify(message) + '\n', done);
+  return p;
+}
 let cleaned = false;
 async function cleanup() {
   if (cleaned) return; cleaned = true; clearInterval(reader); readSamples();
@@ -200,7 +223,8 @@ process.once('SIGTERM', () => void cleanup().then(() => process.exit(143)));
 const report = { options, output, protocol: 'FWDXP', pass: false,
   machine: { platform: os.platform(), node: process.version, cpu: os.cpus()[0]?.model, logicalCPUs: os.cpus().length },
   setup: {}, limitations: [
-    `Independent Linux ${options.nativeChat?'Node front ends with native Rust workers':'Node instances'}/${options.postgres?'PostgreSQL schemas':'SQLite databases'} and host generators share this workstation; this is not VPS or WAN capacity.`,
+    `Independent Linux ${options.nativeChat?'Node front ends with native Rust workers':'Node instances'}/${options.postgres?'PostgreSQL schemas':'SQLite databases'} and ${options.webClients==='docker'?'containerized generators in their network namespace':'host generators'} share this workstation; this is not VPS or WAN capacity.`,
+    ...(options.webClients==='docker'?['Web generators run in Docker containers and reach each instance on its loopback address, bypassing Docker Desktop\'s port relay and the harness TCP forwarder.']:[]),
     ...(options.nativeChat?['FWDXP posting, pages, overview, authentication, plain Note receipt/relay and network delivery use native workers. Membership/history bootstrap and other APIs retain compatibility.']:[]),
     'Signed FWDXP uses supported loopback development HTTP, excluding HTTPS, reverse proxy, Internet latency, browser rendering and OIDC login.',
     'All members are web protocol clients, one shared room per member. No native XMPP connections or XMPP bridges run.',
@@ -212,7 +236,7 @@ try {
   await docker('info', '--format', '{{.ServerVersion}}');
   if (options.nativeChat) report.nativeImage = await docker('image','inspect','--format','{{.Id}}','archipel-native:dev');
   const sources = ['native/Cargo.toml','native/Cargo.lock',...readdirSync(resolve(root,'native/src')).filter(name=>name.endsWith('.rs')).sort().map(name=>`native/src/${name}`),
-    'src/instance-feed.ts','migrations/031_instance_feed.sql','migrations/instance-feed.triggers','migrations/instance-feed.pg','src/channel-feed.ts','src/config.ts','src/federation-net.ts','migrations/030_channel_events.sql','src/native-chat.ts','src/store.ts','src/db.ts','src/pg-worker.ts','src/server.ts','scripts/benchmark-fwdxp-server.ts','src/federation.ts','src/events.ts','src/app.ts','client/chat.ts','scripts/benchmark-fwdxp.mjs','scripts/benchmark-topology.mjs','scripts/benchmark-worker.mjs','scripts/benchmark-web-group.mjs'];
+    'src/instance-feed.ts','migrations/031_instance_feed.sql','migrations/instance-feed.triggers','migrations/instance-feed.pg','src/channel-feed.ts','src/config.ts','src/federation-net.ts','migrations/030_channel_events.sql','src/native-chat.ts','src/store.ts','src/db.ts','src/pg-worker.ts','src/server.ts','scripts/benchmark-fwdxp-server.ts','src/federation.ts','src/events.ts','src/app.ts','client/chat.ts','scripts/benchmark-fwdxp.mjs','scripts/benchmark-topology.mjs','scripts/benchmark-worker.mjs','scripts/benchmark-web-group.mjs','scripts/benchmark-web-bridge.mjs'];
   report.sourceSHA256 = Object.fromEntries(sources.map(name=>[name,createHash('sha256').update(readFileSync(resolve(root,name))).digest('hex')]));
   console.log(`${options.instances} FWDXP instances, ${options.webMembersPerInstance.join('/')} active web members, ${options.instances-1} ${options.listenerOnlyPeers?'listener-only':'other'} peers, ${options.rooms} shared rooms.\nResults: ${output}`);
   await execute(process.execPath, [resolve(root, 'node_modules/typescript/bin/tsc'), '-p', 'tsconfig.build.json'], { cwd: root, timeout: 120000 });
@@ -297,7 +321,9 @@ try {
   console.log(`Signed subscriptions accepted: ${expected.join('/')}; queues drained. Chat settings: ${options.peerRate}/minute/peer, ${options.inboxRate}/minute inbound, ${options.batch}/round every ${options.interval}ms.`);
   await Promise.all(fixtures.map(async (fixture, i) => {
     const users=options.webMembersPerInstance[i]?fixture.users:[];
-    const p = fork(resolve(root, options.webWorkers>1 && users.length>1?'scripts/benchmark-web-group.mjs':'scripts/benchmark-worker.mjs'), [], { cwd: root, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
+    const entry=options.webWorkers>1 && users.length>1?'benchmark-web-group.mjs':'benchmark-worker.mjs';
+    const p = options.webClients==='docker' ? containerGenerator(`${prefix}-web-${i}`, entry)
+      : fork(resolve(root, 'scripts', entry), [], { cwd: root, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
     workers.push(p); p.on('message', m => { if (m.type === 'telemetry') { const row = { source: `web-${i}`, ...m }; samples.push(row); last.set(row.source, row); } });
     const ready = waitFor(p, 'ready', (options.ramp + (options.connectRetries+1)*options.timeout + options.connectRetries*2 + 60) * 1000);
     p.send({ origin: fixture.origin, users, options, worker: i });
@@ -339,14 +365,14 @@ try {
   try {
     while (Date.now() < end) {
       if (options.profile && Date.now() >= start && !existsSync(resolve(output, 'profile-start')))
-        writeFileSync(resolve(output, 'profile-start'), 'ready');
+        writeFileSync(resolve(output, 'profile-start'), JSON.stringify({ instances: options.profileInstances }));
       if (workers.some(p => p.exitCode !== null || p.signalCode !== null)) throw new Error('A generator exited during chat.');
       await sleep(1000);
     }
   } finally { clearInterval(progress); }
   await sleep(options.timeout * 1000);
   if(options.postgres) writeFileSync(resolve(output,'postgres-statements.json'),await docker('exec',`${prefix}-postgres`,'psql','-U','postgres','-d','archipel','-At','-c',
-    "SELECT COALESCE(jsonb_agg(to_jsonb(q)),'[]') FROM (SELECT query,calls,total_exec_time,mean_exec_time,rows,shared_blks_hit,shared_blks_read,wal_bytes FROM pg_stat_statements WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database()) ORDER BY total_exec_time DESC LIMIT 40) q"));
+    `SELECT COALESCE(jsonb_agg(to_jsonb(q)),'[]') FROM (SELECT query,calls,total_exec_time,mean_exec_time,rows,shared_blks_hit,shared_blks_read,wal_bytes FROM pg_stat_statements WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database()) ORDER BY total_exec_time DESC${options.statementLimit?` LIMIT ${options.statementLimit}`:''}) q`));
   writeFileSync(resolve(output, 'docker-stats-end.txt'), await docker('stats', '--no-stream', '--format', '{{.Name}} {{.CPUPerc}} {{.MemUsage}}', ...containers));
   report.instances = await Promise.all(workers.map(async (p, i) => {
     const result = waitFor(p, 'result', (options.timeout + 15) * 1000); p.send({ type: 'stop' }); const row = await result;

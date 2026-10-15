@@ -21,12 +21,7 @@ const federate = () => {
 };
 app.locals.federation.paceChanged = federate;
 federate();
-const pushTimer = setInterval(() => {
-  void app.locals.push
-    .tick()
-    .catch(() => console.error("Notification worker failed."));
-}, 1500);
-pushTimer.unref();
+app.locals.push.start();
 // A deep accept queue lets every browser reconnecting after a restart wait for
 // a turn, instead of having its connection dropped and retried seconds later.
 const server = app.listen({ port: config.port, host: config.host, backlog: 4096 }, () => {
@@ -43,7 +38,7 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
     if (stopping) return;
     stopping = true;
     clearTimeout(federationTimer);
-    clearInterval(pushTimer);
+    app.locals.push.stop();
     await app.locals.federation.channelFeed.close();
     await federationJob;
     if (config.nativeChatUrl) {
@@ -54,7 +49,6 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
     app.locals.events.close();
     server.close(() => {
       clearTimeout(federationTimer);
-      clearInterval(pushTimer);
       store.close();
       process.exit(0);
     });

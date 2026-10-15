@@ -67,6 +67,7 @@ type Outgoing = {
   purpose: string;
 };
 type Delivery = Outgoing & { delivery_id: number; recipient: string; attempts: number };
+export type PublicationLookups = { channel: (id: string) => Channel; active: (id: string) => User };
 const time = () => new Date().toISOString();
 
 export class Federation {
@@ -191,7 +192,10 @@ export class Federation {
   }
   require(user: User, flag: (typeof flags)[number]) {
     this.ensureEnabled();
-    const current = this.store.active(user.id);
+    return this.granted(this.store.active(user.id), flag);
+  }
+  // The grant check on an account already read as active.
+  private granted(current: User, flag: (typeof flags)[number]) {
     if (current.remote_actor || !current[flag])
       throw new Problem(
         403,
@@ -2858,19 +2862,35 @@ export class Federation {
     await this.receive(undefined as unknown as Request, Buffer.from(raw), { sender, checkpoint });
     return true;
   }
-  /** Common publication policy, evaluated once per shared event, without followers. */
-  channelPublicationAllowed(outgoing: Outgoing) {
-    this.ensureEnabled();
-    const channel = this.store.channel(outgoing.channel_id!);
+  /** Common publication policy, evaluated once per shared event, without followers.
+   *  A caller checking many events passes lookups it shares between them, having
+   *  checked once that federation is enabled. */
+  channelPublicationAllowed(outgoing: Outgoing, lookups?: PublicationLookups) {
+    if (!lookups) this.ensureEnabled();
+    const channel = lookups ? lookups.channel(outgoing.channel_id!) : this.store.channel(outgoing.channel_id!);
     if (!channel.federation_enabled || channel.remote_actor) throw new Problem(403, "Channel federation disabled.");
     if (!outgoing.user_id) return;
-    const user = this.store.active(outgoing.user_id);
+    const user = lookups ? lookups.active(outgoing.user_id) : this.store.active(outgoing.user_id);
     if (user.remote_actor) {
       this.allowed(user.remote_actor);
       if (this.store.rule(channel.id, user.id) === "block") throw new Problem(403, "Author blocked from channel.");
     } else if (outgoing.purpose === "relay") {
-      this.require(user, "federation_send"); this.require(user, "federation_post");
+      this.granted(user, "federation_send"); this.granted(user, "federation_post");
     }
+  }
+  /** Channel and account reads remembered for one pass over many events. A failed
+   *  read is remembered too, so a missing or suspended account fails each event alike. */
+  publicationLookups(): PublicationLookups {
+    const memo = <T>(read: (id: string) => T) => {
+      const seen = new Map<string, { value?: T; error?: unknown }>();
+      return (id: string) => {
+        let found = seen.get(id);
+        if (!found) { try { found = { value: read(id) }; } catch (error) { found = { error }; } seen.set(id, found); }
+        if (found.error !== undefined) throw found.error;
+        return found.value!;
+      };
+    };
+    return { channel: memo(id => this.store.channel(id)), active: memo(id => this.store.active(id)) };
   }
   private deliveryAllowed(outgoing: Outgoing, recipient: string) {
     this.ensureEnabled();

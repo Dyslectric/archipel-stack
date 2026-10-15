@@ -1321,6 +1321,9 @@ test("browsers that subscribed are notified of new messages until they sign out 
   const topic = await (await alice.request(`/api/channels/${channel.id}/topics`, "POST", { title: "Plans" })).json();
   const say = (who: ReturnType<typeof browser>, body: string) => who.request(`/api/channels/${channel.id}/messages`, "POST", { body, topic_id: topic.id });
 
+  // What was there before anyone subscribed is not news.
+  await say(alice, "Before anyone was listening");
+  await push.tick();
   const status = await (await bob.request("/api/push")).json();
   assert.equal(status.endpoint, null);
   assert.equal(Buffer.from(status.public_key, "base64url").length, 65);
@@ -1339,8 +1342,7 @@ test("browsers that subscribed are notified of new messages until they sign out 
   assert.equal(Buffer.from(signature, "base64url").length, 64);
   received.length = 0;
 
-  // What was already there is not news; what comes next is, once for each of Bob's browsers.
-  await say(alice, "Before anyone was listening");
+  // What comes next is news, once for each of Bob's browsers.
   await push.tick();
   assert.equal(received.length, 0);
   await say(alice, "First"); await say(alice, "Second"); await say(bob, "Bob's own");

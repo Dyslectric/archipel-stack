@@ -2,6 +2,7 @@ import { grant } from "./roles.js";
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -163,6 +164,41 @@ for (const transport of ["batch","stream"] as const) test(`instance ${transport}
   await b.fed.channelFeed.close();b.restart();await b.fed.tick();
   await waitUntil(()=>b.store.messages(b.bob,priv.channel.id).some(m=>m.body==="Revoked epoch"));
   assert.equal(b.fed.channelFeed.instance.stats.retries,0);
+});
+
+test("instance feed pages share one policy check per event across peers until policy changes", async t => {
+  const env={FEDERATION_CHANNEL_TRANSPORT:"stream",FEDERATION_PEER_SEND_RATE:"0"};
+  const a=await instance(t,env),b=await instance(t,env),home=channel(a);
+  await b.fed.subscribe(b.bob,a.fed.channelActor(home));await drain(a,b);
+  const start=Number(a.store.db.prepare("SELECT tail FROM federation_instance_state").get()!.tail);
+  for(const body of ["One","Two","Three"])a.store.post(a.alice,home.id,{body});
+  let checks=0;const check=a.fed.channelPublicationAllowed.bind(a.fed);
+  t.mock.method(a.fed,"channelPublicationAllowed",(...args:Parameters<typeof check>)=>{checks++;return check(...args);});
+  const feed=a.fed.channelFeed.instance,first=feed.page(start);
+  assert.equal(first.events.length,3);assert.equal(checks,3);
+  // Peers at other cursors reuse the same decisions and frames.
+  assert.deepEqual(feed.page(start+1).events,first.events.slice(1));
+  assert.deepEqual(feed.page(start).events,first.events);
+  assert.equal(checks,3,"policy is evaluated once per event, not once per peer page");
+  // Changing policy is seen at once: every event is checked again and withheld.
+  a.fed.setChannel(a.alice,home.id,false);
+  const withheld=feed.page(start);
+  assert.equal(checks,6);
+  assert.deepEqual(withheld.events.map(e=>e.payload?.activity),[null,null,null]);
+  assert.deepEqual(withheld.events.map(e=>e.seq),first.events.map(e=>e.seq),"cursors still advance past withheld events");
+});
+
+test("instance stream yields to other work between pages while a peer catches up", async t => {
+  const env={FEDERATION_CHANNEL_TRANSPORT:"stream",FEDERATION_PEER_SEND_RATE:"0"};
+  const a=await instance(t,env),b=await instance(t,env),home=channel(a);
+  await b.fed.subscribe(b.bob,a.fed.channelActor(home));await drain(a,b);
+  const start=Number(a.store.db.prepare("SELECT tail FROM federation_instance_state").get()!.tail);
+  for(let n=0;n<70;n++)a.store.post(a.alice,home.id,{body:`Backlog ${n}`});
+  const order:string[]=[],res=Object.assign(new EventEmitter(),{writableLength:0,set(){},flushHeaders(){},end(){},destroy(){},
+    write(chunk:string){if(chunk.startsWith("id:"))order.push("page");if(order.filter(o=>o==="page").length===3)queueMicrotask(()=>res.emit("close"));return true;}});
+  setImmediate(()=>order.push("other work"));
+  await a.fed.channelFeed.instance.open({} as never,res as never,start);
+  assert.deepEqual(order.slice(0,3),["page","other work","page"]);
 });
 
 test("durable instance intake continues while one channel's materializer is stalled", async t=>{

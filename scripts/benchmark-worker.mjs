@@ -23,7 +23,7 @@ process.once('message', async ({ origin, users, options, worker }) => {
   const pageModes={incremental:0,full:0};
   const measured = at => at >= start && at < end;
   const clients = users.map(user => ({ ...user, connected: false, dirty: 0, full: false,
-    current: false, metadata: false, busy: false, lastRefresh: 0, marked: 0, nextWrite: Infinity, booted: false, seen: new Set() }));
+    current: false, metadata: false, busy: false, lastRefresh: 0, nextWrite: Infinity, booted: false, seen: new Set() }));
   function request(user, path, method = 'GET', body, epoch = Date.now()) {
     return new Promise(resolve => {
       const begun = performance.now(), record = measured(epoch),boot = !user.booted && start===Infinity;
@@ -106,8 +106,6 @@ process.once('message', async ({ origin, users, options, worker }) => {
                   stats.deliveries.visible++;observe(stats.deliveries.latency,Date.now()-due);
                   if(Number(parts[3])===user.instance && Number(parts[4])===user.index)stats.deliveries.selfObserved++;
                 }
-                user.liveSeq=Math.max(user.liveSeq||0,Number(page.cursor)||0);
-                if(user.nextRead===undefined){const phase=((Math.imul(user.index+1,2654435761)>>>0)%30000);user.nextRead=Date.now()+((phase-Date.now()%30000+30000)%30000 || 30000);}
               }
               markDirty(user, notice);
             } catch { stats.sse.failures++; }
@@ -147,7 +145,6 @@ process.once('message', async ({ origin, users, options, worker }) => {
         const suffix=!metadata && user.refreshCursor!==undefined && user.refreshStamp
           ? `?after=${user.refreshCursor}&stamp=${encodeURIComponent(user.refreshStamp)}` : '';
         const [, page] = await Promise.all([metadata ? get(`/api/channels/${user.channel}?members=0`) : Promise.resolve(null), get(`/api/channels/${user.channel}/messages${suffix}`)]);
-        const seq = page.data?.refresh_cursor ?? page.data?.messages?.at(-1)?.seq;
         if(page.ok){user.refreshCursor=page.data?.refresh_cursor;user.refreshStamp=page.data?.refresh_stamp;
           if(page.data?.incremental===true)pageModes.incremental++;else pageModes.full++;
           if(record){if(page.data?.incremental===true)stats.refresh.incrementalPages++;else stats.refresh.fullPages++;}}
@@ -158,10 +155,6 @@ process.once('message', async ({ origin, users, options, worker }) => {
           user.seen.add(key); if (user.seen.size > 1000) user.seen.delete(user.seen.values().next().value);
           stats.deliveries.visible++; observe(stats.deliveries.latency, Date.now() - due);
           if (Number(parts[3]) === user.instance && Number(parts[4]) === user.index) stats.deliveries.selfObserved++;
-        }
-        if (seq > user.marked) {
-          const read = await request(user, '/api/read', 'POST', { target: user.channel, seq }, epoch);
-          ok &&= read.ok; if (read.ok) user.marked = seq;
         }
       }
     } finally {
@@ -204,10 +197,6 @@ process.once('message', async ({ origin, users, options, worker }) => {
     for (const user of clients) {
       while (user.nextWrite <= now && user.nextWrite < end) {
         const due = user.nextWrite; user.nextWrite += options.messageInterval * 1000; write(user, due);
-      }
-      if(user.nextRead<=now && user.liveSeq>user.marked && activeReads<options.inflight){
-        user.nextRead=now+30000;activeReads++;const seq=user.liveSeq;
-        void request(user,'/api/read','POST',{target:user.channel,seq},now).then(result=>{if(result.ok)user.marked=Math.max(user.marked,seq);}).finally(()=>activeReads--);
       }
     }
     // Mixed-client runs keep observing the measured cohort during the delivery drain.

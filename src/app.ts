@@ -45,7 +45,11 @@ export function createApp(config: Config, store: Store) {
   const push = new Push(store, config);
   const readMarks = new ReadMarks(store, writes);
   const native = new NativeChat(store, config);
-  const events = new Events(store,native,{workers:config.eventWorkers,threshold:config.eventWorkerThreshold});
+  // Leaving a conversation, by switching away, hiding the page or disconnecting, is
+  // where reading it is recorded: nothing is written while the reader watches.
+  const events = new Events(store,native,{workers:config.eventWorkers,threshold:config.eventWorkerThreshold},
+    (user,target,seq)=>void readMarks.mark(user,{target,seq}).catch(()=>{}));
+  push.live = (user) => events.connected(user);
   const device = new DeviceSignIn(store, config.baseUrl);
   const app = express();
   app.locals.events = events;

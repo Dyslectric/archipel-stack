@@ -20,9 +20,10 @@ Sessions are seeded through the Store, so this measures authenticated chat, not 
 
 Clients consume live notifications and coalesce refreshes at the browser's 1.5-second
 interval. A channel notice reads `/api/overview`; if the open channel changed, it also
-reads channel details and the latest message page and updates the read mark. An
+reads channel details and the latest message page. As in Archipel Web, reading
+sends no read mark; the server records one when the watching stream closes. An
 account notice adds session, emoji, and channel-list reads. This approximates the
-foreground timeline API path, including the feedback from read-mark notifications.
+foreground timeline API path.
 It excludes DOM rendering, browser initial boot/static assets, scrolling older pages,
 and other views. All users have one open channel and one membership.
 
@@ -328,8 +329,9 @@ checks pass. Keep measured runs separate from other benchmarks and test workload
 
 Schema 31 benchmarks negotiate one origin stream carrying clear public events
 and encrypted private events. The fixture's room is private. Browser protocol
-clients opt into shared message deltas, read compact channel metadata and
-coalesce read acknowledgements for 30 seconds. This exercises transport and API
+clients opt into shared message deltas and read compact channel metadata. Like
+Archipel Web, they send no read marks; the server records one when a watching
+stream closes. This exercises transport and API
 work without DOM layout or rendering. Reports include raw intake/materialization
 counters and origin cursors separately from channel import cursors. Per-message
 full-page reads are no longer expected; `liveDeltaMessages` proves incremental
@@ -349,6 +351,13 @@ unchanged, so sharding does not multiply the offered rate. The `--inflight` limi
 applies to each shard. Telemetry sums their CPU/RSS and takes the worst shard's
 event-loop p95; generator manager/root process overhead is additional. Histograms
 are merged by sample counts rather than averaging percentiles.
+
+By default (`--web-clients host`) generators run on this machine and reach each
+instance through Docker's port relay and a single-threaded Node TCP forwarder.
+At 10,000 readers that forwarder becomes the bottleneck. `--web-clients docker`
+instead runs each instance's generator group in a `node:24-bookworm-slim`
+container inside the instances' network namespace, connecting on `127.0.0.1`.
+Its CPU then appears in Docker samples as `…-web-N` containers.
 
 For 10,000 local users at 40 posts/second, with twelve listening peers:
 

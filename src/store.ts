@@ -1552,7 +1552,8 @@ export class Store {
       topics,
     };
   }
-  // The owner decides what the channel shows its members of one another.
+  // The owner decides what the channel shows its members of one another, and whether the
+  // directory shows the channel at all.
   setPrivacy(user: User, id: string, input: Record<string, unknown>) {
     const channel = this.channel(id);
     this.requireOwner(user, channel);

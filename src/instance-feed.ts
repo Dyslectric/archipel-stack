@@ -3,7 +3,7 @@
 import { createCipheriv, createDecipheriv, createPublicKey, randomBytes } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import type { Request, Response } from "express";
-import type { Federation } from "./federation.js";
+import type { Federation, PublicationLookups } from "./federation.js";
 import { Problem } from "./store.js";
 import { peerJson, peerRequest, signedHeaders } from "./federation-net.js";
 
@@ -12,7 +12,7 @@ type Payload = { activity: string | null; actors: Record<string, any>[] };
 export type InstanceEvent = { seq: number; channel: string; channelSeq: number; epoch: number;
   payload?: Payload; encrypted?: { iv: string; tag: string; data: string } };
 type Page = { type: "InstanceEvents"; origin: string; after: number; cursor: number; events: InstanceEvent[] };
-const COUNT = 32, BYTES = 240000, FRAME = 262144;
+const COUNT = 32, BYTES = 240000, FRAME = 262144, POLICY_AGE = 1000;
 const aad = (origin: string, event: InstanceEvent) => Buffer.from(JSON.stringify([1, origin, event.seq, event.channel, event.channelSeq, event.epoch]));
 export function sealEvent(origin: string, event: InstanceEvent, payload: Payload, secret: string): InstanceEvent {
   const iv = randomBytes(12), cipher = createCipheriv("aes-256-gcm", Buffer.from(secret, "base64"), iv);
@@ -40,7 +40,12 @@ export class InstanceFeed {
   private routingRows?: FeedSubscription[];
   private groups = new Map<string,FeedSubscription[]>();
   private handled = new Set<string>();
-  private pages = new Map<number, { stamp: string; page: Page }>();
+  private pages = new Map<number, { stamp: string; at: number; page: Page }>();
+  // Each event as every peer is sent it, with its encoded size. Publication policy
+  // depends only on the tables in stamp(), so one evaluation serves every peer's
+  // page until one of them changes. Policy written by another front end does not
+  // move the stamp, so a decision is also kept for at most POLICY_AGE.
+  private events = new Map<number, { stamp: string; at: number; event: InstanceEvent; size: number }>();
   private closed = false;
   private prunedAt = 0;
   private assetQueue = new Map<string, Record<string, any>>();
@@ -74,42 +79,52 @@ export class InstanceFeed {
     if (after < Number(state.floor)) throw new Problem(410, "Instance event cursor expired; resubscribe for bounded current history.");
     if (after > Number(state.tail)) throw new Problem(400, "Instance cursor is ahead of its home.");
     const stamp = this.stamp(), cached = this.pages.get(after);
-    if (cached?.stamp === stamp && (cached.page.events.length === COUNT || cached.page.cursor === Number(state.tail))) return cached.page;
+    if (cached?.stamp === stamp && Date.now() - cached.at < POLICY_AGE && (cached.page.events.length === COUNT || cached.page.cursor === Number(state.tail))) return cached.page;
     const page: Page = { type: "InstanceEvents", origin: this.fed.config.baseUrl, after, cursor: after, events: [] };
     const rows = db.prepare("SELECT e.*,o.activity,o.purpose,o.user_id FROM federation_instance_events e JOIN federation_outgoing o ON o.id=e.activity_id WHERE e.seq>? ORDER BY e.seq LIMIT ?").all(after, COUNT);
-    let bytes = 0;
+    let bytes = 0, lookups: PublicationLookups | undefined;
+    const now = Date.now();
+    let oldest = now;
     for (const row of rows) {
-      let allowed = true;
-      try { this.fed.channelPublicationAllowed(row as any); } catch { allowed = false; }
-      let event: InstanceEvent;
-      if (row.frame && allowed) event = JSON.parse(row.frame);
-      else {
-        const base: InstanceEvent = { seq: Number(row.seq), channel: `${this.fed.config.baseUrl}/actors/channels/${row.channel_id}`, channelSeq: Number(row.channel_seq), epoch: Number(row.epoch) };
-        const actors: Record<string, any>[] = [];
-        if (allowed) {
-          actors.push(this.fed.publicActor("channels", row.channel_id));
-          if (row.user_id) {
-            const user = this.fed.store.user(row.user_id);
-            // Only an actor's own origin can supply its signing identity.
-            if (!user.remote_actor) actors.push(this.fed.publicActor("users", user.id));
-          }
-        }
-        const payload: Payload = { activity: allowed ? row.activity : null, actors };
-        event = row.public ? { ...base, payload } : sealEvent(this.fed.config.baseUrl, base, payload, this.secret(row.channel_id, base.epoch));
-        if (allowed) {
-          db.prepare("UPDATE federation_instance_events SET frame=? WHERE seq=? AND frame IS NULL", { notify: false }).run(JSON.stringify(event), row.seq);
-          // Another front end may have won the cache fill. Every reader uses
-          // the durable winner, including its nonce and authentication tag.
-          event = JSON.parse(db.prepare("SELECT frame FROM federation_instance_events WHERE seq=?").get(row.seq)!.frame);
-        }
+      let built = this.events.get(Number(row.seq));
+      if (built?.stamp !== stamp || now - built.at >= POLICY_AGE) {
+        const event = this.build(row, lookups ??= this.fed.publicationLookups());
+        built = { stamp, at: now, event, size: Buffer.byteLength(JSON.stringify(event)) };
+        this.events.delete(Number(row.seq));
+        if (this.events.size >= 4096) this.events.delete(this.events.keys().next().value!);
+        this.events.set(Number(row.seq), built);
       }
-      const size = Buffer.byteLength(JSON.stringify(event));
-      if (size > BYTES) throw new Problem(413, "Instance event exceeds its frame limit.");
-      if (bytes + size > BYTES) break;
-      bytes += size; page.events.push(event); page.cursor = event.seq;
+      if (built.size > BYTES) throw new Problem(413, "Instance event exceeds its frame limit.");
+      if (bytes + built.size > BYTES) break;
+      bytes += built.size; page.events.push(built.event); page.cursor = built.event.seq; oldest = Math.min(oldest, built.at);
     }
     if (this.pages.size >= 256) this.pages.delete(this.pages.keys().next().value!);
-    this.pages.set(after, { stamp, page }); return page;
+    this.pages.set(after, { stamp, at: oldest, page }); return page;
+  }
+  // One event as peers receive it: its stored frame when policy allows it, otherwise
+  // a placeholder that advances cursors without the content.
+  private build(row: Record<string, any>, lookups: PublicationLookups): InstanceEvent {
+    const db = this.fed.store.db;
+    let allowed = true;
+    try { this.fed.channelPublicationAllowed(row as any, lookups); } catch { allowed = false; }
+    if (row.frame && allowed) return JSON.parse(row.frame);
+    const base: InstanceEvent = { seq: Number(row.seq), channel: `${this.fed.config.baseUrl}/actors/channels/${row.channel_id}`, channelSeq: Number(row.channel_seq), epoch: Number(row.epoch) };
+    const actors: Record<string, any>[] = [];
+    if (allowed) {
+      actors.push(this.fed.publicActor("channels", row.channel_id));
+      if (row.user_id) {
+        const user = this.fed.store.user(row.user_id);
+        // Only an actor's own origin can supply its signing identity.
+        if (!user.remote_actor) actors.push(this.fed.publicActor("users", user.id));
+      }
+    }
+    const payload: Payload = { activity: allowed ? row.activity : null, actors };
+    const event = row.public ? { ...base, payload } : sealEvent(this.fed.config.baseUrl, base, payload, this.secret(row.channel_id, base.epoch));
+    if (!allowed) return event;
+    db.prepare("UPDATE federation_instance_events SET frame=? WHERE seq=? AND frame IS NULL", { notify: false }).run(JSON.stringify(event), row.seq);
+    // Another front end may have won the cache fill. Every reader uses
+    // the durable winner, including its nonce and authentication tag.
+    return JSON.parse(db.prepare("SELECT frame FROM federation_instance_events WHERE seq=?").get(row.seq)!.frame);
   }
   async open(_req: Request, res: Response, after: number) {
     if (this.closed || this.responses.size >= 128) throw new Problem(503, "Instance stream capacity is busy.");
@@ -129,6 +144,9 @@ export class InstanceFeed {
             });
           }
           after = page.cursor;
+          // A peer catching up is served a page at a time between other work,
+          // never in one run that keeps the server from accepting connections.
+          await new Promise<void>(resolve => setImmediate(resolve));
         } else {
           res.write(": heartbeat\n\n"); await new Promise<void>(resolve => { const timer = setTimeout(resolve, 250); timer.unref(); });
         }

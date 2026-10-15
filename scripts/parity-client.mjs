@@ -7,6 +7,7 @@ import http from 'node:http';
 import { readFileSync, existsSync } from 'node:fs';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { histogram, observe } from './benchmark-metrics.mjs';
+import { funny } from './parity-funny.mjs';
 
 const o = JSON.parse(readFileSync(process.argv[2], 'utf8'));
 const say = value => process.stdout.write(JSON.stringify(value) + '\n');
@@ -17,6 +18,7 @@ const stats = { connected: 0, joined: 0, failed: 0, dropped: 0, errors: {}, join
 let start = Infinity, end = Infinity, measureFrom = Infinity, stopping = false;
 const error = key => { stats.errors[key] = (stats.errors[key] || 0) + 1; };
 const marker = `BENCH|${o.tag}|`;
+const text = (nick, due) => `${o.funny ? funny(nick, due) : ''}${marker}${nick}|${due}|E`;
 
 // Find complete `BENCH|tag|sender|due|E` markers in text; return the unconsumed tail.
 function scan(client, text) {
@@ -41,7 +43,7 @@ function xmppClient(user) {
   const header = `<?xml version='1.0'?><stream:stream to='${o.domain}' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' version='1.0'>`;
   client.post = due => {
     if (!client.joined) return false;
-    client.socket.write(`<message to='${user.room}' type='groupchat' id='${user.nick}-${due}'><body>${marker}${user.nick}|${due}|E</body></message>`);
+    client.socket.write(`<message to='${user.room}' type='groupchat' id='${user.nick}-${due}'><body>${text(user.nick, due)}</body></message>`);
     return true;
   };
   client.start = () => new Promise(done => {
@@ -104,7 +106,7 @@ function webClient(user) {
   client.post = due => {
     if (!client.joined) return false;
     const begun = performance.now();
-    void request(user, `/api/channels/${user.channel}/messages`, 'POST', { body: `${marker}${user.nick}|${due}|E` }).then(status => {
+    void request(user, `/api/channels/${user.channel}/messages`, 'POST', { body: text(user.nick, due) }).then(status => {
       if (status === 201) { stats.writes.ok++; if (due >= measureFrom && due < end) observe(stats.writes.latency, performance.now() - begun); }
       else { stats.writes.failed++; error(`post:${status}`); }
     });

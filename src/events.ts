@@ -132,7 +132,9 @@ export class Events {
   private nextWriter = 0;
   private nextRemote = 0;
   private dispatching = false;
-  constructor(private store: Store, private native?: NativeChat, private fanout = { workers: 0, threshold: 512 }) {
+  constructor(private store: Store, private native?: NativeChat, private fanout = { workers: 0, threshold: 512 },
+    /** Told when a reader leaves the channel their stream watched, with how far it had got. */
+    private left?: (user: User, channel: string, seq: number) => void) {
     store.db.onChange = (changes) => {
       if (!this.streams.size) { this.globalDirty=true;return; }
       for(const {table,rows} of changes) {
@@ -170,6 +172,10 @@ export class Events {
   get listeners() {
     return this.streams.size;
   }
+  /** Whether a member has a stream open, that is a page of Archipel Web in view. */
+  connected(user: string) {
+    return this.byUser.has(user);
+  }
   /** Holds the response open as a stream of events for the session behind it. */
   async open(req: Request, res: Response, token: string, current?: { user: User }) {
     if(this.closed)return res.status(503).json({error:"The server is stopping."});
@@ -205,7 +211,7 @@ export class Events {
     // bulk viewer read: a reconnecting crowd costs a few queries per batch.
     this.opening.add(stream);
     this.openTimer??=setTimeout(()=>{this.openTimer=null;this.routeOpened();},OPEN_BATCH);
-    res.on("close", () => { if (!stream.remote) this.drop(stream); });
+    res.on("close", () => { if (!stream.remote) this.drop(stream, true); });
     if (!this.beat) {
       this.beat = setInterval(() => {
         void this.review().then(()=>{const beat=new Frame(Buffer.from(": \n\n"));for (const s of this.streams) this.sendFrame(s,beat);});
@@ -225,8 +231,14 @@ export class Events {
     for (const writer of this.writers) writer.child.disconnect();
     this.writers = [];
   }
-  private drop(stream: Stream) {
+  // A reader who closed their stream has read the channel it watched, up to the last
+  // message the hub told of. Streams ended by the server (sign-out, a slow socket,
+  // stopping) record nothing.
+  private drop(stream: Stream, closed = false) {
     if (!this.streams.delete(stream)) return;
+    const seq = this.cursors.get(stream.watch);
+    if (closed && !this.closed && stream.approved && seq && stream.channels.has(stream.watch) && this.memberships.get(stream.user)?.has(stream.watch))
+      this.left?.(stream.profile, stream.watch, seq);
     const own=this.byUser.get(stream.user);own?.delete(stream);if(!own?.size)this.byUser.delete(stream.user);
     this.adminStreams.delete(stream);
     for(const channel of stream.channels)this.byChannel.get(channel)?.delete(stream);
@@ -285,7 +297,7 @@ export class Events {
       const writer: Writer = { child, streams: new Map(), batch: new Map(), ends: [] };
       child.on("message", (message: { type: string; id: number }) => {
         const stream = message.type === "closed" ? writer.streams.get(message.id) : undefined;
-        if (stream) { writer.streams.delete(message.id); this.drop(stream); }
+        if (stream) { writer.streams.delete(message.id); this.drop(stream, true); }
       });
       // A writer that stops takes its sockets with it; their readers reconnect.
       child.on("exit", () => {

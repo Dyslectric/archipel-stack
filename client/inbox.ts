@@ -100,7 +100,7 @@ async function load() {
   const next = JSON.stringify(fresh);
   if (next === signature) return;
   signature = next;
-  items = fresh;
+  items = fresh.filter((m) => m.kind !== "channel" || m.seq > (state.readHere[m.target] || 0));
   draw();
 }
 export async function showInbox(view: HTMLElement) {

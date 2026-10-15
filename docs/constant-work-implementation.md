@@ -36,9 +36,9 @@ Shared browser projections have equal database-call counts with one and 64
 connections. Browser deltas retain handle redaction, personal blocks and contact
 labels; readers with hidden-thread preferences retain the existing page path.
 Initial chat metadata omits the roster, whose API pages are limited to 200.
-Member counts are cached until membership control changes. Live read marks use
-independent phases within a 30-second interval and flush on page exit/visibility
-changes. Ordinary deliveries reuse one immutable encoded Buffer. Overview
+Member counts are cached until membership control changes. Browsers send no read
+marks while watching a channel; the server records one when the watching event
+stream closes. Ordinary deliveries reuse one immutable encoded Buffer. Overview
 sequence watermarks prevent queued deltas from double-counting unread messages.
 
 The origin feed shares immutable frames, encrypts private payloads with

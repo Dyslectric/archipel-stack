@@ -57,3 +57,34 @@ test("bookkeeping writes and one member's changes do not reroute every open stre
   assert.equal(counts.settings[0],counts.settings[1],`push bookkeeping grew with streams: ${counts.settings}`);
   assert.equal(counts.member[0],counts.member[1],`one membership grew with streams: ${counts.member}`);
 });
+
+test("closing a stream records how far its watched channel was read; nothing is written while it watches",async t=>{
+  const store=new Store(":memory:");store.initializeRegistration("open");
+  const alice=store.loginIdentity("test","alice","Alice",[],true),bob=store.loginIdentity("test","bob","Bob",[]);
+  const channel=store.createChannel(alice,{name:"leaving",mode:"timeline",visibility:"members",admission:"open"});
+  store.join(bob,channel.id);
+  const left:[string,string,number][]=[],hub=new Events(store,undefined,undefined,(user,target,seq)=>left.push([user.id,target,seq]));
+  t.after(()=>{hub.close();store.close();});
+  const open=async(user:string,watch:string)=>{
+    const response=Object.assign(new EventEmitter(),{writableLength:0,destroyed:false,writeHead(){},write(){return true;},end(){}});
+    await hub.open({query:{deltas:"1",watch},socket:{setTimeout(){},setNoDelay(){}}} as unknown as Request,response as unknown as Response,store.createSession(user).token);
+    await (hub as any).flush();return response;
+  };
+  const watching=await open(bob.id,channel.id);
+  assert.equal(hub.connected(bob.id),true);
+  store.post(alice,channel.id,{body:"One"});const last=store.post(alice,channel.id,{body:"Two"});
+  await (hub as any).flush();
+  assert.deepEqual(left,[]);
+  watching.emit("close");
+  assert.deepEqual(left,[[bob.id,channel.id,last.seq]]);
+  assert.equal(hub.connected(bob.id),false);
+  // A stream watching nothing, or a channel the reader has not joined, records nothing.
+  (await open(bob.id,"")).emit("close");
+  const other=store.createChannel(alice,{name:"elsewhere",mode:"timeline",visibility:"public",admission:"open"});
+  store.post(alice,other.id,{body:"Not joined"});
+  (await open(bob.id,other.id)).emit("close");
+  assert.equal(left.length,1);
+  // Streams the server ends record nothing.
+  await open(bob.id,channel.id);hub.close();
+  assert.equal(left.length,1);
+});

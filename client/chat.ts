@@ -84,7 +84,6 @@ let narrow: string | null = null, // the topic being read on its own
   editing: string | null = null;
 let generation = 0,
   lastSignature = "",
-  marked = 0, // the newest message the server has been told was read
   painted = false; // whether the frame on the page shows the current channel yet
 // Threads folded by the reader; what has been shown already (the rest pops in); what arrived out of sight.
 const collapsed = new Set<string>(),
@@ -357,25 +356,13 @@ function atEdge(scrolled: boolean) {
     action(loadOlder);
   else if (!live() && list.scrollHeight - list.scrollTop - list.clientHeight < room) action(loadNewer);
 }
-// Having this conversation on screen is reading it.
-let readTimer=0;
-const readPhase=Math.random()*30000;
-const liveReads=new Map<string,number>();
-function flushLiveReads(){clearTimeout(readTimer);readTimer=0;for(const [target,seq]of liveReads){liveReads.delete(target);void fetch("/api/read",{method:"POST",credentials:"same-origin",keepalive:true,headers:{"Content-Type":"application/json","X-CSRF-Token":state.session.csrf||""},body:JSON.stringify({target,seq})}).catch(()=>{if(current?.id===target)marked=0;});}}
-addEventListener("pagehide",flushLiveReads);
-document.addEventListener("visibilitychange",()=>{if(document.hidden)flushLiveReads();});
-function markSeen(defer=false) {
-  const last = messages.at(-1)?.seq;
-  if (!current?.role || !last || document.hidden || !live()) return;
-  if (last <= marked && !state.unread[current.id]) return;
-  marked = last;
+// Having this conversation on screen is reading it. The server records how far when the
+// event stream watching it closes (switching away, hiding the page, leaving); until then
+// only this page stops counting it.
+function markSeen() {
+  if (!current?.role || !messages.length || document.hidden || !live()) return;
   delete state.unread[current.id];
-  if(defer){liveReads.set(current.id,last);if(!readTimer)readTimer=window.setTimeout(flushLiveReads,(readPhase-Date.now()%30000+30000)%30000 || 30000);return;}
-  liveReads.delete(current.id);
-  void api("/read", "POST", { target: current.id, seq: last }).catch(() => {
-    /* The next refresh tries again. */
-    marked = 0;
-  });
+  state.readHere[current.id] = Math.max(state.readHere[current.id] || 0, messages.at(-1)!.seq);
 }
 const me = () => state.session.user!;
 // What is on the page: the conversation, then what is still being sent to it.
@@ -399,7 +386,7 @@ export function applyMessageDelta(delta:{channel:string;messages:Message[];curso
   if(live() && !historyExpanded && messages.length>PAGE){messages=messages.slice(-PAGE);olderCursor=messages[0].seq;}else trim();
   const committed=new Set(messages.map(m=>m.id));pending=pending.filter(m=>!committed.has(m.id));
   refreshCursor=Math.max(refreshCursor||0,delta.cursor);refreshStamp=undefined;
-  markSeen(true);render();renderSidebar();
+  markSeen();render();renderSidebar();
 }
 const threaded = () => current?.mode === "threaded";
 const topicOf = (id: string | null) =>
@@ -508,7 +495,6 @@ async function selectChannel(id: string, topicId?: string) {
   collapsed.clear();
   seen.clear();
   showHidden = false;
-  marked = 0;
   lastSignature = signature();
   localStorage.setItem("archipel-channel", id);
   markSeen();
