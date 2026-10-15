@@ -42,6 +42,7 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
     stopping = true;
     clearTimeout(federationTimer);
     clearInterval(pushTimer);
+    await app.locals.federation.channelFeed.close();
     await federationJob;
     if (config.nativeChatUrl) {
       await app.locals.federation.tick({drainOnly:true})

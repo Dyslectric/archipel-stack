@@ -211,17 +211,25 @@ async function load(id: string, metadata = true): Promise<[Channel, Page]> {
     return [current, await api<Page>(pagePath(id)+suffix)];
   }
   return Promise.all([
-    api<Channel>(`/channels/${id}`),
+    api<Channel>(`/channels/${id}?members=0`),
     api<Page>(pagePath(id)),
   ]);
 }
 // Having this conversation on screen is reading it.
-function markSeen() {
+let readTimer=0;
+const readPhase=Math.random()*30000;
+const liveReads=new Map<string,number>();
+function flushLiveReads(){clearTimeout(readTimer);readTimer=0;for(const [target,seq]of liveReads){liveReads.delete(target);void fetch("/api/read",{method:"POST",credentials:"same-origin",keepalive:true,headers:{"Content-Type":"application/json","X-CSRF-Token":state.session.csrf||""},body:JSON.stringify({target,seq})}).catch(()=>{if(current?.id===target)marked=0;});}}
+addEventListener("pagehide",flushLiveReads);
+document.addEventListener("visibilitychange",()=>{if(document.hidden)flushLiveReads();});
+function markSeen(defer=false) {
   const last = messages.at(-1)?.seq;
   if (!current?.role || !last || document.hidden) return;
   if (last <= marked && !state.unread[current.id]) return;
   marked = last;
   delete state.unread[current.id];
+  if(defer){liveReads.set(current.id,last);if(!readTimer)readTimer=window.setTimeout(flushLiveReads,(readPhase-Date.now()%30000+30000)%30000 || 30000);return;}
+  liveReads.delete(current.id);
   void api("/read", "POST", { target: current.id, seq: last }).catch(() => {
     /* The next refresh tries again. */
     marked = 0;
@@ -231,6 +239,24 @@ const me = () => state.session.user!;
 // What is on the page: the conversation, then what is still being sent to it.
 const everything = () => (pending.length ? [...messages, ...pending] : messages);
 const signature = () => JSON.stringify([messages, pending, state.userBlocks]);
+const deltaCursors=new Map<string,number>();
+let overviewCursor=0;
+export function adoptMessageOverview(cursor?:number){if(Number.isSafeInteger(cursor))overviewCursor=Math.max(overviewCursor,cursor!);}
+export function applyMessageDelta(delta:{channel:string;messages:Message[];cursor:number;added?:string[]}) {
+  if(!delta || !Array.isArray(delta.messages) || !Number.isSafeInteger(delta.cursor))return;
+  if((deltaCursors.get(delta.channel)||0)>=delta.cursor && !delta.messages.some(m=>m.edited_at || m.deleted_at))return;
+  const after=Math.max(overviewCursor,deltaCursors.get(delta.channel)||0);
+  deltaCursors.set(delta.channel,Math.max(deltaCursors.get(delta.channel)||0,delta.cursor));
+  if(current?.id!==delta.channel){const added=new Set(delta.added||[]);if(state.channels.some(c=>c.id===delta.channel && c.role))state.unread[delta.channel]=(state.unread[delta.channel]||0)+delta.messages.filter(m=>added.has(m.id) && m.seq>after && m.author_id!==state.session.user?.id).length;renderSidebar();return;}
+  const list=document.querySelector<HTMLElement>("#message-list");
+  if((list && list.scrollHeight-list.scrollTop-list.clientHeight>=80) || selectedMessage || editing || reply)historyExpanded=true;
+  const previous=new Map(messages.map(m=>[m.id,m]));
+  for(const message of delta.messages){if(!message || typeof message.id!=="string" || !Number.isSafeInteger(message.seq))continue;previous.set(message.id,{...previous.get(message.id),...message});}
+  messages=[...previous.values()].sort((a,b)=>a.seq-b.seq);if(!historyExpanded)messages=messages.slice(-100);
+  const committed=new Set(messages.map(m=>m.id));pending=pending.filter(m=>!committed.has(m.id));
+  refreshCursor=Math.max(refreshCursor||0,delta.cursor);refreshStamp=undefined;
+  markSeen(true);render();renderSidebar();
+}
 const threaded = () => current?.mode === "threaded";
 const topicOf = (id: string | null) =>
   current?.topics?.find((t) => t.id === id);
@@ -494,6 +520,17 @@ hooks.memberAct = (who, act) => {
     await refreshCurrent();
   });
 };
+let rosterLoading=false,rosterAuto="";
+async function loadMemberPage() {
+  if(rosterLoading || !current || current.members_cursor==null)return;
+  const channel=current,token=generation;rosterLoading=true;
+  try {
+    const page=await api<{members:User[];next:string|null}>(`/channels/${channel.id}/member-page?after=${encodeURIComponent(channel.members_cursor??"")}`);
+    if(current!==channel || generation!==token)return;
+    channel.members=[...(channel.members||[]),...page.members];channel.members_cursor=page.next;
+  }catch{toast("Members could not be loaded.");}
+  finally{rosterLoading=false;renderMembers();}
+}
 function renderMembers() {
   const frame = document.querySelector<HTMLElement>("#member-panel"),
     panel = document.querySelector<HTMLElement>("#member-list");
@@ -502,6 +539,8 @@ function renderMembers() {
     show = !!c && !c.dm && c.sees_members && membersOpen();
   frame.hidden = !show;
   if (!show) return;
+  const rosterKey=`${generation}:${c.id}`;
+  if(c.members_cursor==="" && !rosterLoading && rosterAuto!==rosterKey){rosterAuto=rosterKey;void loadMemberPage();}
   const members = c.members || [];
   const ban = (u: User) => {
     const may = memberReach(u);
@@ -515,8 +554,9 @@ function renderMembers() {
           ? `<h3 class="side-label">${esc(label)}${counted ? ` · ${list.length}` : ""}</h3><ul class="plain member-rows">${list.map((u) => `<li>${avatar(u, "small")}${nameButton(u, u.actor_url, "member-name")}${ban(u)}${u.actor_url?.startsWith("xmpp:") ? `<span class="mode-tag" title="XMPP" aria-label="XMPP">${icon("xmpp")}</span>` : u.actor_url && !u.actor_url.startsWith(location.origin) ? `<span class="mode-tag" title="On another instance">${icon("globe")}</span>` : ""}</li>`).join("")}</ul>`
           : "";
       })
-      .join("")}</div>`;
+      .join("")}${c.members_cursor!=null?`<button type="button" data-more-members ${rosterLoading?"disabled":""}>${rosterLoading?"Loading…":"Load more members"}</button>`:""}</div>`;
   if (panel.dataset.html !== html) panel.innerHTML = panel.dataset.html = html;
+  panel.querySelector("[data-more-members]")?.addEventListener("click",()=>void loadMemberPage(),{once:true});
 }
 
 export function sortedTopics() {

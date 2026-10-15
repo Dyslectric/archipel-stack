@@ -72,6 +72,35 @@ test("contact names validate input, preserve existing names on errors and reject
   assert.throws(() => store.setContactName(alice, peer, "Changed"), e => e instanceof Problem && e.status === 403);
 });
 
+test("channel roster bulk metadata preserves fresh avatars and each viewer's contact names", t => {
+  const store = new Store(":memory:"); t.after(() => store.close());
+  const alice = store.loginIdentity("test", "alice", "Alice", []);
+  const bob = store.loginIdentity("test", "bob", "Bob", []);
+  const remote = store.loginIdentity("test", "remote", "Remote", []);
+  const peer = "https://remote.example/actors/users/remote";
+  store.db.prepare("UPDATE users SET remote_actor=? WHERE id=?").run(peer, remote.id);
+  const channel = store.createChannel(alice, {name:"roster",mode:"timeline",visibility:"public",admission:"open"});
+  store.join(bob, channel.id); store.join(remote, channel.id);
+  store.db.prepare("INSERT INTO user_avatars VALUES(?,?,?,?)").run(bob.id,"local-v1","image/png",Buffer.from("avatar"));
+  store.db.prepare("INSERT INTO remote_avatars VALUES(?,?,?,?,?,?,?)")
+    .run("remote-avatar",peer,"remote-v1","image/png",Buffer.from("avatar"),`${peer}/image`,Date.now());
+  store.setContactName(alice, peer, "Alice's friend"); store.setContactName(bob, peer, "Bob's friend");
+  const member = (viewer: typeof alice, id: string) => store.details(viewer, channel.id).members.find(u => u.id === id)!;
+  assert.equal(member(alice,bob.id).avatar_url,store.profile(store.user(bob.id)).avatar_url);
+  assert.equal(member(alice,remote.id).avatar_url,store.profile(store.user(remote.id)).avatar_url);
+  assert.equal(member(alice,remote.id).display_name,"Alice's friend");
+  assert.equal(member(bob,remote.id).display_name,"Bob's friend");
+  store.db.prepare("UPDATE user_avatars SET revision='local-v2' WHERE user_id=?").run(bob.id);
+  store.db.prepare("UPDATE remote_avatars SET revision='remote-v2' WHERE peer=?").run(peer);
+  assert.equal(member(alice,bob.id).avatar_url,`/api/avatars/${bob.id}?v=local-v2`);
+  assert.equal(member(alice,remote.id).avatar_url,"/api/remote-avatars/remote-avatar?v=remote-v2");
+  store.setContactName(alice,peer,null);
+  assert.equal(member(alice,remote.id).display_name,"Remote");
+  store.db.prepare("DELETE FROM user_avatars WHERE user_id=?").run(bob.id);
+  store.db.prepare("DELETE FROM remote_avatars WHERE peer=?").run(peer);
+  assert.equal(member(alice,bob.id).avatar_url,null);assert.equal(member(alice,remote.id).avatar_url,null);
+});
+
 test("upgrading version seven preserves the archive and contact names survive restart", sqliteOnly, t => {
   const directory = mkdtempSync(join(tmpdir(), "archipel-contact-names-")), path = join(directory, "db.sqlite");
   t.after(() => rmSync(directory, {recursive:true,force:true}));
@@ -80,9 +109,9 @@ test("upgrading version seven preserves the archive and contact names survive re
   const peer = "xmpp:other@remote.test";
   store.db.prepare("INSERT INTO direct_messages(id,user_id,peer,direction,body,created_at) VALUES(?,?,?,'incoming','Saved history',?)")
     .run("saved", alice.id, peer, new Date().toISOString());
-  store.db.exec("DROP TABLE channel_held_roles; DROP TABLE channel_instance_bans; DROP TABLE channel_member_roles; DROP TABLE channel_roles; DROP TABLE reaction_emojis; ALTER TABLE channels DROP COLUMN reaction_bans; DROP TABLE device_flows; DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; PRAGMA user_version=7"); store.close();
+  store.db.exec("DROP TABLE federation_channel_events; DROP TABLE federation_channel_state; DROP TABLE federation_channel_cursors; DROP TABLE federation_channel_peers; ALTER TABLE federation_follows DROP COLUMN stream_start; ALTER TABLE federation_follows DROP COLUMN stream_capable; ALTER TABLE federation_subscriptions DROP COLUMN stream_start; DROP TABLE channel_held_roles; DROP TABLE channel_instance_bans; DROP TABLE channel_member_roles; DROP TABLE channel_roles; DROP TABLE reaction_emojis; ALTER TABLE channels DROP COLUMN reaction_bans; DROP TABLE device_flows; DROP TABLE closed_conversations; ALTER TABLE channels DROP COLUMN optional_titles; DROP TABLE message_reactions; ALTER TABLE channels DROP COLUMN reactions; DROP TABLE channel_roster; DROP TABLE channel_grants; ALTER TABLE channels DROP COLUMN show_members; ALTER TABLE channels DROP COLUMN hide_handles; DROP TABLE push_subscriptions; DROP TABLE conversation_prefs; DROP INDEX messages_parent; DROP TABLE attachments; DROP TABLE user_roles; DROP TABLE roles; DROP TABLE mirror_sources; DROP TABLE channel_mirrors; DROP TABLE channel_bridge_seen; DROP TABLE channel_bridges; DROP TABLE xmpp_remote_messages; DROP TABLE xmpp_remote_rooms; DROP TABLE remote_avatars; DROP TABLE xmpp_avatar_requests; DROP TABLE contact_names; PRAGMA user_version=7"); store.close();
   store = new Store(path);
-  assert.equal(store.db.version(), 29);
+  assert.equal(store.db.version(), 30);
   store.setContactName(alice, peer, "Saved name"); store.close();
   store = new Store(path);
   try {

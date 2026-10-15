@@ -105,6 +105,11 @@ impl State {
             "topic":"fwdxp:topic","topics":"fwdxp:topics","proof":"fwdxp:proof","emoji":"fwdxp:emoji"}]);
         actor["fwdxpVersion"] = json!(1);
         actor["archipelVersion"] = json!(1);
+        if self.config().channel_transport {
+            actor["channelEvents"] = if request.kind == "channels" {
+                json!({"version":1,"batches":format!("{id}/events"),"stream":format!("{id}/stream"),"instanceStream":format!("{}/federation/stream",self.config().base),"instanceBatches":format!("{}/federation/events",self.config().base)})
+            } else { json!({"version":1}) };
+        }
         actor["inbox"] = json!(format!("{}/federation/inbox", self.config().base));
         actor["outbox"] = json!(format!("{id}/outbox"));
         actor["publicKey"] = json!({"id":format!("{id}#main-key"),"owner":id,"publicKeyPem":public.ok_or(Failure(StatusCode::SERVICE_UNAVAILABLE,"Actor signing key unavailable."))?});

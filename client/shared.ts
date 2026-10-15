@@ -61,6 +61,7 @@ export interface Channel {
   can_join: boolean;
   member_count: number;
   members?: User[];
+  members_cursor?: string | null;
   // What the channel shows its members of one another, and whether this reader sees it anyway.
   show_members: number;
   hide_handles: number;
@@ -104,6 +105,7 @@ export type SideKind = "dms" | "channels" | "xmpp";
 // The sections, the order they are listed in, and whether XMPP rooms are listed among the channels.
 export type Layout = Record<SideKind, SideSection> & { order?: SideKind[]; merged?: boolean };
 export interface Overview {
+  message_cursor?: number;
   xmpp_enabled: boolean;
   xmpp_rooms: XmppRoom[];
   dms: Conversation[];

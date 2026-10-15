@@ -4,8 +4,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { PostgresDatabase, SqliteDatabase, copyToPostgres, toPostgres } from "../src/db.js";
+import { PostgresDatabase, SqliteDatabase, copyToPostgres, toPostgres, waitForDatabaseMessage } from "../src/db.js";
 import { Store } from "../src/store.js";
+
+import {MessageChannel, Worker} from "node:worker_threads";
 
 const postgres = process.env.ARCHIPEL_TEST_POSTGRES;
 
@@ -147,7 +149,7 @@ test("an instance moves from its SQLite file into PostgreSQL whole, and carries 
   again.close();
 
   const moved = new Store(target, origin);
-  assert.equal(target.version(), 29);
+  assert.equal(target.version(), 31);
   assert.deepEqual(moved.messages(moved.user(bob.id), channel.id), expected.messages);
   assert.deepEqual(moved.directHistory(moved.user(bob.id), `${origin}/actors/users/${alice.id}`), expected.dms);
   assert.deepEqual(moved.overview(moved.user(bob.id)), expected.overview);
@@ -157,4 +159,15 @@ test("an instance moves from its SQLite file into PostgreSQL whole, and carries 
   assert.equal(moved.post(moved.user(alice.id), channel.id, { title: "After", body: "Written to PostgreSQL" }).seq, expected.counter + 1);
   assert.equal(target.prepare("SELECT id FROM users WHERE username=?").get("ALICE")?.id, alice.id);
   assert.throws(() => moved.createChannel(moved.user(alice.id), { name: "GENERAL", description: "", mode: "timeline", visibility: "public", admission: "open" }));
+});
+
+// The shared wake-up flag and MessagePort are different transports. A wake-up
+// may arrive first; consuming the next request's reply would corrupt the session.
+test("database handoff waits for its reply after an early wake-up", async t => {
+  const {port1,port2}=new MessageChannel(), flag=new Int32Array(new SharedArrayBuffer(4));
+  const worker=new Worker(`const {workerData}=require('node:worker_threads');const {port,buffer}=workerData;const flag=new Int32Array(buffer);Atomics.store(flag,0,1);Atomics.notify(flag,0);setTimeout(()=>{port.postMessage({id:1});setTimeout(()=>port.postMessage({id:2}),30);},30);`,{eval:true,workerData:{port:port2,buffer:flag.buffer},transferList:[port2]});
+  t.after(()=>{port1.close();void worker.terminate();});
+  assert.deepEqual(waitForDatabaseMessage(port1,flag,2000),{id:1});
+  assert.deepEqual(waitForDatabaseMessage(port1,flag,2000),{id:2});
+  assert.throws(()=>waitForDatabaseMessage(port1,flag,10),/did not answer/);
 });

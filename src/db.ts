@@ -27,7 +27,7 @@ export interface Change {
 }
 // The columns of a changed row that tell whose screen the change is on.
 export const watched: Record<string, string[]> = {
-  messages: ["channel_id"],
+  messages: ["channel_id","id"],
   topics: ["channel_id"],
   channel_roster: ["channel_id"],
   message_reactions: ["message_id"],
@@ -181,10 +181,10 @@ export abstract class Database {
   notifyExternal(changes: Change[]) { this.tell(changes); }
   /** Brings the schema up to this application's version. */
   migrate() {
-    if(this.dialect!=="postgres")return this.migrateLocked();
+    if(this.dialect!=="postgres") { this.migrateLocked();this.exec(readFileSync(new URL("instance-feed.triggers",migrationsUrl),"utf8"));return; }
     const db=this as unknown as PostgresDatabase;
     db.native("SELECT pg_advisory_lock(hashtextextended(current_schema()||':archipel-schema',0))");
-    try{this.migrateLocked();}finally{db.native("SELECT pg_advisory_unlock(hashtextextended(current_schema()||':archipel-schema',0))");}
+    try{this.migrateLocked();db.nativeExec(readFileSync(new URL("instance-feed.pg",migrationsUrl),"utf8"));}finally{db.native("SELECT pg_advisory_unlock(hashtextextended(current_schema()||':archipel-schema',0))");}
   }
   private migrateLocked() {
     const all = migrations(),
@@ -445,10 +445,12 @@ export class PostgresDatabase extends Database {
     if (this.closed) throw new Error("The database is closed.");
     Atomics.store(this.flag, 0, 0);
     this.port.postMessage(request);
-    // The answer is waited for here: statements run one after another, as SQLite's do.
-    if (Atomics.wait(this.flag, 0, 0, 120000) === "timed-out")
-      throw new Error("The database did not answer.");
-    const answer = receiveMessageOnPort(this.port)?.message as
+    // A shared-memory wakeup can become visible before MessagePort delivery.
+    // Never treat that wakeup as a reply or allow subsequent queries to consume
+    // the delayed answer of an earlier statement.
+    let received: unknown;
+    try {received=waitForDatabaseMessage(this.port,this.flag);}catch(error){this.closed=true;void this.worker.terminate();throw error;}
+    const answer = received as
       | { rows?: Row[]; count?: number; statistics?: { statements: number; queries: number; transferredRows: number }; error?: { message: string; code?: string; detail?: string } }
       | undefined;
     if (!answer) throw new Error("The database connection stopped.");
@@ -459,6 +461,7 @@ export class PostgresDatabase extends Database {
       });
     return answer;
   }
+  nativeExec(text: string) { this.ask({op:"exec",text,tx:this.inTransaction}); }
   private query(sql: string, values: Value[], result: "rows" | "first" | "count" = "rows") {
     let text = toPostgres(sql);
     // Bound read-only SELECTs on the database server, not after materializing
@@ -580,6 +583,18 @@ export class PostgresDatabase extends Database {
       `SELECT last_value,is_called FROM ${counter}`,
     )[0];
     return is_called ? Number(last_value) : 0;
+  }
+}
+
+export function waitForDatabaseMessage(port: MessagePort, flag: Int32Array, timeout = 120000): unknown {
+  const deadline = performance.now() + timeout;
+  for (;;) {
+    const answer = receiveMessageOnPort(port);
+    if (answer) return answer.message;
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) throw new Error("The database did not answer.");
+    const state = Atomics.load(flag, 0);
+    Atomics.wait(flag, 0, state, state === 0 ? remaining : Math.min(1, remaining));
   }
 }
 

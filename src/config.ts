@@ -38,6 +38,7 @@ export interface Config {
   federationSendConcurrency: number;
   /** Outbound federation deliveries per minute to one peer host; 0 is unlimited. */
   federationPeerSendRate: number;
+  federationChannelTransport: "off" | "batch" | "stream";
 }
 
 export function isLoopback(host: string) {
@@ -45,6 +46,9 @@ export function isLoopback(host: string) {
 }
 
 export function loadConfig(env = process.env): Config {
+  const federationChannelTransport = env.FEDERATION_CHANNEL_TRANSPORT || "stream";
+  if (!["off", "batch", "stream"].includes(federationChannelTransport))
+    throw new Error("FEDERATION_CHANNEL_TRANSPORT must be off, batch or stream");
   const xmppDomain = env.XMPP_DOMAIN || "";
   if (xmppDomain && (!/^[a-z0-9]+(?:[a-z0-9.-]*[a-z0-9])?$/.test(xmppDomain) ||
       xmppDomain.length > 253 || xmppDomain.split(".").some(s => !s || s.length > 63 || s.startsWith("-") || s.endsWith("-"))))
@@ -156,6 +160,7 @@ export function loadConfig(env = process.env): Config {
     rateLimitAuth: rate("RATE_LIMIT_AUTH", 30),
     rateLimitMedia: rate("RATE_LIMIT_MEDIA", 600),
     rateLimitFederation: rate("RATE_LIMIT_FEDERATION", 120),
+    federationChannelTransport: federationChannelTransport as Config["federationChannelTransport"],
     federationSendRate: rate("FEDERATION_SEND_RATE", 20, 1, 1000),
     federationSendInterval: rate("FEDERATION_SEND_INTERVAL", 1000, 100, 600000),
     federationSendConcurrency: rate("FEDERATION_SEND_CONCURRENCY", 4, 1, 32),

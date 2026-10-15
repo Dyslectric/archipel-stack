@@ -16,3 +16,4 @@ const target={version:()=>0,transaction:(fn:()=>void)=>fn(),exec:(sql:string)=>s
 const blank=new SqliteDatabase(':memory:');try{blank.migrate();copyToPostgres(blank,target as unknown as PostgresDatabase);}finally{blank.close();}
 writeFileSync(new URL('schema.sql',data),`-- Generated from migrations; source SHA256 ${hash.digest('hex')}\n${statements.join(';\n')};\n`);
 writeFileSync(new URL('schema-upgrades.json',data),JSON.stringify(files.filter(f=>Number(f.slice(0,3))>=27).map(file=>({version:Number(file.slice(0,3)),sql:toPostgres(readFileSync(new URL(file,root),'utf8'))}))));
+writeFileSync(new URL('instance-feed.pg',data),readFileSync(new URL('instance-feed.pg',root)));

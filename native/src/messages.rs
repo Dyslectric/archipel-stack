@@ -279,8 +279,8 @@ pub async fn post(
             return Err(Failure(StatusCode::CONFLICT, "Message ID already used."));
         }
         if changed && federated {
-            let recipients: Vec<String>=sqlx::query_scalar("SELECT actor FROM federation_follows WHERE channel_id=$1 AND status='accepted' FOR SHARE").bind(&job.channel).fetch_all(&mut **tx).await?;
-            if !recipients.is_empty() {
+            let recipients: Vec<String>=sqlx::query_scalar("SELECT actor FROM federation_follows WHERE channel_id=$1 AND status='accepted' AND (stream_capable=0 OR stream_start IS NULL) FOR SHARE").bind(&job.channel).fetch_all(&mut **tx).await?;
+            {
                 outgoing = true;
                 let channel_actor = format!("{}/actors/channels/{}", config.base, job.channel);
                 let signed = signer
@@ -466,8 +466,8 @@ pub async fn edit(
     }
     let mut outgoing = false;
     if channel.get::<i64, _>("federation_enabled") != 0 {
-        let recipients:Vec<String>=sqlx::query_scalar("SELECT actor FROM federation_follows WHERE channel_id=$1 AND status='accepted' FOR SHARE").bind(&job.channel).fetch_all(&mut **tx).await?;
-        if !recipients.is_empty() {
+        let recipients:Vec<String>=sqlx::query_scalar("SELECT actor FROM federation_follows WHERE channel_id=$1 AND status='accepted' AND (stream_capable=0 OR stream_start IS NULL) FOR SHARE").bind(&job.channel).fetch_all(&mut **tx).await?;
+        {
             let parent_id = message.get::<Option<String>, _>("parent_id");
             let parent_object = if let Some(parent) = &parent_id {
                 sqlx::query_scalar("SELECT COALESCE(remote_object,$2||'/objects/messages/'||id) FROM messages WHERE id=$1").bind(parent).bind(&config.base).fetch_optional(&mut **tx).await?

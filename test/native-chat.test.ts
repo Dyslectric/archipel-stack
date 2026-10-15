@@ -21,7 +21,7 @@ const url = process.env.ARCHIPEL_TEST_POSTGRES;
 const binary = resolve(process.env.ARCHIPEL_NATIVE_BINARY || `native/target/release/archipel-chat${process.platform==="win32"?".exe":""}`);
 const skip = { skip: !url || !existsSync(binary) ? "needs ARCHIPEL_TEST_POSTGRES and a built native binary" : false };
 const secret = "native-test-secret-"+"n".repeat(43);
-async function fixture(t: TestContext, workers=4, connections=2, base="http://127.0.0.1:8799") {
+async function fixture(t: TestContext, workers=4, connections=2, base="http://127.0.0.1:8799",transport="off") {
   const schema = `native_${randomBytes(10).toString("hex")}`;
   const db = new PostgresDatabase(url!,schema,true), store = new Store(db,base);
   store.initializeRegistration("open");
@@ -30,8 +30,9 @@ async function fixture(t: TestContext, workers=4, connections=2, base="http://12
   const channel = store.createChannel(alice,{name:"general",mode:"timeline",visibility:"members",admission:"open"});
   store.join(bob,channel.id); const session = store.createSession(bob.id);
   const aliceSession=store.createSession(alice.id);
-  const child = spawn(binary,[],{windowsHide:true,stdio:["ignore","pipe","pipe"],env:{...process.env,DEV_AUTH:"true",DATABASE_URL:url,NATIVE_SCHEMA:schema,BASE_URL:store.baseUrl,NATIVE_HOST:"127.0.0.1",NATIVE_PORT:"0",NATIVE_WORKERS:String(workers),NATIVE_DATABASE_POOL:String(connections),NATIVE_CHANNEL_CONCURRENCY:String(Math.max(1,Math.floor(connections/2))),NATIVE_BRIDGE_SECRET:secret}});
-  t.after(async()=>{child.kill();await new Promise<void>(done=>{if(child.exitCode!==null || child.signalCode!==null)done();else child.once("exit",()=>done());});store.close();});
+  const child = spawn(binary,[],{windowsHide:true,stdio:["ignore","pipe","pipe"],env:{...process.env,FEDERATION_CHANNEL_TRANSPORT:transport,DEV_AUTH:"true",DATABASE_URL:url,NATIVE_SCHEMA:schema,BASE_URL:store.baseUrl,NATIVE_HOST:"127.0.0.1",NATIVE_PORT:"0",NATIVE_WORKERS:String(workers),NATIVE_DATABASE_POOL:String(connections),NATIVE_CHANNEL_CONCURRENCY:String(Math.max(1,Math.floor(connections/2))),NATIVE_BRIDGE_SECRET:secret}});
+  const shutdown: (() => Promise<void>)[] = [];
+  t.after(async()=>{for (const close of shutdown) await close(); child.kill();await new Promise<void>(done=>{if(child.exitCode!==null || child.signalCode!==null)done();else child.once("exit",()=>done());});store.close();});
   let error=""; child.stderr.on("data",chunk=>{error+=String(chunk);});
   const ready = await new Promise<{port:number;workers:number[]}>((done,fail)=>{
     let text=""; const timeout=setTimeout(()=>fail(new Error(`Native startup timeout: ${error}`)),30000);
@@ -43,14 +44,14 @@ async function fixture(t: TestContext, workers=4, connections=2, base="http://12
     const response=await fetch(`${origin}/v1/chat`,{method:"POST",headers:{Authorization:`Bearer ${key}`,"Content-Type":"application/json"},body:JSON.stringify({op:"post",channel:channel.id,token:session.token,csrf:session.csrf,body:"Native message",message_id:randomUUID(),...job})});
     return {status:response.status,data:await response.json() as any};
   };
-  return {schema,db,store,alice,bob,channel,session,aliceSession,origin,ready,call,child};
+  return {schema,db,store,alice,bob,channel,session,aliceSession,origin,ready,call,child,shutdown};
 }
 
 test("native configuration requires PostgreSQL and an authenticated service origin",()=>{
-  assert.equal(loadConfig({}).nativeChatUrl,"");
-  assert.throws(()=>loadConfig({NATIVE_CHAT_URL:"http://127.0.0.1:8870",NATIVE_BRIDGE_SECRET:secret}),/PostgreSQL/);
-  assert.throws(()=>loadConfig({DATABASE_URL:"postgres://test",NATIVE_CHAT_URL:"http://127.0.0.1:8870"}),/NATIVE_BRIDGE_SECRET/);
-  const config=loadConfig({DATABASE_URL:"postgres://test",NATIVE_CHAT_URL:"http://127.0.0.1:8870/",NATIVE_BRIDGE_SECRET:secret});
+  assert.equal(loadConfig({FEDERATION_CHANNEL_TRANSPORT:"off",}).nativeChatUrl,"");
+  assert.throws(()=>loadConfig({FEDERATION_CHANNEL_TRANSPORT:"off",NATIVE_CHAT_URL:"http://127.0.0.1:8870",NATIVE_BRIDGE_SECRET:secret}),/PostgreSQL/);
+  assert.throws(()=>loadConfig({FEDERATION_CHANNEL_TRANSPORT:"off",DATABASE_URL:"postgres://test",NATIVE_CHAT_URL:"http://127.0.0.1:8870"}),/NATIVE_BRIDGE_SECRET/);
+  const config=loadConfig({FEDERATION_CHANNEL_TRANSPORT:"off",DATABASE_URL:"postgres://test",NATIVE_CHAT_URL:"http://127.0.0.1:8870/",NATIVE_BRIDGE_SECRET:secret});
   assert.equal(config.nativeChatUrl,"http://127.0.0.1:8870");
 });
 
@@ -74,7 +75,7 @@ test("native executable initializes an empty PostgreSQL schema and upgrades vers
       child.stdout?.on("data",chunk=>{output+=String(chunk);if(output.includes("\n")){clearTimeout(timer);done(JSON.parse(output.split("\n")[0]));}});
     });return {child,origin:`http://127.0.0.1:${ready.port}`};
   };
-  const first=await start();assert.equal((await client.query(`SELECT version FROM "${schema}".archipel_schema`)).rows[0].version,"29");
+  const first=await start();assert.equal((await client.query(`SELECT version FROM "${schema}".archipel_schema`)).rows[0].version,"31");
   assert.equal((await client.query(`SELECT name FROM "${schema}".roles WHERE is_default=1`)).rows[0].name,"Member");
   const db=new PostgresDatabase(url!,schema),store=new Store(db,"http://127.0.0.1:8799");t.after(()=>store.close());
   const alice=store.loginIdentity("urn:archipel:development","alice","Alice",[],true),channel=store.createChannel(alice,{name:"native-boot",mode:"timeline",visibility:"members",admission:"open"}),session=store.createSession(alice.id);
@@ -86,9 +87,9 @@ test("native executable initializes an empty PostgreSQL schema and upgrades vers
   db.prepare("INSERT INTO federation_outgoing VALUES(?,?,?,?,?,?,?)").run(queued,"{}","urn:boot",alice.id,channel.id,"relay",Date.now());
   db.prepare("INSERT INTO federation_deliveries(activity_id,recipient) VALUES(?,?)").run(queued,"urn:boot-peer");
   await client.query(`DROP TABLE "${schema}".native_federation_heads`);
-  await client.query(`DROP TABLE "${schema}".native_changes`);await client.query(`UPDATE "${schema}".archipel_schema SET version=28`);
+  await client.query(`DROP TABLE "${schema}".native_changes`);await client.query(`DROP TABLE "${schema}".federation_instance_events; DROP TABLE "${schema}".federation_instance_state; DROP TABLE "${schema}".federation_channel_keys; DROP TABLE "${schema}".federation_channel_epochs; DROP TABLE "${schema}".federation_instance_incoming; DROP TABLE "${schema}".federation_instance_cursors; DROP TABLE "${schema}".federation_received_keys; DROP INDEX "${schema}".federation_legacy_followers; ALTER TABLE "${schema}".federation_follows DROP COLUMN key_epoch; ALTER TABLE "${schema}".federation_follows DROP COLUMN instance_start; ALTER TABLE "${schema}".federation_subscriptions DROP COLUMN instance_start; DROP TABLE "${schema}".federation_channel_events; DROP TABLE "${schema}".federation_channel_state; DROP TABLE "${schema}".federation_channel_cursors; DROP TABLE "${schema}".federation_channel_peers; ALTER TABLE "${schema}".federation_follows DROP COLUMN stream_start; ALTER TABLE "${schema}".federation_follows DROP COLUMN stream_capable; ALTER TABLE "${schema}".federation_subscriptions DROP COLUMN stream_start; UPDATE "${schema}".archipel_schema SET version=28`);
   const upgraded=await start();assert.equal((await fetch(`${upgraded.origin}/health`,{headers:{Authorization:`Bearer ${secret}`}})).status,200);
-  assert.equal((await client.query(`SELECT version FROM "${schema}".archipel_schema`)).rows[0].version,"29");
+  assert.equal((await client.query(`SELECT version FROM "${schema}".archipel_schema`)).rows[0].version,"31");
   assert.equal((await client.query(`SELECT body FROM "${schema}".messages`)).rows[0].body,"Native bootstrap works");
   assert.equal((await client.query(`SELECT recipient FROM "${schema}".native_federation_heads`)).rows[0].recipient,"urn:boot-peer");
 });
@@ -143,7 +144,7 @@ test("native queue heads track compatibility mutations, concurrent writers and r
 });
 
 test("native account session, profile changes and logout preserve roles, CSRF and revocation",skip,async t=>{
-  const f=await fixture(t,1,4),native=new NativeChat(f.store,loadConfig({DATABASE_URL:url,NATIVE_CHAT_URL:f.origin,NATIVE_BRIDGE_SECRET:secret}));
+  const f=await fixture(t,1,4),native=new NativeChat(f.store,loadConfig({FEDERATION_CHANNEL_TRANSPORT:"off",DATABASE_URL:url,NATIVE_CHAT_URL:f.origin,NATIVE_BRIDGE_SECRET:secret}));
   const signed=await native.account("session",f.session.token);
   assert.deepEqual(signed,{user:f.store.profile(f.bob,true),csrf:f.session.csrf,registration_mode:"open",federation_enabled:false});
   assert.equal((await native.account("session","invalid")).user,null);
@@ -161,7 +162,7 @@ test("native account session, profile changes and logout preserve roles, CSRF an
 });
 
 test("native quota authentication coalesces in-flight requests and immediately observes revocation",skip,async t=>{
-  const f=await fixture(t,1,4),native=new NativeChat(f.store,loadConfig({DATABASE_URL:url,NATIVE_CHAT_URL:f.origin,NATIVE_BRIDGE_SECRET:secret}));
+  const f=await fixture(t,1,4),native=new NativeChat(f.store,loadConfig({FEDERATION_CHANNEL_TRANSPORT:"off",DATABASE_URL:url,NATIVE_CHAT_URL:f.origin,NATIVE_BRIDGE_SECRET:secret}));
   const before=native.statistics.sessions;
   const sessions=await Promise.all(Array.from({length:24},()=>native.session(f.session.token)));
   assert.ok(sessions.every(s=>s.user.id===f.bob.id));assert.equal(native.statistics.sessions-before,1);
@@ -184,7 +185,7 @@ test("native bridge never falls back after a timeout/error that might follow com
   });
   await new Promise<void>(done=>server.listen(0,"127.0.0.1",done));t.after(()=>new Promise<void>(done=>server.close(()=>done())));
   const address=server.address() as {port:number};
-  const native=new NativeChat(store,loadConfig({DATABASE_URL:"postgres://test",NATIVE_CHAT_URL:`http://127.0.0.1:${address.port}`,NATIVE_BRIDGE_SECRET:secret}));
+  const native=new NativeChat(store,loadConfig({FEDERATION_CHANNEL_TRANSPORT:"off",DATABASE_URL:"postgres://test",NATIVE_CHAT_URL:`http://127.0.0.1:${address.port}`,NATIVE_BRIDGE_SECRET:secret}));
   await assert.rejects(native.post("token","csrf","channel",{body:"Plain message"}),/failed/);
   assert.equal(calls,1);
   await assert.rejects(native.rawMessages("token","csrf","channel"),/failed/);assert.equal(calls,2);
@@ -196,10 +197,10 @@ test("native bridge never falls back after a timeout/error that might follow com
 
 test("public HTTP uses native account and actor exports with fresh policy",skip,async t=>{
   const f=await fixture(t,1,4);
-  const config=loadConfig({DEV_AUTH:"true",HOST:"127.0.0.1",BASE_URL:f.store.baseUrl,DATABASE_URL:url,NATIVE_CHAT_URL:f.origin,NATIVE_BRIDGE_SECRET:secret});
+  const config=loadConfig({FEDERATION_CHANNEL_TRANSPORT:"off",DEV_AUTH:"true",HOST:"127.0.0.1",BASE_URL:f.store.baseUrl,DATABASE_URL:url,NATIVE_CHAT_URL:f.origin,NATIVE_BRIDGE_SECRET:secret});
   const app=createApp(config,f.store),server=createServer(app);
   await new Promise<void>(done=>server.listen(0,"127.0.0.1",done));
-  t.after(async()=>{app.locals.events.close();server.closeAllConnections();await new Promise<void>(done=>server.close(()=>done()));});
+  f.shutdown.push(async()=>{await app.locals.federation.channelFeed.close();app.locals.events.close();server.closeAllConnections();await new Promise<void>(done=>server.close(()=>done()));});
   const origin=`http://127.0.0.1:${(server.address() as {port:number}).port}`;
   const legacySession=f.store.session;f.store.session=()=>{throw new Error("Account HTTP used synchronous session lookup");};t.after(()=>{f.store.session=legacySession;});
   const headers={Cookie:`archipel=${f.session.token}`,Origin:f.store.baseUrl,"X-CSRF-Token":f.session.csrf,"Content-Type":"application/json"};
@@ -329,10 +330,10 @@ test("concurrent duplicate messages commit once and a stopped native worker is r
 
 test("native writes integrate with API and SSE, while unsupported rich posts keep the legacy path",skip,async t=>{
   const f=await fixture(t);
-  const config=loadConfig({DEV_AUTH:"true",HOST:"127.0.0.1",BASE_URL:f.store.baseUrl,DATABASE_URL:url,NATIVE_CHAT_URL:f.origin,NATIVE_BRIDGE_SECRET:secret});
+  const config=loadConfig({FEDERATION_CHANNEL_TRANSPORT:"off",DEV_AUTH:"true",HOST:"127.0.0.1",BASE_URL:f.store.baseUrl,DATABASE_URL:url,NATIVE_CHAT_URL:f.origin,NATIVE_BRIDGE_SECRET:secret});
   const app=createApp(config,f.store), server=createServer(app);
   await new Promise<void>(done=>server.listen(0,"127.0.0.1",done));
-  t.after(async()=>{app.locals.events.close();server.closeAllConnections();await new Promise<void>(done=>server.close(()=>done()));});
+  f.shutdown.push(async()=>{await app.locals.federation.channelFeed.close();app.locals.events.close();server.closeAllConnections();await new Promise<void>(done=>server.close(()=>done()));});
   const origin=`http://127.0.0.1:${(server.address() as {port:number}).port}`;
   assert.equal((await fetch(`${origin}/health`)).status,200);
   const headers={Cookie:`archipel=${f.session.token}`,Origin:f.store.baseUrl,"X-CSRF-Token":f.session.csrf,"Content-Type":"application/json"};
@@ -446,6 +447,7 @@ test("native incremental pages retain fresh authorization and reset for edits, d
 test("native browser merges incremental arrivals, preserves the composer and refreshes older edits",{skip:skip.skip || process.env.ARCHIPEL_NATIVE_BROWSER!=="1"},async t=>{
   const {chromium}=await import("@playwright/test"),f=await protocolFixture(t),browser=await chromium.launch({headless:true});
   t.after(()=>browser.close());
+  const other=f.store.createChannel(f.alice,{name:"other-deltas",mode:"timeline",visibility:"members",admission:"open"});f.store.join(f.bob,other.id);
   const first=await f.call({body:"Before browser delta"});assert.equal(first.status,200);
   const context=await browser.newContext();await context.addCookies([{name:"archipel",value:f.session.token,url:f.webOrigin}]);
   const page=await context.newPage(),responses:any[]=[];
@@ -455,16 +457,23 @@ test("native browser merges incremental arrivals, preserves the composer and ref
   // SSE reconnect/startup performs one full reconciliation before content-only
   // notices are eligible to use the page's cursor.
   await page.waitForTimeout(2000);
+  f.store.post(f.bob,other.id,{body:"My offscreen message"});await page.waitForTimeout(1800);
+  assert.equal(await page.locator(`[data-channel="${other.id}"] .count`).count(),0,"own posts do not become unread");
+  const unseen=f.store.post(f.alice,other.id,{body:"Offscreen message from Alice"});
+  await page.locator(`[data-channel="${other.id}"] .count`).getByText("1",{exact:true}).waitFor();
+  f.store.markRead(f.bob,{target:other.id,seq:unseen.seq});
+  f.store.post(f.alice,other.id,{body:"Overview and delta overlap"});await page.waitForTimeout(2000);
+  assert.equal(await page.locator(`[data-channel="${other.id}"] .count`).textContent(),"1","overview and queued delta do not double-count unread");
   await page.locator("#message-body").fill("Unsent draft");await page.locator("#message-body").focus();
-  const second=await f.call({body:"After browser delta"});assert.equal(second.status,200);
+  const pageReads=responses.length;
+  const second=await f.call({body:"After browser delta",token:f.aliceSession.token,csrf:f.aliceSession.csrf});assert.equal(second.status,200);
   await page.getByText("After browser delta",{exact:true}).waitFor();
-  assert.ok(responses.some(response=>response.url.includes("after=") && response.data.incremental===true && response.data.messages.some((m:any)=>m.id===second.data.result.id)),JSON.stringify(responses.map(r=>({url:r.url,incremental:r.data.incremental,bodies:r.data.messages?.map((m:any)=>m.body)}))));
+  assert.equal(responses.length,pageReads,"shared live delta needs no message-page request");
   assert.equal(await page.locator("#message-body").inputValue(),"Unsent draft");
   assert.equal(await page.evaluate(()=>document.activeElement?.id),"message-body");
   f.store.editMessage(f.store.user(f.bob.id),first.data.result.id,{body:"Edited browser history",expected_edited_at:null});
   await page.getByText("Edited browser history",{exact:true}).waitFor();assert.equal(await page.getByText("Before browser delta",{exact:true}).count(),0);
-  assert.ok(responses.some(response=>response.url.includes("after=") && response.data.incremental===false && response.data.messages.some((m:any)=>m.body==="Edited browser history")));
-  f.store.deleteMessage(f.store.user(f.bob.id),second.data.result.id);
+  f.store.deleteMessage(f.store.user(f.alice.id),second.data.result.id);
   await page.waitForFunction(()=>!document.querySelector("#message-list")?.textContent?.includes("After browser delta"));
 });
 
@@ -531,11 +540,11 @@ test("durable change relay survives restart, coalesces duplicates and bounds lar
 const nativePermissions={federation_send:true,federation_receive:true,federation_subscribe:true,federation_post:true,federate_channels:true};
 test("native FWDXP outbox has verifiable origin proofs, current grants and atomic replay",skip,async t=>{
   const f=await fixture(t,2,4);
-  const fed=new Federation(f.store,loadConfig({DEV_AUTH:"true",BASE_URL:f.store.baseUrl}));
+  const fed=new Federation(f.store,loadConfig({FEDERATION_CHANNEL_TRANSPORT:"off",DEV_AUTH:"true",BASE_URL:f.store.baseUrl}));
   fed.setEnabled(f.alice,true);grant(f.store,f.alice,f.bob.id,nativePermissions);
   fed.setChannel(f.alice,f.channel.id,true);
   for(const actor of ["https://one.example/actors/users/a","https://two.example/actors/users/b"])
-    f.db.prepare("INSERT INTO federation_follows VALUES(?,?,?,'accepted')").run(f.channel.id,actor,randomUUID());
+    f.db.prepare("INSERT INTO federation_follows(channel_id,actor,follow_id,status) VALUES(?,?,?,'accepted')").run(f.channel.id,actor,randomUUID());
   const id=randomUUID(),body="Native FWDXP — 😀\nOrdinary punctuation: preserved";
   const replies=await Promise.all(Array.from({length:8},()=>f.call({body,message_id:id})));
   assert.ok(replies.every(r=>r.status===200),JSON.stringify(replies));assert.equal(replies.filter(r=>r.data.changed).length,1);
@@ -551,6 +560,21 @@ test("native FWDXP outbox has verifiable origin proofs, current grants and atomi
   assert.equal((await f.call({body:"Revoked posting"})).status,403);
   assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM messages").get()!.n,1);
   assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM federation_outgoing WHERE purpose='relay'").get()!.n,1);
+});
+
+test("native large-channel announcements use a compact audience with all recipient rows intact",skip,async t=>{
+  const f=await fixture(t,1,4);
+  const fed=new Federation(f.store,loadConfig({FEDERATION_CHANNEL_TRANSPORT:"off",DEV_AUTH:"true",BASE_URL:f.store.baseUrl}));
+  fed.setEnabled(f.alice,true);grant(f.store,f.alice,f.bob.id,nativePermissions);fed.setChannel(f.alice,f.channel.id,true);
+  f.store.transaction(()=>{
+    for(let i=0;i<1400;i++) f.db.prepare("INSERT INTO federation_follows(channel_id,actor,follow_id,status) VALUES(?,?,?,'accepted')")
+      .run(f.channel.id,`https://large-peer.example/actors/users/${String(i).padStart(36,"0")}`,`follow-${i}`);
+  });
+  const post=await f.call({body:"A small native message in a large channel"});assert.equal(post.status,200,JSON.stringify(post));
+  const row=f.db.prepare("SELECT id,activity FROM federation_outgoing WHERE purpose='relay'").get()!;
+  assert.deepEqual(JSON.parse(String(row.activity)).to,[fed.channelActor(f.store.channel(f.channel.id))]);
+  assert.ok(Buffer.byteLength(String(row.activity))<65536);
+  assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM federation_deliveries WHERE activity_id=?").get(row.id)!.n,1400);
 });
 
 test("native titles, replies, topics and attachment publication preserve message contracts",skip,async t=>{
@@ -607,24 +631,62 @@ test("native commits notify every subscribed front end, with schema isolation an
   await Promise.all([f.db.listenExternalChanges(),second.listenExternalChanges(),foreign.listenExternalChanges()]);
   const id=randomUUID();assert.equal((await f.call({message_id:id})).status,200);
   for(let n=0;n<20 && (!own.length || !other.length);n++) await new Promise(done=>setTimeout(done,25));
-  const change=[{table:"messages",rows:[{channel_id:f.channel.id}]}];
+  const change=[{table:"messages",rows:[{channel_id:f.channel.id,id}]}];
   assert.deepEqual(own,[change]);assert.deepEqual(other,[change]);assert.deepEqual(separate,[]);
   assert.equal((await f.call({message_id:id})).data.changed,false);assert.equal((await f.call({message_id:id,body:"Conflict"})).status,409);
   await new Promise(done=>setTimeout(done,75));assert.equal(own.length,1);assert.equal(other.length,1);
 });
 
-async function protocolFixture(t:TestContext,workers=2) {
+async function protocolFixture(t:TestContext,workers=2,transport="off") {
   const server=createServer();await new Promise<void>(done=>server.listen(0,"127.0.0.1",done));
   const origin=`http://127.0.0.1:${(server.address() as {port:number}).port}`;
-  const f=await fixture(t,workers,4,origin);
+  const f=await fixture(t,workers,4,origin,transport);
   const config=loadConfig({DEV_AUTH:"true",BASE_URL:origin,HOST:"127.0.0.1",DATABASE_URL:url,NATIVE_CHAT_URL:f.origin,NATIVE_BRIDGE_SECRET:secret,
-    FEDERATION_SEND_RATE:"1000",FEDERATION_SEND_INTERVAL:"100",FEDERATION_PEER_SEND_RATE:"0",RATE_LIMIT_FEDERATION:"10000"});
+    FEDERATION_CHANNEL_TRANSPORT:transport,FEDERATION_SEND_RATE:"1000",FEDERATION_SEND_INTERVAL:"100",FEDERATION_PEER_SEND_RATE:"0",RATE_LIMIT_FEDERATION:"10000"});
   const app=createApp(config,f.store),fed=app.locals.federation as Federation;server.on("request",app);
-  t.after(async()=>{app.locals.events.close();server.closeAllConnections();await new Promise<void>(done=>server.close(()=>done()));});
+  f.shutdown.push(async()=>{await fed.channelFeed.close();app.locals.events.close();server.closeAllConnections();await new Promise<void>(done=>server.close(()=>done()));});
   fed.setEnabled(f.alice,true);grant(f.store,f.alice,f.bob.id,nativePermissions);grant(f.store,f.alice,f.alice.id,nativePermissions);
   fed.setChannel(f.store.user(f.alice.id),f.channel.id,true);
   return {...f,fed,app,server,webOrigin:origin};
 }
+
+for (const transport of ["batch", "stream"]) test(`native channel ${transport} commits events and cursors without follower queue fan-out`, skip, async t => {
+  const home = await protocolFixture(t, 1, transport), remote = await protocolFixture(t, 1, transport);
+  const actor = home.fed.channelActor(home.store.channel(home.channel.id));
+  const sub = await remote.fed.subscribe(remote.store.user(remote.bob.id), actor);
+  await remote.fed.subscribe(remote.store.user(remote.alice.id), actor);
+  for (let n = 0; n < 5; n++) { await remote.fed.tick(); await home.fed.tick(); }
+  const before = remote.fed.nativeStats.received;
+  const first = await home.call({ body: "Native streamed event" });
+  assert.equal(first.status, 200, JSON.stringify(first));
+  assert.equal(Number(home.db.prepare("SELECT COUNT(*) AS n FROM federation_channel_events").get()!.n), 1);
+  assert.equal(Number(home.db.prepare("SELECT COUNT(*) AS n FROM federation_instance_events").get()!.n), 1);
+  assert.equal(Number(home.db.prepare("SELECT COUNT(*) AS n FROM federation_deliveries d JOIN federation_outgoing o ON o.id=d.activity_id WHERE o.purpose='relay'").get()!.n), 0);
+  if (transport === "batch") {
+    const page = home.fed.channelFeed.page(remote.fed.publicActor("users", remote.bob.id), home.channel.id, 0);
+    await assert.rejects(remote.fed.receiveChannelEvent(home.fed.publicActor("channels", home.channel.id), page.events[0].activity,
+      { channel: actor, follow: page.follow, after: 0, cursor: 2 }), /checkpoint/i);
+    assert.equal(Number(remote.db.prepare("SELECT cursor FROM federation_channel_cursors").get()!.cursor), 0);
+    assert.equal(Number(remote.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE body='Native streamed event'").get()!.n), 0);
+  }
+  await remote.fed.tick();
+  const until = async (predicate: () => boolean) => {
+    const deadline = Date.now() + 10000;
+    while (!predicate()) { if (Date.now() >= deadline) assert.fail(JSON.stringify(remote.db.prepare("SELECT * FROM federation_channel_cursors").all())); await new Promise(done => setTimeout(done, 25)); }
+  };
+  await until(() => Number(remote.db.prepare("SELECT cursor FROM federation_channel_cursors").get()?.cursor) === 1);
+  assert.equal(remote.store.messages(remote.store.user(remote.bob.id), sub.channel.id)[0].body, "Native streamed event");
+  assert.equal(remote.fed.nativeStats.received, before + 1);
+  assert.equal(Number(remote.db.prepare("SELECT COUNT(*) AS n FROM federation_channel_cursors").get()!.n), 1);
+  assert.equal(Number(remote.db.prepare("SELECT COUNT(*) AS n FROM federation_instance_cursors").get()!.n), 1);
+  const edited = await home.call({ op: "edit", message_id: first.data.result.id, body: "Native streamed edit", expected_edited_at: null });
+  assert.equal(edited.status, 200, JSON.stringify(edited));
+  await remote.fed.tick(); await until(() => Number(remote.db.prepare("SELECT cursor FROM federation_channel_cursors").get()?.cursor) === 2);
+  assert.equal(remote.store.messages(remote.store.user(remote.bob.id), sub.channel.id)[0].body, "Native streamed edit");
+  home.store.deleteMessage(home.store.user(home.bob.id), first.data.result.id);
+  await remote.fed.tick(); await until(() => Number(remote.db.prepare("SELECT cursor FROM federation_channel_cursors").get()?.cursor) === 3);
+  assert.ok(remote.db.prepare("SELECT deleted_at FROM messages WHERE remote_object=?").get(`${home.webOrigin}/objects/messages/${first.data.result.id}`)?.deleted_at);
+});
 test("three instances accept native FWDXP submissions and relay committed messages with valid proofs",skip,async t=>{
   const instances=[await protocolFixture(t),await protocolFixture(t),await protocolFixture(t)];
   const home=instances[0],remotes=instances.slice(1),subscriptions=[];
@@ -892,6 +954,48 @@ test("native delivery retries a failed recipient head before sending its later a
   await home.fed.tick();
   const channel=remote.db.prepare("SELECT id FROM channels WHERE remote_actor=?").get(home.fed.channelActor(home.store.channel(home.channel.id)))!.id;
   assert.deepEqual(remote.store.messages(remote.store.user(remote.bob.id),String(channel)).map(m=>m.body),["First, retry me","Then, deliver me"]);
+});
+
+test("native grouped failures preserve individual retry exhaustion, revocation and permanent rejection",skip,async t=>{
+  const home=await protocolFixture(t),remote=await protocolFixture(t);
+  const actor=home.fed.channelActor(home.store.channel(home.channel.id));
+  for(const user of [remote.bob,remote.alice])await remote.fed.subscribe(remote.store.user(user.id),actor);
+  for(let i=0;i<5;i++){await remote.fed.tick();await home.fed.tick();}
+  const bob=remote.fed.userActor(remote.store.user(remote.bob.id));
+  let status=500,posts=0,revoke=false;
+  remote.server.removeListener("request",remote.app);
+  remote.server.on("request",(req,res)=>{
+    if(req.url==="/federation/inbox" && req.method==="POST"){
+      posts++;
+      if(revoke)home.db.prepare("UPDATE federation_follows SET status='blocked' WHERE channel_id=? AND actor=?").run(home.channel.id,bob);
+      res.writeHead(status);res.end();
+    }else remote.app(req,res);
+  });
+  const deliveries=(id:string)=>home.db.prepare("SELECT recipient,status,attempts,next_attempt FROM federation_deliveries WHERE activity_id=? ORDER BY recipient").all(id);
+  const queue=async(body:string)=>{
+    assert.equal((await home.call({body})).status,200);
+    return String(home.db.prepare("SELECT id FROM federation_outgoing WHERE purpose='relay' ORDER BY created_at DESC,id DESC LIMIT 1").get()!.id);
+  };
+  const first=await queue("Mixed retry exhaustion");
+  home.db.prepare("UPDATE federation_deliveries SET attempts=11 WHERE activity_id=? AND recipient=?").run(first,bob);
+  await home.fed.tick();assert.equal(posts,1);
+  let rows=deliveries(first);
+  assert.equal(rows.find(r=>r.recipient===bob)!.status,"failed");
+  assert.equal(rows.find(r=>r.recipient===bob)!.attempts,12);
+  const retry=rows.find(r=>r.recipient!==bob)!;assert.equal(retry.status,"pending");assert.equal(retry.attempts,1);
+  assert.ok(Number(retry.next_attempt)>Date.now());
+  home.db.prepare("UPDATE federation_deliveries SET status='failed' WHERE activity_id=? AND status='pending'").run(first);
+  const second=await queue("Revoke while grouped request fails");revoke=true;
+  await home.fed.tick();assert.equal(posts,2);
+  rows=deliveries(second);assert.equal(rows.find(r=>r.recipient===bob)!.status,"cancelled");
+  assert.equal(rows.find(r=>r.recipient===bob)!.attempts,1);
+  assert.equal(rows.find(r=>r.recipient!==bob)!.status,"pending");
+  home.db.prepare("UPDATE federation_deliveries SET status='failed' WHERE activity_id=? AND status='pending'").run(second);
+  home.db.prepare("UPDATE federation_follows SET status='accepted' WHERE channel_id=? AND actor=?").run(home.channel.id,bob);
+  const third=await queue("Permanent grouped rejection");revoke=false;status=413;
+  await home.fed.tick();assert.equal(posts,3);
+  rows=deliveries(third);assert.ok(rows.every(r=>r.status==="failed" && r.attempts===1));
+  assert.equal(home.db.prepare("SELECT COUNT(*) AS n FROM native_federation_heads WHERE lane=?").get(home.channel.id)!.n,0);
 });
 
 test("native sender cancels a recipient when author permission is revoked during discovery",skip,async t=>{

@@ -1,5 +1,6 @@
 //! Async FWDXP delivery, sharing an instance lock across native supervisors.
-//! Each recipient retains its own audit and retry row. Discovery happens outside
+//! Individual inbox recipients retain audit and retry rows; negotiated channel
+//! broadcasts use the channel event log. Discovery happens outside
 //! database transactions; current delivery policy is read again before sending.
 use crate::{Config, Failure, chat, federation::Signer, metrics::Stage, net};
 use axum::http::{HeaderMap, StatusCode};
@@ -31,11 +32,15 @@ struct Delivery {
     recipient: String,
     attempts: i64,
     outgoing: String,
-    activity: String,
+    activity: Arc<Activity>,
     signer: String,
     user: Option<String>,
     channel: Option<String>,
     purpose: String,
+}
+struct Activity {
+    body: String,
+    announce: bool,
 }
 // Only immutable plain channel Creates may pass pending work in other channels.
 // Updates, deletes, subscriptions and all other state changes remain recipient
@@ -59,6 +64,17 @@ pub struct Authentication {
     pub method: String,
     pub target: String,
     pub body: Option<String>,
+    #[serde(default)]
+    pub stream: Option<StreamCheckpoint>,
+}
+#[derive(Clone, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamCheckpoint {
+    pub actor: String,
+    pub channel: String,
+    pub follow: String,
+    pub after: i64,
+    pub cursor: i64,
 }
 impl State {
     pub fn new(chat: Arc<chat::State>) -> Arc<Self> {
@@ -393,7 +409,7 @@ impl State {
         let user: Option<Json<Value>> = authority.get("account");
         let channel = channel.map(|j| j.0).unwrap_or(Value::Null);
         let user = user.map(|j| j.0).unwrap_or(Value::Null);
-        let activity: Value = serde_json::from_str(&delivery.activity)
+        let activity: Value = serde_json::from_str(&delivery.activity.body)
             .map_err(|_| Failure(StatusCode::BAD_REQUEST, "Invalid queued activity."))?;
         if delivery.channel.is_some() && channel.is_null() {
             return Err(Failure(StatusCode::NOT_FOUND, "Channel not found."));
@@ -568,6 +584,10 @@ impl State {
         .collect();
         let mut connection = self.connection().await?;
         let mut tx = connection.begin().await?;
+        let mut ids = Vec::with_capacity(rows.len());
+        let mut statuses = Vec::with_capacity(rows.len());
+        let mut deadlines = Vec::with_capacity(rows.len());
+        let at = now();
         for row in rows {
             let status = if !allowed.contains(&row.id) {
                 "cancelled"
@@ -576,10 +596,12 @@ impl State {
             } else {
                 "pending"
             };
-            sqlx::query("UPDATE federation_deliveries SET status=$1,attempts=attempts+1,next_attempt=$2,error=$3 WHERE id=$4 AND status='pending'")
-                .bind(status).bind(now()+5000i64.saturating_mul(1i64.checked_shl(row.attempts.min(20) as u32).unwrap_or(i64::MAX)).min(3600000))
-                .bind(error.1).bind(row.id).execute(&mut *tx).await?;
+            ids.push(row.id);
+            statuses.push(status);
+            deadlines.push(at+5000i64.saturating_mul(1i64.checked_shl(row.attempts.min(20) as u32).unwrap_or(i64::MAX)).min(3600000));
         }
+        sqlx::query("UPDATE federation_deliveries d SET status=p.status,attempts=d.attempts+1,next_attempt=p.deadline,error=$4 FROM unnest($1::bigint[],$2::text[],$3::bigint[]) AS p(id,status,deadline) WHERE d.id=p.id AND d.status='pending'")
+            .bind(ids).bind(statuses).bind(deadlines).bind(error.1).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -618,18 +640,23 @@ impl State {
                 Err(error) => return Err(error),
             };
             let mut authorized = HashSet::new();
+            let mut cancelled = Vec::new();
+            let mut errors = Vec::new();
             for (id,result) in policy { match result { Ok(()) => { authorized.insert(id); }, Err(error) => {
-                sqlx::query("UPDATE federation_deliveries SET status='cancelled',error=$1 WHERE id=$2 AND status='pending'")
-                    .bind(error.1).bind(id).execute(&mut *self.connection().await?).await?;
+                cancelled.push(id); errors.push(error.1);
             } } }
+            if !cancelled.is_empty() {
+                sqlx::query("UPDATE federation_deliveries d SET status='cancelled',error=p.error FROM unnest($1::bigint[],$2::text[]) AS p(id,error) WHERE d.id=p.id AND d.status='pending'")
+                    .bind(cancelled).bind(errors).execute(&mut *self.connection().await?).await?;
+            }
             group.retain(|row|authorized.contains(&row.id));
             if group.is_empty() || !self.allowance(&delivery.recipient,true).await? { return Ok((0,0)); }
             self.allowed(url.as_str()).await?;
             let signing_timer = self.chat.timings.time(Stage::Signing);
-            let headers = self.signer.headers(&self.chat.protocol_database,&url,&delivery.signer,delivery.activity.as_bytes()).await?;
+            let headers = self.signer.headers(&self.chat.protocol_database,&url,&delivery.signer,delivery.activity.body.as_bytes()).await?;
             drop(signing_timer);
             let http_timer = self.chat.timings.time(Stage::Http);
-            let result = self.transport.request(self.config(),&url,reqwest::Method::POST,headers,Some(delivery.activity.as_bytes().to_vec()),262144,Duration::from_secs(15)).await;
+            let result = self.transport.request(self.config(),&url,reqwest::Method::POST,headers,Some(delivery.activity.body.as_bytes().to_vec()),262144,Duration::from_secs(15)).await;
             drop(http_timer);
             if let Err(error) = result { self.finish_error(&group,error).await?; return Ok((1,group.len() as u64)); }
             let _finish_timer = self.chat.timings.time(Stage::Finish);
@@ -827,7 +854,7 @@ impl State {
             // key. Flattening this lateral boundary can scan the entire pending
             // delivery index in a merge join, even when only a few heads are due.
             let head_sql = format!(
-                "SELECT d.id AS delivery_id,d.recipient,d.attempts,o.* FROM native_federation_heads h CROSS JOIN LATERAL(SELECT * FROM federation_deliveries WHERE id=h.head_id AND status='pending' AND next_attempt<=$1 OFFSET 0) d JOIN federation_outgoing o ON o.id=d.activity_id WHERE NOT(h.head_id=ANY($2)) AND NOT(h.recipient=ANY($4)) AND NOT EXISTS(SELECT 1 FROM unnest($3::text[]) AS pattern WHERE h.recipient LIKE pattern ESCAPE '\\') AND {} ORDER BY h.head_id LIMIT $5",
+                "SELECT d.id AS delivery_id,d.recipient,d.attempts,o.id,o.signer,o.user_id,o.channel_id,o.purpose FROM native_federation_heads h CROSS JOIN LATERAL(SELECT * FROM federation_deliveries WHERE id=h.head_id AND status='pending' AND next_attempt<=$1 OFFSET 0) d JOIN federation_outgoing o ON o.id=d.activity_id WHERE NOT(h.head_id=ANY($2)) AND NOT(h.recipient=ANY($4)) AND NOT EXISTS(SELECT 1 FROM unnest($3::text[]) AS pattern WHERE h.recipient LIKE pattern ESCAPE '\\') AND {} ORDER BY h.head_id LIMIT $5",
                 predecessor()
             );
             let start = Instant::now();
@@ -857,20 +884,34 @@ impl State {
                 }
                 continue;
             }
+            // Fetch each immutable activity once, rather than repeating its full
+            // JSON for every recipient head. Grouped jobs share these bytes.
+            let payload_start = Instant::now();
+            let payload_timer = self.chat.timings.time(Stage::Selection);
+            let outgoing: Vec<String> = heads.iter().map(|h| h.get("id")).collect::<HashSet<_>>().into_iter().collect();
+            let mut activities = HashMap::new();
+            for row in sqlx::query("SELECT id,activity FROM federation_outgoing WHERE id=ANY($1)")
+                .bind(outgoing).fetch_all(&mut *self.connection().await?).await? {
+                let body: String = row.get("activity");
+                let announce = serde_json::from_str::<Value>(&body).is_ok_and(|a| a["type"] == "Announce");
+                activities.insert(row.get::<String,_>("id"), Arc::new(Activity { body, announce }));
+            }
+            drop(payload_timer);
+            selection_ms += payload_start.elapsed().as_millis() as u64;
             let deliveries: Vec<_> = heads
                 .into_iter()
-                .map(|head| Delivery {
+                .map(|head| -> Result<Delivery, Failure> { Ok(Delivery {
                     id: head.get("delivery_id"),
                     recipient: head.get("recipient"),
                     attempts: head.get("attempts"),
                     outgoing: head.get("id"),
-                    activity: head.get("activity"),
+                    activity: activities.get(&head.get::<String,_>("id")).cloned().ok_or(Failure(StatusCode::SERVICE_UNAVAILABLE,"Queued activity unavailable."))?,
                     signer: head.get("signer"),
                     user: head.get("user_id"),
                     channel: head.get("channel_id"),
                     purpose: head.get("purpose"),
-                })
-                .collect();
+                }) })
+                .collect::<Result<_,_>>()?;
             let groupable: Vec<_> = deliveries
                 .iter()
                 .filter(|delivery| delivery.groupable())
@@ -1034,7 +1075,7 @@ impl Sender {
 impl Delivery {
     fn groupable(&self) -> bool {
         matches!(self.purpose.as_str(), "relay" | "moderation")
-            && serde_json::from_str::<Value>(&self.activity).is_ok_and(|a| a["type"] == "Announce")
+            && self.activity.announce
     }
 }
 fn now() -> i64 {

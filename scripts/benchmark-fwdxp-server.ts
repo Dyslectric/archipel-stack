@@ -8,14 +8,16 @@ import { Store } from "../src/store.js";
 import { createApp } from "../src/app.js";
 import { PostgresDatabase } from "../src/db.js";
 
-interface Options { instance: number; instances: number; members: number; rooms: number; history: number; profile?: number;
+interface Options { instance: number; instances: number; members: number; rooms: number; roomHost?: number; history: number; profile?: number;
   port: number; database: string; output: string; peerRate: number; inboxRate: number; batch: number; interval: number; concurrency: number;
-  postgresUrl?: string; schema?: string; nativeUrl?: string; nativeSecret?: string; nativeHistory?: number }
+  channelTransport?: string; postgresUrl?: string; schema?: string; nativeUrl?: string; nativeSecret?: string; nativeHistory?: number }
 
 async function serve(o: Options) {
+  const roomHost = (room: number) => o.roomHost ?? room % o.instances;
   if (existsSync(o.database)) throw new Error("Use a fresh fixture database.");
   const origin = `http://127.0.0.1:${o.port}`, issuer = "urn:archipel:development";
   const env = { DEV_AUTH: "true", BASE_URL: origin, HOST: "127.0.0.1", PORT: String(o.port),
+    FEDERATION_CHANNEL_TRANSPORT: o.channelTransport || "stream",
     ADMIN_SUBJECTS: "load-0", REGISTRATION_MODE: "open", FEDERATION_SEND_CONCURRENCY: String(o.concurrency),
     ...(o.postgresUrl ? {DATABASE_URL:o.postgresUrl} : {}) };
   const store = new Store(o.postgresUrl ? new PostgresDatabase(o.postgresUrl,o.schema) : o.database, origin);
@@ -28,7 +30,8 @@ async function serve(o: Options) {
     }
   });
   let app = createApp(loadConfig({ ...env, FEDERATION_SEND_RATE: "1000", FEDERATION_SEND_INTERVAL: "100",
-    FEDERATION_PEER_SEND_RATE: "0", RATE_LIMIT_FEDERATION: "100000" }), store);
+    FEDERATION_PEER_SEND_RATE: "0", RATE_LIMIT_FEDERATION: "100000",
+    ...(o.nativeUrl ? { NATIVE_CHAT_URL: o.nativeUrl, NATIVE_BRIDGE_SECRET: o.nativeSecret! } : {}) }), store);
   let fed = app.locals.federation;
   const admin = store.user(members[0].id), role = store.roles(admin).find(r => r.is_default)!;
   store.updateRole(admin, role.id, { federation_send: true, federation_receive: true,
@@ -37,14 +40,14 @@ async function serve(o: Options) {
   fed.keys();
   const channels = new Map<number, string>(), actors: Record<number, string> = {};
   store.transaction(() => {
-    for (let r = 0; r < o.rooms; r++) if (r % o.instances === o.instance) {
+    for (let r = 0; r < o.rooms; r++) if (roomHost(r) === o.instance) {
       const c = store.createChannel(store.user(members[r].id), { name: `shared-${String(r).padStart(3, "0")}`,
         mode: "timeline", visibility: "members", admission: "open" });
       fed.setChannel(admin, c.id, true);
       channels.set(r, c.id); actors[r] = fed.channelActor(c);
       if(!o.nativeHistory) for (let n = 0; n < o.history; n++) store.post(store.user(members[r].id), c.id, { body: `Shared seed ${n}` });
     }
-    for (let i = 0; i < o.members; i++) if (i % o.rooms % o.instances === o.instance)
+    for (let i = 0; i < o.members; i++) if (roomHost(i % o.rooms) === o.instance)
       store.join(store.user(members[i].id), channels.get(i % o.rooms)!);
   });
   const wire: Record<string, { requests: number; errors: number; maxMs: number; statuses: Record<string, number> }> = {};
@@ -65,6 +68,7 @@ async function serve(o: Options) {
   const schedule = () => {
     if (paused || stopping) return;
     timer = setTimeout(() => {
+      if (o.nativeUrl && !existsSync(join(o.output, "setup.json"))) { schedule(); return; }
       const job: Promise<void> = fed.tick({wait:false}).catch((e: unknown) => console.error(e));
       ticking = job;
       void job.finally(() => { ticking = undefined; schedule(); });
@@ -74,7 +78,7 @@ async function serve(o: Options) {
   schedule();
   let nativeSample: Promise<void> | undefined;
   const stageTimer = setInterval(() => {
-    if (!fed.config.nativeChatUrl || nativeSample || stopping || paused) return;
+    if (!fed.config.nativeChatUrl || nativeSample || stopping || paused || !existsSync(join(o.output, "setup.json"))) return;
     nativeSample = (async () => {
       const response = await fetch(`${fed.config.nativeChatUrl}/health`, {
         headers:{Authorization:`Bearer ${fed.config.nativeBridgeSecret}`},signal:AbortSignal.timeout(10000),
@@ -103,6 +107,8 @@ async function serve(o: Options) {
     telemetry.write(JSON.stringify({ type: "telemetry", time: Date.now(), instance: o.instance, phase,
       rssMB: process.memoryUsage().rss / 1048576, cpuPercent: (used.user + used.system) / ((now - wall) * 10),
       eventLoopP95Ms: delay.percentile(95) / 1e6, streams: app.locals.events.listeners,
+      channelFeed: fed.channelFeed.stats, instanceFeed: fed.channelFeed.instance.stats, instanceCursors: store.db.prepare("SELECT * FROM federation_instance_cursors").all(), channelCursors: store.db.prepare("SELECT * FROM federation_channel_cursors").all(),
+      seedCopies: Number(store.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE body LIKE 'Shared seed %'").get()!.n),
       subscriptions, deliveries, pending: pending.count, oldestPendingMs: pending.oldest ? Date.now() - Number(pending.oldest) : 0,
       wire, deliveryStats: fed.deliveryStats, nativeFederation: fed.nativeStats, nativeChat: app.locals.nativeChat.statistics }) + "\n");
     wall = now; delay.reset();
@@ -137,7 +143,7 @@ async function serve(o: Options) {
       void (async () => {
         const setup = JSON.parse(readFileSync(setupFile, "utf8")) as { actors: Record<number, string> };
         // Use the real actor discovery / signed Follow / Accept path, not fabricated admission rows.
-        for (let i = 0; i < o.members; i++) if (i % o.rooms % o.instances !== o.instance) {
+        for (let i = 0; i < o.members; i++) if (roomHost(i % o.rooms) !== o.instance) {
           const sub = await fed.subscribe(store.user(members[i].id), setup.actors[i % o.rooms]);
           channels.set(i % o.rooms, sub.channel.id);
         }
@@ -150,13 +156,14 @@ async function serve(o: Options) {
       void(async()=>{
         paused=true;clearTimeout(timer);await ticking;
         if(fed.config.nativeChatUrl) await fed.tick({drainOnly:true});
+        await fed.channelFeed.close();
         app.locals.events.close();
         app=createApp(loadConfig({...env,FEDERATION_SEND_RATE:"1000",FEDERATION_SEND_INTERVAL:"100",FEDERATION_PEER_SEND_RATE:"0",RATE_LIMIT_FEDERATION:"100000",
           NATIVE_CHAT_URL:o.nativeUrl!,NATIVE_BRIDGE_SECRET:o.nativeSecret!}),store);
         fed=app.locals.federation;phase="native-history";paused=false;schedule();
         let committed=0;
         // Keep production bounded: each fixture offers two native posts at once.
-        const jobs=[...channels.entries()].filter(([room])=>room%o.instances===o.instance).flatMap(([room,channel])=>Array.from({length:o.history},(_,index)=>({room,channel,index})));
+        const jobs=[...channels.entries()].filter(([room])=>roomHost(room)===o.instance).flatMap(([room,channel])=>Array.from({length:o.history},(_,index)=>({room,channel,index})));
         let next=0;
         await Promise.all(Array.from({length:2},async()=>{
           while(next<jobs.length){const job=jobs[next++],session=sessions[job.room];
@@ -196,14 +203,20 @@ async function serve(o: Options) {
       try { await fed.tick({drainOnly:true}); }
       catch(e) { writeFileSync(join(o.output,`drain-error-${o.instance}.txt`),String(e)); }
     }
+    await fed.channelFeed.close();
     await nativeSample;
     app.locals.events.close(); server.closeAllConnections();
     await new Promise<void>(done => server.close(() => done()));
     writeFileSync(join(o.output, `final-${o.instance}.json`), JSON.stringify({ wire, deliveryStats: fed.deliveryStats,
-      nativeFederation: fed.nativeStats,
+      nativeFederation: fed.nativeStats, channelFeed: fed.channelFeed.stats, instanceFeed: fed.channelFeed.instance.stats, instanceCursors: store.db.prepare("SELECT * FROM federation_instance_cursors").all(),
+      channelCursors: store.db.prepare("SELECT * FROM federation_channel_cursors").all(),
+      channelLogs: store.db.prepare("SELECT * FROM federation_channel_state").all(),
       nativeChat: app.locals.nativeChat.statistics,
       distinctIncomingActivities: store.db.prepare("SELECT COUNT(*) AS count FROM federation_incoming").get()!.count }));
     if(o.postgresUrl) writeFileSync(join(o.output,`snapshot-${o.instance}.json`),JSON.stringify({
+      channelCursors:store.db.prepare("SELECT * FROM federation_channel_cursors").all(),
+      channelLogs:store.db.prepare("SELECT * FROM federation_channel_state").all(),
+      activitySizes:store.db.prepare("SELECT purpose,COUNT(*) AS activities,MIN(octet_length(activity)) AS minimum_bytes,MAX(octet_length(activity)) AS maximum_bytes FROM federation_outgoing GROUP BY purpose").all(),
       messages:store.db.prepare("SELECT body,channel_id FROM messages WHERE body LIKE 'BENCH|%'").all(),
       queues:store.db.prepare("SELECT d.status,o.purpose,COUNT(*) AS count,SUM(d.attempts) AS attempts FROM federation_deliveries d JOIN federation_outgoing o ON o.id=d.activity_id GROUP BY d.status,o.purpose").all(),
       errors:store.db.prepare("SELECT error,COUNT(*) AS count FROM federation_deliveries WHERE error IS NOT NULL GROUP BY error").all(),

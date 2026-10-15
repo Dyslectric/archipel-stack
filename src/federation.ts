@@ -6,6 +6,7 @@ import {
   createPublicKey,
 } from "node:crypto";
 import { standardEmojis } from "./emojis.js";
+import { ChannelFeed, type Checkpoint } from "./channel-feed.js";
 import { WriteBatch } from "./write-batch.js";
 import type { Request } from "express";
 import type { Config } from "./config.js";
@@ -69,12 +70,15 @@ type Delivery = Outgoing & { delivery_id: number; recipient: string; attempts: n
 const time = () => new Date().toISOString();
 
 export class Federation {
+  readonly channelFeed = new ChannelFeed(this);
   private importing = false;
   private busy = false;
   private peerSends = new Map<string, number[]>();
   private rosterAsked = new Map<string, number>();
   private actorRequests = new Map<string, Promise<Doc>>();
   private actorFreshness = new Map<string, { digest: string; at: number }>();
+  private channelBootstraps = new Map<string, { owner: string;
+    job: Promise<{ snapshot: { items: Awaited<ReturnType<Federation["prepareNote"]>>[]; topics: Doc[] }; roster: Doc[] | undefined }> }>();
   private async nativeRequest(operation: string, input: Record<string,unknown>): Promise<Doc> {
     const response=await fetch(`${this.config.nativeChatUrl}/v1/federation/${operation}`,{
       method:"POST",redirect:"error",signal:AbortSignal.timeout(operation === "tick" ? 120000 : 25000),
@@ -243,7 +247,7 @@ export class Federation {
     let data: Doc;
     if (kind === "users") {
       const user = this.store.user(id);
-      const previouslyFederated = !!this.store.db
+      const previouslyFederated = !flags.some(f => user[f]) && !!this.store.db
         .prepare("SELECT 1 FROM federation_outgoing WHERE user_id=? LIMIT 1")
         .get(id);
       if (
@@ -287,6 +291,7 @@ export class Federation {
       ...data,
       fwdxpVersion: 1,
       archipelVersion: 1,
+      ...(this.config.federationChannelTransport !== "off" ? { channelEvents: kind === "channels" ? { version: 1, batches: `${data.id}/events`, stream: `${data.id}/stream`, instanceStream: `${this.config.baseUrl}/federation/stream`, instanceBatches: `${this.config.baseUrl}/federation/events` } : { version: 1 } } : {}),
       inbox: `${this.config.baseUrl}/federation/inbox`,
       outbox: `${data.id}/outbox`,
       publicKey: {
@@ -365,7 +370,7 @@ export class Federation {
       .run(id, document, Date.now()));
     return actor;
   }
-  private async syncAvatar(actor: Doc, refresh = false) {
+  async syncAvatar(actor: Doc, refresh = false) {
     if (actor.type !== "Person") return;
     if (!actor.icon) { this.store.cacheRemoteAvatar(actor.id, null, ""); return; }
     try {
@@ -474,6 +479,10 @@ export class Federation {
     return {
       enabled: this.enabled(),
       sending: this.sending(),
+      channelStreams: { ...this.channelFeed.stats,
+        cursors: this.store.db.prepare("SELECT c.id,c.name,c.remote_actor,p.cursor,p.error,p.retry_at FROM federation_channel_cursors p JOIN channels c ON c.id=p.channel_id").all() },
+      instanceStreams: { ...this.channelFeed.instance.stats,
+        cursors: this.store.db.prepare("SELECT origin,cursor,error,retry_at FROM federation_instance_cursors").all() },
       blocks: this.store.db
         .prepare("SELECT * FROM federation_blocks ORDER BY target")
         .all(),
@@ -624,7 +633,7 @@ export class Federation {
         }
         this.store.db
           .prepare(
-            "UPDATE federation_follows SET status='blocked' WHERE channel_id=?",
+            "UPDATE federation_follows SET status='blocked',stream_start=NULL,stream_capable=0 WHERE channel_id=?",
           )
           .run(id);
       }
@@ -706,11 +715,18 @@ export class Federation {
     followId: string,
     accept: boolean,
   ) {
+    const document = this.store.db.prepare("SELECT document FROM federation_actors WHERE id=?").get(actor);
+    const capable = this.config.federationChannelTransport !== "off" && document && JSON.parse(document.document).channelEvents?.version === 1;
+    const start = this.channelFeed.tail(channel.id);
+    this.store.db.prepare("UPDATE federation_follows SET stream_start=CASE WHEN ?=1 THEN COALESCE(stream_start,?) ELSE NULL END,stream_capable=?,instance_start=CASE WHEN ?=1 THEN COALESCE(instance_start,(SELECT tail FROM federation_instance_state WHERE id=1)) ELSE NULL END WHERE channel_id=? AND actor=?", { notify: false })
+      .run(Number(accept && capable), start, Number(accept && capable), Number(accept && capable), channel.id, actor);
+    const floor = this.store.db.prepare("SELECT stream_start,instance_start FROM federation_follows WHERE channel_id=? AND actor=?").get(channel.id, actor);
     this.queue(
       accept ? "Accept" : "Reject",
       this.channelActor(channel),
       {
         id: followId,
+        ...(accept && capable ? { channelEvents: { version: 1, cursor: Number(floor?.stream_start), instanceCursor: Number(floor?.instance_start) } } : {}),
         type: "Follow",
         actor,
         object: this.channelActor(channel),
@@ -919,7 +935,7 @@ export class Federation {
       );
       this.store.db
         .prepare(
-          "INSERT INTO federation_subscriptions VALUES(?,?,?,'pending') ON CONFLICT(channel_id,user_id) DO UPDATE SET follow_id=excluded.follow_id,status='pending'",
+          "INSERT INTO federation_subscriptions(channel_id,user_id,follow_id,status) VALUES(?,?,?,'pending') ON CONFLICT(channel_id,user_id) DO UPDATE SET follow_id=excluded.follow_id,status='pending',stream_start=NULL",
         )
         .run(channel.id, user.id, follow);
       return {
@@ -952,6 +968,7 @@ export class Federation {
           "UPDATE federation_subscriptions SET status='left' WHERE channel_id=? AND user_id=?",
         )
         .run(id, user.id);
+      this.clearUnusedChannelCursor(id);
       this.store.db
         .prepare("DELETE FROM memberships WHERE channel_id=? AND user_id=?")
         .run(id, user.id);
@@ -990,8 +1007,14 @@ export class Federation {
     userId: string | null,
     channelId: string | null,
   ) {
+    return this.store.transaction(() => {
     const activity: Doc = this.activity(type, actor, object);
-    activity.to = recipients;
+    // A channel announcement addresses the conversation. Its durable recipient
+    // rows determine delivery; expanding them on the wire leaks the roster and
+    // makes an otherwise small update exceed the inbox limit on large channels.
+    // The same immutable body/ID is retained across inboxes and retries.
+    const broadcast = !!channelId && (type === "Announce" || type === "Update" && (object as Doc)?.type === "Group");
+    activity.to = broadcast ? [actor] : recipients;
     this.store.db
       .prepare("INSERT INTO federation_outgoing VALUES(?,?,?,?,?,?,?)")
       .run(
@@ -1003,7 +1026,13 @@ export class Federation {
         purpose,
         Date.now(),
       );
-    const unique = [...new Set(recipients)];
+    let unique = [...new Set(recipients)];
+    if (broadcast) {
+      this.store.db.prepare("INSERT OR IGNORE INTO federation_channel_state(channel_id) VALUES(?)", { notify: false }).run(channelId);
+      const state = this.store.db.prepare("UPDATE federation_channel_state SET tail=tail+1 WHERE channel_id=? RETURNING tail").get(channelId)!;
+      this.store.db.prepare("INSERT INTO federation_channel_events(channel_id,seq,activity_id,created_at) VALUES(?,?,?,?)", { notify: false }).run(channelId, Number(state.tail), activity.id, Date.now());
+      unique = unique.filter(recipient => !this.store.db.prepare("SELECT 1 FROM federation_follows WHERE channel_id=? AND actor=? AND stream_capable=1 AND stream_start IS NOT NULL").get(channelId,recipient));
+    }
     for (let offset = 0; offset < unique.length; offset += 500) {
       const chunk = unique.slice(offset, offset + 500);
       this.store.db.prepare(
@@ -1011,6 +1040,7 @@ export class Federation {
       ).run(...chunk.flatMap(recipient => [activity.id, recipient]));
     }
     return activity.id;
+    });
   }
   private signNote(note: Doc, actor: string): Doc {
     return {
@@ -1117,11 +1147,10 @@ export class Federation {
     const recipients = (
       this.store.db
         .prepare(
-          "SELECT actor FROM federation_follows WHERE channel_id=? AND status='accepted'",
+          "SELECT actor FROM federation_follows WHERE channel_id=? AND status='accepted' AND (stream_capable=0 OR stream_start IS NULL)",
         )
         .all(channel.id) as unknown as { actor: string }[]
     ).map((f) => f.actor);
-    if (!recipients.length) return;
     const object =
       type === "Delete"
         ? {
@@ -2238,16 +2267,17 @@ export class Federation {
       )
       .run(note.id, user.id, this.channelActor(channel), JSON.stringify(note));
   }
-  async receive(req: Request, raw: Buffer) {
+  async receive(req: Request, raw: Buffer, transport?: { sender: Doc; checkpoint: Checkpoint }) {
     if (this.config.nativeChatUrl && !this.config.xmppDomain) {
       await this.store.db.listenExternalChanges();
       const headers: Record<string,string>={};
-      for(const [key,value] of Object.entries(req.headers)) if(typeof value === "string") headers[key]=value;
-      const result=await this.nativeRequest("receive",{headers,method:req.method,target:req.originalUrl,body:raw.toString("base64")});
+      if (!transport) for(const [key,value] of Object.entries(req.headers)) if(typeof value === "string") headers[key]=value;
+      const result=await this.nativeRequest("receive",{headers,method:transport ? "GET" : req.method,target:transport ? "" : req.originalUrl,body:raw.toString("base64"),
+        ...(transport ? { stream: { actor: transport.sender.id, ...transport.checkpoint } } : {}) });
       if(result.supported) { this.nativeStats.received++; this.store.mirrorHooks?.pull(); return; }
       this.nativeStats.unsupported++;
     }
-    const sender = await this.authenticate(req, raw);
+    const sender = transport?.sender || await this.authenticate(req, raw);
     let activity: Doc;
     try {
       activity = JSON.parse(raw.toString());
@@ -2269,6 +2299,7 @@ export class Federation {
     if (previous) {
       if (previous.digest !== hash(raw.toString()))
         throw new Problem(409, "Activity ID reused with different content.");
+      if (transport) await this.writes.run(() => this.store.transaction(() => this.commitChannelCheckpoint(transport.checkpoint)));
       return;
     }
     const object = activity.object;
@@ -2361,18 +2392,44 @@ export class Federation {
       const user = this.store.user(sub.user_id);
       this.require(user, "federation_receive");
       this.require(user, "federation_subscribe");
-      snapshot = await this.snapshot(this.store.channel(sub.channel_id), user);
-      roster = await this.askRoster(this.store.channel(sub.channel_id), user);
+      const channel = this.store.channel(sub.channel_id);
+      const negotiated = object.channelEvents?.version === 1 && Number.isSafeInteger(object.channelEvents.cursor) && object.channelEvents.cursor >= 0;
+      if (object.channelEvents?.version === 1 && !negotiated) throw new Problem(400, "Invalid channel stream admission cursor.");
+      if (negotiated && this.hasChannelConsumer(channel.id, object.channelEvents.cursor)) {
+        snapshot = { items: [], topics: [] };
+      } else if (negotiated) {
+        const bootstrapKey = `${channel.id}:${object.channelEvents.cursor}`;
+        let bootstrap = this.channelBootstraps.get(bootstrapKey);
+        if (!bootstrap) {
+          bootstrap = { owner: user.id,
+            job: (async () => ({ snapshot: await this.snapshot(channel, user), roster: await this.askRoster(channel, user) }))() };
+          this.channelBootstraps.set(bootstrapKey, bootstrap);
+          void bootstrap.job.finally(() => { if (this.channelBootstraps.get(bootstrapKey) === bootstrap) this.channelBootstraps.delete(bootstrapKey); }).catch(() => {});
+        }
+        try { ({ snapshot, roster } = await bootstrap.job); }
+        catch (error) {
+          // One follower's revoked admission must not poison other accepted
+          // followers sharing this peer's initial channel bootstrap.
+          if (bootstrap.owner === user.id) throw error;
+          snapshot = await this.snapshot(channel, user);
+          roster = await this.askRoster(channel, user);
+        }
+      } else {
+        snapshot = await this.snapshot(channel, user);
+        roster = await this.askRoster(channel, user);
+      }
     }
     await this.writes.run(() => this.store.transaction(() => {
       this.ensureEnabled();
       this.allowed(sender.id);
+      if (transport) this.checkChannelCheckpoint(transport.checkpoint);
       const duplicate = this.store.db
         .prepare("SELECT digest FROM federation_incoming WHERE id=?")
         .get(activity.id) as { digest: string } | undefined;
       if (duplicate) {
         if (duplicate.digest !== hash(raw.toString()))
           throw new Problem(409, "Conflicting activity.");
+        if (transport) this.commitChannelCheckpoint(transport.checkpoint);
         return;
       }
       if (channelUpdate) {
@@ -2446,7 +2503,7 @@ export class Federation {
         else
           this.store.db
             .prepare(
-              "INSERT INTO federation_follows VALUES(?,?,?,?) ON CONFLICT(channel_id,actor) DO UPDATE SET follow_id=excluded.follow_id,status=excluded.status",
+              "INSERT INTO federation_follows(channel_id,actor,follow_id,status) VALUES(?,?,?,?) ON CONFLICT(channel_id,actor) DO UPDATE SET follow_id=excluded.follow_id,status=excluded.status,stream_start=CASE WHEN federation_follows.follow_id=excluded.follow_id THEN federation_follows.stream_start ELSE NULL END",
             )
             .run(
               channel.id,
@@ -2502,14 +2559,16 @@ export class Federation {
         if (accepted) {
           this.require(this.store.user(sub.user_id), "federation_subscribe");
           this.require(this.store.user(sub.user_id), "federation_receive");
-          for (const topic of snapshot!.topics)
-            this.importTopic(channel, topic);
-          for (const item of snapshot!.items) this.importNote(channel, item);
+          const bootstrap = object.channelEvents?.version !== 1 || !this.hasChannelConsumer(channel.id, object.channelEvents.cursor);
+          if (bootstrap) {
+            for (const topic of snapshot!.topics) this.importTopic(channel, topic);
+            for (const item of snapshot!.items) this.importNote(channel, item);
+            if (roster) this.keepRoster(channel, roster);
+          }
           this.store.db
             .prepare("INSERT OR IGNORE INTO memberships VALUES(?,?,'member')")
             .run(channel.id, sub.user_id);
           this.store.startReading(sub.user_id, channel.id);
-          if (roster) this.keepRoster(channel, roster);
         } else {
           this.store.db
             .prepare("DELETE FROM memberships WHERE channel_id=? AND user_id=?")
@@ -2521,6 +2580,10 @@ export class Federation {
             "UPDATE federation_subscriptions SET status=? WHERE follow_id=?",
           )
           .run(accepted ? "accepted" : "rejected", object.id);
+        const start = accepted && object.channelEvents?.version === 1 && Number.isSafeInteger(object.channelEvents.cursor) && object.channelEvents.cursor >= 0
+          ? object.channelEvents.cursor : null;
+        this.store.db.prepare("UPDATE federation_subscriptions SET stream_start=?,instance_start=? WHERE follow_id=?", { notify: false }).run(start, start !== null && Number.isSafeInteger(object.channelEvents.instanceCursor) && object.channelEvents.instanceCursor >= 0 ? object.channelEvents.instanceCursor : null, object.id);
+        this.clearUnusedChannelCursor(channel.id);
       } else if (activity.type === "React") {
         const home = `${this.config.baseUrl}/actors/channels/`;
         if (typeof object.channel !== "string" || !object.channel.startsWith(home))
@@ -2575,7 +2638,7 @@ export class Federation {
           .prepare("SELECT * FROM channels WHERE remote_actor=?")
           .get(sender.id) as unknown as Channel | undefined;
         if (!channel) throw new Problem(403, "Unknown remote channel.");
-        const subscriber = this.store.db
+        const subscriber = transport || this.store.db
           .prepare(
             "SELECT 1 FROM federation_subscriptions s JOIN users u ON u.id=s.user_id WHERE s.channel_id=? AND s.status='accepted' AND u.banned=0 AND u.admission_status='approved' AND u.federation_receive=1 AND u.federation_subscribe=1 LIMIT 1",
           )
@@ -2730,8 +2793,84 @@ export class Federation {
       this.store.db
         .prepare("INSERT INTO federation_incoming VALUES(?,?,?)")
         .run(activity.id, hash(raw.toString()), Date.now());
+      if (transport) this.commitChannelCheckpoint(transport.checkpoint);
     }));
     this.store.mirrorHooks?.pull();
+  }
+  channelPageAllowance(recipient: string) {
+    const sends = this.peerAllowance(recipient);
+    if (!sends) return false;
+    sends.push(Date.now()); return true;
+  }
+  channelPeerUrl(value: string) { return this.allowed(value); }
+  channelDeliveryAllowed(outgoing: Outgoing, recipient: string) { this.deliveryAllowed(outgoing, recipient); }
+  private clearUnusedChannelCursor(id: string) {
+    this.store.db.prepare("DELETE FROM federation_channel_cursors WHERE channel_id=? AND NOT EXISTS(SELECT 1 FROM federation_subscriptions s JOIN users u ON u.id=s.user_id WHERE s.channel_id=? AND s.status='accepted' AND s.stream_start IS NOT NULL AND u.banned=0 AND u.admission_status='approved' AND u.federation_receive=1 AND u.federation_subscribe=1)", { notify: false }).run(id, id);
+  }
+  private hasChannelConsumer(id: string, boundary: number) {
+    return !!this.store.db.prepare("SELECT 1 FROM federation_subscriptions s JOIN users u ON u.id=s.user_id WHERE s.channel_id=? AND s.status='accepted' AND s.stream_start IS NOT NULL AND u.banned=0 AND u.admission_status='approved' AND u.federation_receive=1 AND u.federation_subscribe=1 AND MAX(s.stream_start,COALESCE((SELECT cursor FROM federation_channel_cursors WHERE channel_id=s.channel_id),0))>=? LIMIT 1").get(id, boundary);
+  }
+  private checkChannelCheckpoint(checkpoint: Checkpoint) {
+    this.ensureEnabled(); this.allowed(checkpoint.channel);
+    const row = this.store.db.prepare("SELECT c.id,s.stream_start,p.cursor FROM channels c JOIN federation_subscriptions s ON s.channel_id=c.id JOIN users u ON u.id=s.user_id JOIN federation_channel_cursors p ON p.channel_id=c.id WHERE c.remote_actor=? AND s.follow_id=? AND s.status='accepted' AND u.banned=0 AND u.admission_status='approved' AND u.federation_receive=1 AND u.federation_subscribe=1").get(checkpoint.channel, checkpoint.follow);
+    if (!row || row.stream_start == null || !Number.isSafeInteger(checkpoint.after) || !Number.isSafeInteger(checkpoint.cursor) || checkpoint.cursor !== checkpoint.after + 1 || checkpoint.after !== Math.max(Number(row.cursor), Number(row.stream_start)))
+      throw new Problem(409, "Channel consumption checkpoint or admission changed.");
+    return row;
+  }
+  private commitChannelCheckpoint(checkpoint: Checkpoint) {
+    const row = this.checkChannelCheckpoint(checkpoint);
+    this.store.db.prepare("UPDATE federation_channel_cursors SET cursor=?,error=NULL,retry_at=0 WHERE channel_id=?", { notify: false }).run(checkpoint.cursor, row.id);
+  }
+  async receiveChannelEvent(sender: Doc, raw: string | null, checkpoint: Checkpoint) {
+    if (sender.id !== checkpoint.channel || sender.type !== "Group") throw new Problem(403, "Invalid channel stream authority.");
+    if (raw === null) {
+      await this.writes.run(() => this.store.transaction(() => this.commitChannelCheckpoint(checkpoint)));
+      return false;
+    }
+    if (Buffer.byteLength(raw) > 65536) throw new Problem(413, "Channel activity exceeds the inbox limit.");
+    const activity = JSON.parse(raw);
+    if (activity.actor !== sender.id || !(activity.type === "Announce" || activity.type === "Update" && activity.object?.type === "Group" && activity.object.id === sender.id))
+      throw new Problem(403, "Activity does not belong to the authenticated channel stream.");
+    const inner = activity.type === "Announce" ? activity.object : null;
+    const author = inner?.object?.type === "Note" ? inner.object.attributedTo
+      : inner?.type === "React" || inner?.type === "Update" && inner.object?.type === "Person" ? inner.actor : null;
+    if (typeof author === "string") {
+      let denied = false;
+      try { this.allowed(author); } catch (error) { if (error instanceof Problem && error.status === 403) denied = true; else throw error; }
+      const prefix = `${this.config.baseUrl}/actors/users/`;
+      const known = this.store.db.prepare("SELECT banned,admission_status FROM users WHERE remote_actor=? OR (remote_actor IS NULL AND id=?)").get(author, author.startsWith(prefix) ? author.slice(prefix.length) : "");
+      if (denied || known && (Number(known.banned) !== 0 || known.admission_status !== "approved")) {
+        // Local author blocks discard this content, while later allowed authors
+        // continue on the same channel. Channel/follower revocation still stops
+        // consumption through the atomic checkpoint's own admission checks.
+        if (typeof activity.id !== "string" || this.allowed(activity.id).origin !== new URL(sender.id).origin)
+          throw new Problem(403, "Activity authority does not match its channel.");
+        await this.writes.run(() => this.store.transaction(() => {
+          this.checkChannelCheckpoint(checkpoint);
+          const digest = hash(raw), previous = this.store.db.prepare("SELECT digest FROM federation_incoming WHERE id=?").get(activity.id);
+          if (previous && previous.digest !== digest) throw new Problem(409, "Activity ID reused with different content.");
+          if (!previous) this.store.db.prepare("INSERT INTO federation_incoming(id,digest,received_at) VALUES(?,?,?)", { notify: false }).run(activity.id, digest, Date.now());
+          this.commitChannelCheckpoint(checkpoint);
+        }));
+        return false;
+      }
+    }
+    await this.receive(undefined as unknown as Request, Buffer.from(raw), { sender, checkpoint });
+    return true;
+  }
+  /** Common publication policy, evaluated once per shared event, without followers. */
+  channelPublicationAllowed(outgoing: Outgoing) {
+    this.ensureEnabled();
+    const channel = this.store.channel(outgoing.channel_id!);
+    if (!channel.federation_enabled || channel.remote_actor) throw new Problem(403, "Channel federation disabled.");
+    if (!outgoing.user_id) return;
+    const user = this.store.active(outgoing.user_id);
+    if (user.remote_actor) {
+      this.allowed(user.remote_actor);
+      if (this.store.rule(channel.id, user.id) === "block") throw new Problem(403, "Author blocked from channel.");
+    } else if (outgoing.purpose === "relay") {
+      this.require(user, "federation_send"); this.require(user, "federation_post");
+    }
   }
   private deliveryAllowed(outgoing: Outgoing, recipient: string) {
     this.ensureEnabled();
@@ -2855,6 +2994,7 @@ export class Federation {
       const shared = ["relay", "moderation"].includes(delivery.purpose) && JSON.parse(delivery.activity).type === "Announce";
       const followerPolicies=shared?this.followerPolicies(delivery.channel_id!,group.map(row=>row.recipient)):null;
       let commonAuthorized = false;
+      const cancelled: { id: number; error: string }[] = [];
       group = group.filter(row => {
         try {
           if (!shared || !commonAuthorized) {
@@ -2871,9 +3011,15 @@ export class Federation {
           return true;
         }
         catch (error) {
-          this.store.db.prepare("UPDATE federation_deliveries SET status='cancelled',error=? WHERE id=?")
-            .run(String((error as Error).message).slice(0, 200), row.delivery_id);
+          cancelled.push({id:row.delivery_id,error:String((error as Error).message).slice(0,200)});
           return false;
+        }
+      });
+      if (cancelled.length) this.store.transaction(() => {
+        for(let offset=0;offset<cancelled.length;offset+=250) {
+          const chunk=cancelled.slice(offset,offset+250);
+          this.store.db.prepare(`UPDATE federation_deliveries SET status='cancelled',error=CASE id ${chunk.map(()=>"WHEN ? THEN ?").join(" ")} END WHERE id IN (${chunk.map(()=>"?").join(",")}) AND status='pending'`)
+            .run(...chunk.flatMap(row=>[row.id,row.error]),...chunk.map(row=>row.id));
         }
       });
       if (!group.length) return;
@@ -2897,18 +3043,24 @@ export class Federation {
       const problem = error as Problem;
       const permanent = problem instanceof Problem && [400, 401, 403, 404, 409, 410, 413].includes(problem.status);
       const failedAt = Date.now();
-      await this.writes.run(() => this.store.transaction(() => { for (const row of group) {
-        let cancelled = false;
-        try { this.deliveryAllowed(row, row.recipient); } catch { cancelled = true; }
-        this.store.db.prepare(
-          "UPDATE federation_deliveries SET status=?,attempts=attempts+1,next_attempt=?,error=? WHERE id=?",
-        ).run(cancelled ? "cancelled" : permanent || row.attempts >= 11 ? "failed" : "pending",
-          failedAt + Math.min(3600000, 5000 * 2 ** row.attempts),
-          String(problem.message || "Network delivery failed").slice(0, 200), row.delivery_id);
-      } }));
+      await this.writes.run(() => this.store.transaction(() => {
+        const updates=group.map(row=>{
+          let cancelled=false;
+          try { this.deliveryAllowed(row,row.recipient); } catch { cancelled=true; }
+          return {id:row.delivery_id,status:cancelled ? "cancelled" : permanent || row.attempts>=11 ? "failed" : "pending",
+            due:failedAt+Math.min(3600000,5000*2**row.attempts)};
+        });
+        for(let offset=0;offset<updates.length;offset+=250) {
+          const chunk=updates.slice(offset,offset+250);
+          this.store.db.prepare(`UPDATE federation_deliveries SET status=CASE id ${chunk.map(()=>"WHEN ? THEN ?").join(" ")} END,attempts=attempts+1,next_attempt=CASE id ${chunk.map(()=>"WHEN ? THEN CAST(? AS BIGINT)").join(" ")} END,error=? WHERE id IN (${chunk.map(()=>"?").join(",")}) AND status='pending'`)
+            .run(...chunk.flatMap(row=>[row.id,row.status]),...chunk.flatMap(row=>[row.id,row.due]),
+              String(problem.message || "Network delivery failed").slice(0,200),...chunk.map(row=>row.id));
+        }
+      }));
     }
   }
   async tick(options: {wait?:boolean;drainOnly?:boolean} = {}) {
+    await this.channelFeed.sync(options.drainOnly, options.wait === false);
     if (this.busy) return;
     this.busy = true;
     if (this.config.nativeChatUrl) {

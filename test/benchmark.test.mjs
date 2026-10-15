@@ -6,12 +6,63 @@ import { mkdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { histogram, observe, mergeHistogram, summarize } from '../scripts/benchmark-metrics.mjs';
-import { deliveryCoverage } from '../scripts/benchmark-topology.mjs';
+import { deliveryCoverage, memberCounts, roomHost } from '../scripts/benchmark-topology.mjs';
+import { mergeStats } from '../scripts/benchmark-web-group.mjs';
+
+test('listener identities do not inflate the active population or offered delivery count', () => {
+  const options={instances:3,membersPerInstance:[10000,1,1],webMembersPerInstance:[10000,0,0],native:0,rooms:1};
+  const instances=[40,0,0].map(scheduled=>({web:{writes:{scheduled,scheduledByRoom:{0:scheduled}}},native:{writes:{scheduled:0,scheduledByRoom:{}}}}));
+  assert.deepEqual(deliveryCoverage(options,instances),{nativeExpectedFromOfferedPosts:0,webExpectedFromOfferedPosts:400000});
+  const a=histogram(),b=histogram();observe(a,10);observe(b,1000);
+  const merged=mergeStats([{writes:{scheduled:1,latency:a},requests:{POST:{statuses:{201:1}}}},
+    {writes:{scheduled:1,latency:b},requests:{POST:{statuses:{201:1}}}}]);
+  assert.equal(merged.writes.scheduled,2);assert.equal(merged.writes.latency.max,1000);
+  assert.equal(merged.writes.latency.count,2);assert.equal(merged.requests.POST.statuses[201],2);
+});
+
+test('generator shards recover initial connection errors and retain the total rate and original author indices',async t=>{
+  const authors=new Set();let posts=0,eventAttempts=0;
+  const server=createServer((req,res)=>{
+    if(req.url.startsWith('/api/events')){
+      if(++eventAttempts===1){res.writeHead(503);res.end('{}');return;}
+      res.writeHead(200,{'Content-Type':'text/event-stream'});res.write('retry: 2000\n\n');return;
+    }
+    if(req.method==='POST' && req.url.endsWith('/messages')) {
+      let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{
+        authors.add(Number(JSON.parse(body).body.split('|')[4]));posts++;
+        res.writeHead(201,{'Content-Type':'application/json'});res.end('{}');
+      });return;
+    }
+    res.writeHead(200,{'Content-Type':'application/json'});res.end('{"messages":[]}');
+  });
+  await new Promise(done=>server.listen(0,'127.0.0.1',done));
+  t.after(async()=>{server.closeAllConnections();await new Promise(done=>server.close(done));});
+  const worker=fork(resolve('scripts/benchmark-web-group.mjs'),[],{stdio:['ignore','ignore','ignore','ipc']});
+  t.after(()=>{if(worker.exitCode===null)worker.kill();});
+  const until=predicate=>new Promise((done,fail)=>{
+    const timer=setTimeout(()=>{worker.off('message',message);fail(new Error('Shard group timed out'));},20000);
+    const message=row=>{if(predicate(row)){clearTimeout(timer);worker.off('message',message);done(row);}};
+    worker.on('message',message);
+  });
+  const ready=until(row=>row.type==='ready');
+  worker.send({origin:`http://127.0.0.1:${server.address().port}`,worker:0,
+    users:Array.from({length:12},(_,index)=>({index,instance:0,room:0,channel:'room',token:'token',csrf:'csrf'})),
+    options:{users:12,webWorkers:3,connectRetries:2,tag:'shards',ramp:0,bootRamp:0,timeout:2,inflight:8,messageInterval:1,warmup:0,duration:2}});
+  const connected=await ready;assert.equal(connected.connected,12);assert.equal(connected.failures,0);
+  assert.equal(connected.connectionFailures,1);assert.equal(connected.connectionStatuses[503],1);
+  const boot=until(row=>row.type==='telemetry' && row.bootstrapped===12);worker.send({type:'bootstrap'});await boot;
+  worker.send({type:'start',at:Date.now()+100});
+  await new Promise(done=>setTimeout(done,2400));
+  const result=until(row=>row.type==='result');worker.send({type:'stop'});const row=await result;
+  assert.equal(row.stats.writes.scheduled,24);assert.equal(row.stats.writes.successful,24);
+  assert.equal(posts,24);assert.equal(authors.size,12);assert.equal(row.stats.sse.activeAtStop,12);
+  assert.equal(row.stats.sse.failures,1);assert.equal(row.stats.sse.recoveredSetupFailures,1);
+});
 
 test('failed initial reads retry without another SSE notice and preserve failure counts',async t=>{
   let sessionReads=0;
   const server=createServer((req,res)=>{
-    if(req.url==='/api/events') {res.writeHead(200,{'Content-Type':'text/event-stream'});res.write('retry: 2000\n\n');return;}
+    if(req.url.startsWith('/api/events')) {res.writeHead(200,{'Content-Type':'text/event-stream'});res.write('retry: 2000\n\n');return;}
     const failed=req.url==='/api/session' && ++sessionReads===1;
     res.writeHead(failed?503:200,{'Content-Type':'application/json'});res.end(JSON.stringify({messages:[]}));
   });
@@ -41,7 +92,7 @@ test('incremental cursor requests retain bounded metric keys and flush their res
   let stream,sequence=1;
   const urls=[];
   const server=createServer((req,res)=>{
-    if(req.url==='/api/events'){stream=res;res.writeHead(200,{'Content-Type':'text/event-stream'});res.write('retry: 2000\n\n');return;}
+    if(req.url.startsWith('/api/events')){stream=res;res.writeHead(200,{'Content-Type':'text/event-stream'});res.write('retry: 2000\n\n');return;}
     urls.push(req.url);
     const incremental=req.url.startsWith('/api/channels/room/messages?after=');
     res.writeHead(req.method==='POST' && req.url.endsWith('/messages')?201:200,{'Content-Type':'application/json'});
@@ -82,6 +133,21 @@ test('FWDXP expectations include every receiver across three instances with no n
     nativeExpectedFromOfferedPosts: 0, webExpectedFromOfferedPosts: 306 });
 });
 
+test('single-home FWDXP channel accounts for all 3400 receivers with unequal populations', () => {
+  const options = { instances: 8, members: 200, membersPerInstance: [2000, 200, 200, 200, 200, 200, 200, 200],
+    native: 0, rooms: 1, roomHost: 0 };
+  assert.deepEqual(memberCounts(options), options.membersPerInstance);
+  assert.equal(roomHost(options, 0), 0);
+  assert.equal(roomHost({ instances: 8 }, 9), 1);
+  const instances = options.membersPerInstance.map(members => ({
+    web: { writes: { scheduled: members, scheduledByRoom: { 0: members } } },
+    native: { writes: { scheduled: 0, scheduledByRoom: {} } } }));
+  assert.deepEqual(deliveryCoverage(options, instances), {
+    nativeExpectedFromOfferedPosts: 0, webExpectedFromOfferedPosts: 3400 * 3400 });
+  assert.throws(() => memberCounts({ ...options, membersPerInstance: [2000, 200] }));
+  assert.throws(() => memberCounts({ ...options, membersPerInstance: [2000, 200, 200, 200, 200, 200, 200, 0] }));
+});
+
 test('merged latency buckets retain counts and a slow minority in the tail', () => {
   const fast = histogram(), slow = histogram();
   for (let i = 0; i < 90; i++) observe(fast, 10);
@@ -109,8 +175,7 @@ test('fixture, authentication, SSE, HTTP writes/refreshes, reporting and shutdow
   assert.equal(result.totals.writes.scheduled, 32);
   assert.equal(result.totals.writes.successful, 32);
   assert.equal(result.totals.writes.users, 8);
-  assert.ok(result.totals.requests['GET /api/channels/:id/messages'].success > 0);
-  assert.ok(result.totals.requests['POST /api/read'].success > 0);
+  assert.ok(result.totals.sse.deltaMessages > 0, 'live messages arrive without per-message page and read requests');
   assert.ok(result.totals.sse.notices > 0);
   assert.equal(result.totals.sse.failures, 0);
   assert.equal(result.options.users, 8);

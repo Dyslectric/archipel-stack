@@ -15,7 +15,7 @@ function peerAgent(url: URL, address: { address: string; family: number }, heade
   // rechecked before every request; a different address selects a different pool.
   // Discovery, signed reads and POSTs have separate pools so inbox authentication
   // and signed history callbacks cannot deadlock behind each other's connections.
-  const kind = body !== undefined ? "post" : headers.signature ? "signed-read" : "discovery";
+  const kind = headers.accept === "text/event-stream" ? "stream" : body !== undefined ? "post" : headers.signature ? "signed-read" : "discovery";
   const key = `${url.origin}|${address.family}|${address.address}|${kind}`;
   let agent = peerAgents.get(key);
   if (agent) { peerAgents.delete(key); peerAgents.set(key, agent); return agent; }
@@ -23,7 +23,7 @@ function peerAgent(url: URL, address: { address: string; family: number }, heade
     const oldest = peerAgents.keys().next().value!;
     peerAgents.get(oldest)!.destroy(); peerAgents.delete(oldest);
   }
-  const options = { keepAlive: true, maxSockets: 64, maxFreeSockets: 4, timeout: 5000 };
+  const options = { keepAlive: true, maxSockets: kind === "stream" ? 128 : 64, maxFreeSockets: 4, timeout: kind === "stream" ? 0 : 5000 };
   agent = url.protocol === "https:" ? new HttpsAgent(options) : new HttpAgent(options);
   peerAgents.set(key, agent); return agent;
 }
@@ -111,6 +111,8 @@ export async function peerRequest(
   maxBytes = 262144,
   timeoutMs = 15000,
   method?: "GET" | "HEAD",
+  stream?: (response: import("node:http").IncomingMessage) => Promise<void>,
+  signal?: AbortSignal,
 ) {
   peerUrl(url.href, config);
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
@@ -140,7 +142,7 @@ export async function peerRequest(
           family: address.family,
           lookup: (_host, _options, done) =>
             done(null, address.address, address.family),
-          signal: AbortSignal.timeout(timeoutMs),
+          signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
         },
         (response) => {
           if (
@@ -155,6 +157,10 @@ export async function peerRequest(
                 `Peer returned HTTP ${response.statusCode || 502}.`,
               ),
             );
+            return;
+          }
+          if (stream) {
+            stream(response).then(() => resolve({body: Buffer.alloc(0), type: String(response.headers["content-type"] || ""), status: response.statusCode!, headers: response.headers}), reject);
             return;
           }
           const chunks: Buffer[] = [];

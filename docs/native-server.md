@@ -34,7 +34,7 @@ the existing implementation. This preserves features during the port.
 | Incremental refresh | A current authorized snapshot validates the prior 100-message window and author tuple versions; unchanged windows return new rows, while edits, deletion, profile changes and overflow return a complete current window |
 | Overview | Async unread counts, hidden-thread/topic exclusions, blocks, preferences/layout and initial read marks; DM/XMPP accounts retain compatibility |
 | Process pool | Isolated memory, async SQL pools, bounded admission, health checks, worker replacement, child cleanup after supervisor death |
-| Database startup | Embedded PostgreSQL schema initializes empty instances; schema 26–28 upgrades to 29 with a shared startup lock |
+| Database startup | Embedded PostgreSQL schema initializes empty instances; schema 26–29 upgrades to 30 with a shared startup lock |
 | Existing API integration | PostgreSQL commit-time notifications reach all subscribed front ends on the same schema, including when an RPC reply is lost |
 
 FWDXP Accept/history bootstrap, other membership and protocol extensions, XMPP, emoji catalog management,
@@ -169,8 +169,11 @@ Each worker admits at most 128 active/waiting jobs; the supervisor also bounds
 admission by pool size. RPC bodies are limited to 64 KiB, with a 4 MiB supported
 page-response bound. Every worker validates the bridge secret and current session
 and CSRF token. Use the same `DATABASE_URL`, `BASE_URL` and bridge secret as the
-compatibility server. The native service requires the existing migrated
-PostgreSQL schema at version 29 and does not initialize or reinterpret the schema.
+compatibility server. The native service initializes empty PostgreSQL schemas and upgrades schema
+versions 26–29 to version 30 under the shared startup lock. Older schemas require
+the compatibility migrations first. Use the same `FEDERATION_CHANNEL_TRANSPORT`
+setting on both processes. Negotiated broadcasts append to the shared channel
+event log; stream imports commit with their receiver cursors.
 
 ## Build and run
 

@@ -10,6 +10,7 @@ import { createApp } from "../src/app.js";
 import { loadConfig } from "../src/config.js";
 import { Federation } from "../src/federation.js";
 import { Mirrors } from "../src/mirrors.js";
+import { openEvent } from "../src/instance-feed.js";
 import {
   peerUrl,
   publicAddress,
@@ -41,6 +42,7 @@ async function instance(t: TestContext, env: Record<string, string> = {}) {
   const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const config = loadConfig({
     DEV_AUTH: "true",
+    FEDERATION_CHANNEL_TRANSPORT: "off",
     BASE_URL: origin,
     DATABASE_PATH: join(directory, "db.sqlite"),
     ...env,
@@ -55,6 +57,12 @@ async function instance(t: TestContext, env: Record<string, string> = {}) {
     } else liveApp(req, res);
   });
   const fed = app.locals.federation as Federation;
+  const legacy = (value: Federation) => {
+    if (env.TEST_LEGACY_CHANNEL_FEED !== "true") return;
+    const original = value.publicActor.bind(value);
+    value.publicActor = (kind,id) => {const doc=original(kind,id);if(doc.channelEvents){delete doc.channelEvents.instanceStream;delete doc.channelEvents.instanceBatches;}return doc;};
+  };
+  legacy(fed);
   const mirrors = app.locals.mirrors as Mirrors;
   const alice = store.loginIdentity(
     "urn:archipel:development",
@@ -80,13 +88,15 @@ async function instance(t: TestContext, env: Record<string, string> = {}) {
       offline = value;
     },
     restart() {
+      void result.fed.channelFeed.close();
       result.store.close();
       result.store = new Store(config.databasePath, origin);
       liveApp = createApp(config, result.store);
-      result.fed = liveApp.locals.federation as Federation;
+      result.fed = liveApp.locals.federation as Federation; legacy(result.fed);
     },
   };
   t.after(async () => {
+    await result.fed.channelFeed.close();
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     result.store.close();
@@ -118,6 +128,218 @@ function channel(i: Awaited<ReturnType<typeof instance>>, extra = {}) {
   i.fed.setChannel(i.alice, c.id, true);
   return i.store.channel(c.id);
 }
+
+for (const transport of ["batch","stream"] as const) test(`instance ${transport} multiplexes public and private channels with epoch rotation and replay`, async t => {
+  const env={FEDERATION_CHANNEL_TRANSPORT:transport,FEDERATION_PEER_SEND_RATE:"0"};
+  const a=await instance(t,env),b=await instance(t,env),c=await instance(t,env);
+  const publicRoom=channel(a,{name:"public"}),privateRoom=channel(a,{name:"private",visibility:"members",admission:"open"});
+  const pub=await b.fed.subscribe(b.bob,a.fed.channelActor(publicRoom)),priv=await b.fed.subscribe(b.bob,a.fed.channelActor(privateRoom));
+  await drain(a,b);
+  const start=Number(a.store.db.prepare("SELECT tail FROM federation_instance_state").get()!.tail);
+  a.store.post(a.alice,publicRoom.id,{body:"Public multiplexed"});
+  a.store.post(a.alice,privateRoom.id,{body:"Secret multiplexed"});
+  const page=a.fed.channelFeed.instance.page(start), first=page.events.find(e=>e.channel===a.fed.channelActor(privateRoom))!;
+  assert.ok(first.encrypted); assert.equal(first.payload,undefined);assert.ok(!JSON.stringify(first).includes("Secret multiplexed"));
+  const bActor=b.fed.publicActor("users",b.bob.id),key=a.fed.channelFeed.instance.key(bActor,privateRoom.id,first.epoch);
+  assert.match(openEvent(a.origin,first,key.secret).activity!,/Secret multiplexed/);
+  assert.throws(()=>openEvent(a.origin,{...first,channelSeq:first.channelSeq+1},key.secret));
+  assert.throws(()=>openEvent(a.origin,{...first,channel:page.events.find(e=>e.channel!==first.channel)!.channel},key.secret));
+  assert.deepEqual(a.fed.channelFeed.instance.page(start).events,page.events,"all listeners receive the same immutable ciphertext");
+  await b.fed.tick();await waitUntil(()=>b.store.messages(b.bob,priv.channel.id).some(m=>m.body==="Secret multiplexed"));
+  assert.equal(b.store.messages(b.bob,pub.channel.id)[0].body,"Public multiplexed");
+  assert.equal(b.store.db.prepare("SELECT COUNT(*) AS n FROM federation_instance_cursors").get()!.n,1);
+  if(transport==="stream")assert.equal(b.fed.channelFeed.instance.stats.connections,1,"one connection for both channels");
+  const csub=await c.fed.subscribe(c.bob,a.fed.channelActor(privateRoom));await drain(a,b,c);
+  const cActor=c.fed.publicActor("users",c.bob.id);
+  assert.throws(()=>a.fed.channelFeed.instance.key(cActor,privateRoom.id,first.epoch),/epoch/);
+  a.store.post(a.alice,privateRoom.id,{body:"Next epoch"});
+  const second=a.fed.channelFeed.instance.page(page.cursor).events.at(-1)!;
+  assert.ok(second.epoch>first.epoch);assert.throws(()=>openEvent(a.origin,second,key.secret));
+  await b.fed.tick();await c.fed.tick();await waitUntil(()=>c.store.messages(c.bob,csub.channel.id).some(m=>m.body==="Next epoch"));
+  a.fed.decideFollow(a.alice,privateRoom.id,c.fed.userActor(c.bob),"blocked");
+  a.store.post(a.alice,privateRoom.id,{body:"Revoked epoch"});
+  const revoked=a.fed.channelFeed.instance.page(second.seq).events.at(-1)!;
+  assert.ok(revoked.epoch>second.epoch);assert.throws(()=>a.fed.channelFeed.instance.key(cActor,privateRoom.id,revoked.epoch),/denied/);
+  await b.fed.channelFeed.close();b.restart();await b.fed.tick();
+  await waitUntil(()=>b.store.messages(b.bob,priv.channel.id).some(m=>m.body==="Revoked epoch"));
+  assert.equal(b.fed.channelFeed.instance.stats.retries,0);
+});
+
+test("durable instance intake continues while one channel's materializer is stalled", async t=>{
+  const env={FEDERATION_CHANNEL_TRANSPORT:"stream",FEDERATION_PEER_SEND_RATE:"0"};
+  const a=await instance(t,env),b=await instance(t,env),one=channel(a,{name:"one"}),two=channel(a,{name:"two"});
+  const sub1=await b.fed.subscribe(b.bob,a.fed.channelActor(one)),sub2=await b.fed.subscribe(b.bob,a.fed.channelActor(two));await drain(a,b);
+  const actor=b.fed.actor.bind(b.fed);let release!:()=>void;const stalled=new Promise<void>(resolve=>release=resolve);
+  t.mock.method(b.fed,"actor",async(id:string,refresh?:boolean)=>{if(id===a.fed.channelActor(one))await stalled;return actor(id,refresh);});
+  t.after(()=>release());
+  a.store.post(a.alice,one.id,{body:"Waiting on metadata"});a.store.post(a.alice,two.id,{body:"Independent import"});
+  await waitUntil(()=>b.store.messages(b.bob,sub2.channel.id).some(m=>m.body==="Independent import"));
+  assert.ok(b.store.db.prepare("SELECT seq FROM federation_instance_incoming WHERE channel_actor=? AND state='pending'").get(a.fed.channelActor(one)));
+  const cursor=Number(b.store.db.prepare("SELECT cursor FROM federation_instance_cursors").get()!.cursor);
+  assert.ok(cursor>=2);assert.equal(b.store.messages(b.bob,sub1.channel.id).length,0);
+  release();await waitUntil(()=>b.store.messages(b.bob,sub1.channel.id).some(m=>m.body==="Waiting on metadata"));
+  const invalid={type:"InstanceEvents" as const,origin:a.origin,after:cursor,cursor:cursor+2,events:[{seq:cursor+2,channel:a.fed.channelActor(one),channelSeq:2,epoch:1,payload:{activity:null,actors:[]}}]};
+  assert.throws(()=>b.fed.channelFeed.instance.stage(a.origin,invalid),/sequence/);
+  assert.equal(Number(b.store.db.prepare("SELECT cursor FROM federation_instance_cursors").get()!.cursor),cursor);
+});
+
+test("instance blocks rotate private keys and channel deletion leaves a contiguous opaque feed",async t=>{
+  const env={FEDERATION_CHANNEL_TRANSPORT:"batch",FEDERATION_PEER_SEND_RATE:"0"};
+  const a=await instance(t,env),b=await instance(t,env),home=channel(a,{visibility:"members",admission:"open"});
+  await b.fed.subscribe(b.bob,a.fed.channelActor(home));await drain(a,b);
+  a.store.post(a.alice,home.id,{body:"Before instance block"});
+  const first=a.fed.channelFeed.instance.page(0).events.at(-1)!,who=b.fed.publicActor("users",b.bob.id),key=a.fed.channelFeed.instance.key(who,home.id,first.epoch);
+  a.fed.block(a.alice,{kind:"instance",target:b.origin,blocked:true});
+  a.store.post(a.alice,home.id,{body:"After instance block"});
+  const next=a.fed.channelFeed.instance.page(first.seq).events.at(-1)!;
+  assert.ok(next.epoch>first.epoch);assert.throws(()=>openEvent(a.origin,next,key.secret));
+  assert.throws(()=>a.fed.channelFeed.instance.key(who,home.id,next.epoch),/denied/);
+  a.store.deleteChannel(a.alice,home.id);
+  const deleted=a.fed.channelFeed.instance.page(0);assert.deepEqual(deleted.events.map(e=>e.seq),[1,2]);
+  assert.ok(!JSON.stringify(deleted).includes("Before instance block"));
+});
+
+test("instance admission routing stays cached and rejoining recovers an expired origin cursor",async t=>{
+  const env={FEDERATION_CHANNEL_TRANSPORT:"batch",FEDERATION_PEER_SEND_RATE:"0"};
+  const a=await instance(t,env),b=await instance(t,env),home=channel(a),actor=a.fed.channelActor(home);
+  const sub=await b.fed.subscribe(b.bob,actor);await drain(a,b);
+  const prepare=b.store.db.prepare.bind(b.store.db);let routingWrites=0;
+  t.mock.method(b.store.db,"prepare",(sql:string,options?:any)=>{if(sql.startsWith("INSERT OR IGNORE INTO federation_channel_cursors"))routingWrites++;return prepare(sql,options);});
+  await b.fed.tick();await b.fed.tick();assert.equal(routingWrites,0,"unchanged subscriptions do not rebuild channel routing");t.mock.restoreAll();
+  a.store.post(a.alice,home.id,{body:"Before retained horizon"});
+  a.store.db.prepare("UPDATE federation_instance_state SET floor=1").run();
+  await b.fed.tick();assert.match(b.store.db.prepare("SELECT error FROM federation_instance_cursors").get()!.error,/expired/);
+  b.fed.unsubscribe(b.bob,sub.channel.id);await drain(b,a);
+  await b.fed.subscribe(b.bob,actor);await drain(b,a);
+  a.store.post(a.alice,home.id,{body:"After fresh admission"});await b.fed.tick();
+  assert.ok(b.store.messages(b.bob,sub.channel.id).some(m=>m.body==="After fresh admission"));
+  assert.equal(b.store.db.prepare("SELECT error FROM federation_instance_cursors").get()!.error,null);
+});
+
+async function waitUntil(predicate: () => boolean, timeout = 5000) {
+  const end = Date.now() + timeout;
+  while (!predicate()) { if (Date.now() >= end) assert.fail("Channel stream did not settle"); await new Promise(done => setTimeout(done, 25)); }
+}
+for (const transport of ["batch", "stream"] as const) test(`channel ${transport} consumes once per peer, preserves edits/deletes and resumes after restart`, async t => {
+  const env = { TEST_LEGACY_CHANNEL_FEED: "true", FEDERATION_CHANNEL_TRANSPORT: transport, FEDERATION_PEER_SEND_RATE: "0" };
+  const a = await instance(t, env), b = await instance(t, env), c = await instance(t);
+  const home = channel(a), actor = a.fed.channelActor(home);
+  const history = t.mock.method(a.fed, "history", a.fed.history.bind(a.fed));
+  const roster = t.mock.method(a.fed, "roster", a.fed.roster.bind(a.fed));
+  const sub = await b.fed.subscribe(b.bob, actor); await b.fed.subscribe(b.alice, actor);
+  await c.fed.subscribe(c.bob, actor); await drain(a, b, c);
+  assert.equal(history.mock.callCount(), 2, "one initial history fetch per peer, including the legacy follower");
+  assert.equal(roster.mock.callCount(), 2, "one initial roster fetch per peer");
+  const message = a.store.post(a.alice, home.id, { body: "One channel event" });
+  assert.equal(a.store.db.prepare("SELECT COUNT(*) AS n FROM federation_channel_events").get()!.n, 1);
+  const deliveries = a.store.db.prepare("SELECT d.recipient FROM federation_deliveries d JOIN federation_outgoing o ON o.id=d.activity_id WHERE o.purpose='relay'").all();
+  assert.deepEqual(deliveries.map(r => r.recipient), [c.fed.userActor(c.bob)]);
+  await a.fed.tick(); await b.fed.tick();
+  await waitUntil(() => b.store.messages(b.bob, sub.channel.id).some(m => m.body === "One channel event"));
+  assert.equal(b.store.db.prepare("SELECT COUNT(*) AS n FROM federation_channel_cursors").get()!.n, 1);
+  a.store.editMessage(a.alice, message.id, { body: "Edited channel event", expected_edited_at: null });
+  await b.fed.tick(); await waitUntil(() => b.store.messages(b.bob, sub.channel.id)[0].body === "Edited channel event");
+  a.store.deleteMessage(a.alice, message.id);
+  await b.fed.tick(); await waitUntil(() => !!b.store.db.prepare("SELECT deleted_at FROM messages WHERE remote_object=?").get(`${a.origin}/objects/messages/${message.id}`)?.deleted_at);
+  await b.fed.channelFeed.close(); b.restart();
+  a.store.post(a.alice, home.id, { body: "Replay after restart" });
+  await b.fed.tick(); await waitUntil(() => b.store.messages(b.bob, sub.channel.id).some(m => m.body === "Replay after restart"));
+  assert.equal(Number(b.store.db.prepare("SELECT cursor FROM federation_channel_cursors").get()!.cursor), 4);
+  assert.equal(b.store.db.prepare("SELECT COUNT(*) AS n FROM federation_incoming WHERE id IN (SELECT activity_id FROM federation_channel_events)").get()!.n, 0);
+});
+
+test("channel event checkpoints roll back with failed imports, policy skips advance, and old admission cannot resume", async t => {
+  const env = { TEST_LEGACY_CHANNEL_FEED: "true", FEDERATION_CHANNEL_TRANSPORT: "batch", FEDERATION_PEER_SEND_RATE: "0" };
+  const a = await instance(t, env), b = await instance(t, env), home = channel(a), actor = a.fed.channelActor(home);
+  const sub = await b.fed.subscribe(b.bob, actor); await drain(a, b);
+  const message = a.store.post(a.alice, home.id, { body: "Atomic import" });
+  const page = a.fed.channelFeed.page(b.fed.publicActor("users", b.bob.id), home.id, 0), event = page.events[0];
+  const checkpoint = { channel: actor, follow: page.follow, after: 0, cursor: 1 };
+  const original = b.store.db.prepare.bind(b.store.db);
+  t.mock.method(b.store.db, "prepare", (sql: string, options?: any) => {
+    if (sql.startsWith("UPDATE federation_channel_cursors SET cursor=")) throw new Error("Injected checkpoint failure");
+    return original(sql, options);
+  });
+  await assert.rejects(b.fed.receiveChannelEvent(a.fed.publicActor("channels", home.id), event.activity, checkpoint), /Injected/);
+  t.mock.restoreAll();
+  assert.equal(b.store.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE body='Atomic import'").get()!.n, 0);
+  assert.equal(Number(b.store.db.prepare("SELECT cursor FROM federation_channel_cursors").get()!.cursor), 0);
+  await b.fed.tick(); assert.equal(b.store.messages(b.bob, sub.channel.id)[0].body, message.body);
+  a.store.post(a.alice, home.id, { body: "Cancelled by author policy" });
+  grant(a.store, a.alice, a.alice.id, { federation_send: false });
+  await b.fed.tick(); assert.equal(Number(b.store.db.prepare("SELECT cursor FROM federation_channel_cursors").get()!.cursor), 2);
+  assert.equal(b.store.messages(b.bob, sub.channel.id).length, 1);
+  const peer = b.fed.userActor(b.bob);
+  a.fed.decideFollow(a.store.user(a.alice.id), home.id, peer, "blocked");
+  assert.throws(() => a.fed.channelFeed.page(b.fed.publicActor("users", b.bob.id), home.id, 2), /denied/);
+  await drain(a, b); assert.equal(b.store.db.prepare("SELECT COUNT(*) AS n FROM federation_channel_cursors").get()!.n, 0);
+});
+
+test("channel retention reports expired cursors instead of silently losing events", async t => {
+  const env = { TEST_LEGACY_CHANNEL_FEED: "true", FEDERATION_CHANNEL_TRANSPORT: "batch", FEDERATION_PEER_SEND_RATE: "0" };
+  const a = await instance(t, env), b = await instance(t, env), home = channel(a), actor = a.fed.channelActor(home);
+  await b.fed.subscribe(b.bob, actor); await drain(a, b);
+  a.store.post(a.alice, home.id, { body: "Expired event" });
+  a.store.db.prepare("UPDATE federation_channel_state SET floor=1 WHERE channel_id=?").run(home.id);
+  assert.throws(() => a.fed.channelFeed.page(b.fed.publicActor("users", b.bob.id), home.id, 0), (error: unknown) => error instanceof Problem && error.status === 410);
+  await b.fed.tick(); assert.equal(b.fed.channelFeed.stats.gaps, 1);
+  assert.match(b.store.db.prepare("SELECT error FROM federation_channel_cursors").get()!.error, /expired/);
+});
+
+test("channel stream decodes split Unicode with CRLF framing and optional data spacing", async t => {
+  const env = { TEST_LEGACY_CHANNEL_FEED: "true", FEDERATION_CHANNEL_TRANSPORT: "stream", FEDERATION_PEER_SEND_RATE: "0" };
+  const a = await instance(t, env), b = await instance(t, env), home = channel(a), actor = a.fed.channelActor(home);
+  const sub = await b.fed.subscribe(b.bob, actor); await drain(a, b);
+  await b.fed.channelFeed.close(); b.restart();
+  a.store.post(a.alice, home.id, { body: "Split 🦀 stream" });
+  t.mock.method(a.fed.channelFeed, "open", async (...[_req, res, follower, id, after]: Parameters<typeof a.fed.channelFeed.open>) => {
+    const page = a.fed.channelFeed.page(follower, id, after);
+    const frame = Buffer.from(`data:${JSON.stringify(page)}\r\n\r\n`);
+    const at = frame.indexOf(Buffer.from("🦀")) + 2;
+    res.setHeader("Content-Type", "text/event-stream"); res.write(frame.subarray(0, at));
+    await new Promise(done => setTimeout(done, 10)); res.end(frame.subarray(at));
+  });
+  await b.fed.tick(); await waitUntil(() => b.store.messages(b.bob, sub.channel.id).some(m => m.body === "Split 🦀 stream"));
+  assert.equal(Number(b.store.db.prepare("SELECT cursor FROM federation_channel_cursors").get()!.cursor), 1);
+});
+
+test("a local author block skips its channel event without withholding other authors", async t => {
+  const env = { TEST_LEGACY_CHANNEL_FEED: "true", FEDERATION_CHANNEL_TRANSPORT: "batch", FEDERATION_PEER_SEND_RATE: "0" };
+  const a = await instance(t, env), b = await instance(t, env), c = await instance(t, env), home = channel(a), actor = a.fed.channelActor(home);
+  const sub = await b.fed.subscribe(b.bob, actor), authorSub = await c.fed.subscribe(c.bob, actor); await drain(a, b, c);
+  b.fed.block(b.alice, { kind: "actor", target: c.fed.userActor(c.bob), blocked: true });
+  await c.fed.remotePost(c.bob, authorSub.channel.id, { body: "Locally blocked author" });
+  await c.fed.tick();
+  a.store.post(a.alice, home.id, { body: "Allowed author after blocked event" });
+  await b.fed.tick();
+  assert.deepEqual(b.store.messages(b.bob, sub.channel.id).map(m => m.body), ["Allowed author after blocked event"]);
+  assert.equal(Number(b.store.db.prepare("SELECT cursor FROM federation_channel_cursors").get()!.cursor), 2);
+  assert.equal(b.fed.channelFeed.stats.skipped, 1);
+  assert.equal(b.fed.channelFeed.stats.retries, 0);
+});
+
+test("a valid idle channel page clears a recovered network error", async t => {
+  const env = { TEST_LEGACY_CHANNEL_FEED: "true", FEDERATION_CHANNEL_TRANSPORT: "batch", FEDERATION_PEER_SEND_RATE: "0" };
+  const a = await instance(t, env), b = await instance(t, env), home = channel(a);
+  await b.fed.subscribe(b.bob, a.fed.channelActor(home)); await drain(a, b);
+  b.store.db.prepare("UPDATE federation_channel_cursors SET error='Previous network failure',retry_at=0").run();
+  await b.fed.tick();
+  assert.equal(b.store.db.prepare("SELECT error FROM federation_channel_cursors").get()!.error, null);
+});
+
+test("channel retention preserves published actor keys after author grants are revoked", async t => {
+  const env = { TEST_LEGACY_CHANNEL_FEED: "true", FEDERATION_CHANNEL_TRANSPORT: "batch", FEDERATION_PEER_SEND_RATE: "0" };
+  const a = await instance(t, env), b = await instance(t, env), home = channel(a);
+  await b.fed.subscribe(b.bob, a.fed.channelActor(home)); await drain(a, b);
+  a.store.post(a.alice, home.id, { body: "Historical proof" });
+  a.store.db.prepare("UPDATE federation_channel_events SET created_at=?").run(Date.now() - 8 * 86400000);
+  grant(a.store, a.alice, a.alice.id, Object.fromEntries(Object.keys(permissions).map(key => [key, false])));
+  await a.fed.channelFeed.close(); a.restart();
+  a.fed.channelFeed.page(b.fed.publicActor("users", b.bob.id), home.id, 1);
+  assert.equal(a.store.db.prepare("SELECT COUNT(*) AS n FROM federation_channel_events").get()!.n, 0);
+  assert.equal(a.fed.publicActor("users", a.alice.id).id, a.fed.userActor(a.alice));
+  assert.equal(a.store.db.prepare("SELECT COUNT(*) AS n FROM federation_outgoing WHERE user_id=?").get(a.alice.id)!.n, 1);
+});
 
 async function memberApi(i: Awaited<ReturnType<typeof instance>>, username: string, path: string, body: unknown) {
   const login = await fetch(`${i.origin}/api/dev-login`, { method: "POST", headers: { Origin: i.origin, "Content-Type": "application/json" }, body: JSON.stringify({ username }) });
@@ -428,6 +650,20 @@ test("peer discovery reuses its validated connection and rechecks URL policy bef
   await assert.rejects(peerRequest(url, loadConfig({ BASE_URL: "https://production.example", HOST: "0.0.0.0" }),
     { accept: "application/activity+json" }), Problem);
   assert.equal(sockets.size, 1);
+});
+
+test("large channel announcements retain every delivery row without expanding the wire audience", async t => {
+  const a = await instance(t), home = channel(a), actor = a.fed.channelActor(home);
+  a.store.transaction(() => {
+    for (let i = 0; i < 1400; i++) a.store.db.prepare("INSERT INTO federation_follows(channel_id,actor,follow_id,status) VALUES(?,?,?,'accepted')")
+      .run(home.id, `https://large-peer.example/actors/users/${String(i).padStart(36,"0")}`, `follow-${i}`);
+  });
+  a.store.post(a.alice, home.id, { body: "A small message in a large channel" });
+  const row = a.store.db.prepare("SELECT id,activity FROM federation_outgoing WHERE purpose='relay'").get()!;
+  const activity = JSON.parse(String(row.activity));
+  assert.deepEqual(activity.to, [actor]);
+  assert.ok(Buffer.byteLength(String(row.activity)) < 65536);
+  assert.equal(a.store.db.prepare("SELECT COUNT(*) AS n FROM federation_deliveries WHERE activity_id=?").get(row.id)!.n, 1400);
 });
 
 test("shared-inbox consolidation cancels a revoked follower without cancelling an allowed follower", async t => {

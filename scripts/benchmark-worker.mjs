@@ -12,10 +12,14 @@ process.once('message', async ({ origin, users, options, worker }) => {
   let activeWrites = 0, activeReads = 0, cursor = 0;
   const stats = { requests: {}, writes: { scheduled: 0, scheduledByRoom: {}, dropped: 0, successful: 0, failed: 0, users: 0,
     latency: histogram() }, refresh: { started: 0, completed: 0, failed: 0, incrementalPages:0, fullPages:0, latency: histogram() },
-    sse: { opened: 0, active: 0, failures: 0, notices: 0, bytes: 0 },
+    sse: { opened: 0, active: 0, failures: 0, notices: 0, bytes: 0, deltaMessages:0 },
     deliveries: { visible: 0, selfObserved: 0, latency: histogram() }, bootstrapped: 0, bytes: 0,
-    bootstrap: {refreshAttempts:0,failedRefreshes:0,requests:{}} };
+    bootstrap: {refreshAttempts:0,failedRefreshes:0,requests:{},streamAttempts:0,streamFailures:0,streamStatuses:{}} };
   const posted = new Set();
+  // Share the bounded cohort keys between clients on this shard. Counting still
+  // remains per client; this avoids retaining millions of identical strings.
+  const deliveryKeys=new Map();
+  const cohortKey=parts=>{const key=parts.slice(0,6).join('|');let shared=deliveryKeys.get(key);if(shared===undefined){if(deliveryKeys.size>=2048)deliveryKeys.delete(deliveryKeys.keys().next().value);shared=key;deliveryKeys.set(key,shared);}return shared;};
   const pageModes={incremental:0,full:0};
   const measured = at => at >= start && at < end;
   const clients = users.map(user => ({ ...user, connected: false, dirty: 0, full: false,
@@ -69,12 +73,16 @@ process.once('message', async ({ origin, users, options, worker }) => {
     user.metadata ||= !!(notice.all || notice.me || notice.rooms || (notice.channels?.includes(user.channel) && !notice.content));
   }
   function connect(user) {
+    stats.bootstrap.streamAttempts++;
+    let attemptFailures=0;
+    const failed=status=>{attemptFailures++;stats.sse.failures++;stats.bootstrap.streamFailures++;
+      stats.bootstrap.streamStatuses[status]=(stats.bootstrap.streamStatuses[status]||0)+1;};
     return new Promise(resolve => {
       let settled = false, timer;
-      const finish = () => { if (!settled) { settled = true; clearTimeout(timer); resolve(); } };
-      const req = http.get(new URL('/api/events', origin), { agent: streams,
+      const finish = () => { if (!settled) { settled = true; clearTimeout(timer); resolve(attemptFailures); } };
+      const req = http.get(new URL(`/api/events?deltas=1&watch=${encodeURIComponent(user.channel)}`, origin), { agent: streams,
         headers: { Cookie: `archipel=${user.token}` } }, res => {
-        if (res.statusCode !== 200) { stats.sse.failures++; res.resume(); finish(); return; }
+        if (res.statusCode !== 200) { failed(res.statusCode); res.resume(); finish(); return; }
         user.connected = true; stats.sse.opened++; stats.sse.active++;
         let pending = '';
         res.setEncoding('utf8');
@@ -87,6 +95,20 @@ process.once('message', async ({ origin, users, options, worker }) => {
             if (!event.startsWith('data: ')) continue;
             try { const notice = JSON.parse(event.slice(6));
               if (measured(Date.now())) stats.sse.notices++;
+              if(notice.delta?.channel===user.channel && Array.isArray(notice.delta.messages)) {
+                const page=notice.delta;
+                for(const message of page.messages) {
+                  if(measured(Date.now()))stats.sse.deltaMessages++;
+                  if(!message.body?.startsWith(`BENCH|${options.tag}|`))continue;
+                  const parts=message.body.split('|'),due=Number(parts[5]),key=cohortKey(parts);
+                  if(!(due>=start && due<end) || user.seen.has(key))continue;
+                  user.seen.add(key);if(user.seen.size>1000)user.seen.delete(user.seen.values().next().value);
+                  stats.deliveries.visible++;observe(stats.deliveries.latency,Date.now()-due);
+                  if(Number(parts[3])===user.instance && Number(parts[4])===user.index)stats.deliveries.selfObserved++;
+                }
+                user.liveSeq=Math.max(user.liveSeq||0,Number(page.cursor)||0);
+                if(user.nextRead===undefined){const phase=((Math.imul(user.index+1,2654435761)>>>0)%30000);user.nextRead=Date.now()+((phase-Date.now()%30000+30000)%30000 || 30000);}
+              }
               markDirty(user, notice);
             } catch { stats.sse.failures++; }
           }
@@ -98,9 +120,17 @@ process.once('message', async ({ origin, users, options, worker }) => {
         finish();
       });
       sockets.add(req);
-      timer = setTimeout(() => { stats.sse.failures++; req.destroy(); finish(); }, options.timeout * 1000);
-      req.on('error', () => { if (!settled && !stopping) stats.sse.failures++; finish(); });
+      timer = setTimeout(() => { failed('timeout'); req.destroy(); finish(); }, options.timeout * 1000);
+      req.on('error', error => { if (!settled && !stopping) failed(error.code || 'network-error'); finish(); });
     });
+  }
+  async function initialConnect(user) {
+    let failures=0;
+    for(let attempt=0;attempt<=(options.connectRetries||0) && !stopping;attempt++) {
+      failures+=await connect(user);
+      if(user.connected) {stats.sse.recoveredSetupFailures=(stats.sse.recoveredSetupFailures||0)+failures;return;}
+      if(attempt<(options.connectRetries||0))await new Promise(done=>setTimeout(done,2000));
+    }
   }
   async function refresh(user) {
     const epoch = Date.now(), record = measured(epoch), dirtyAt = Math.max(user.dirty, start);
@@ -116,14 +146,14 @@ process.once('message', async ({ origin, users, options, worker }) => {
       if (current) {
         const suffix=!metadata && user.refreshCursor!==undefined && user.refreshStamp
           ? `?after=${user.refreshCursor}&stamp=${encodeURIComponent(user.refreshStamp)}` : '';
-        const [, page] = await Promise.all([metadata ? get(`/api/channels/${user.channel}`) : Promise.resolve(null), get(`/api/channels/${user.channel}/messages${suffix}`)]);
+        const [, page] = await Promise.all([metadata ? get(`/api/channels/${user.channel}?members=0`) : Promise.resolve(null), get(`/api/channels/${user.channel}/messages${suffix}`)]);
         const seq = page.data?.refresh_cursor ?? page.data?.messages?.at(-1)?.seq;
         if(page.ok){user.refreshCursor=page.data?.refresh_cursor;user.refreshStamp=page.data?.refresh_stamp;
           if(page.data?.incremental===true)pageModes.incremental++;else pageModes.full++;
           if(record){if(page.data?.incremental===true)stats.refresh.incrementalPages++;else stats.refresh.fullPages++;}}
         if (options.tag) for (const message of page.data?.messages || []) {
           if (!message.body?.startsWith(`BENCH|${options.tag}|`)) continue;
-          const parts = message.body.split('|'), due = Number(parts[5]), key = parts.slice(0, 6).join('|');
+          const parts = message.body.split('|'), due = Number(parts[5]), key = cohortKey(parts);
           if (!(due >= start && due < end) || user.seen.has(key)) continue;
           user.seen.add(key); if (user.seen.size > 1000) user.seen.delete(user.seen.values().next().value);
           stats.deliveries.visible++; observe(stats.deliveries.latency, Date.now() - due);
@@ -175,6 +205,10 @@ process.once('message', async ({ origin, users, options, worker }) => {
       while (user.nextWrite <= now && user.nextWrite < end) {
         const due = user.nextWrite; user.nextWrite += options.messageInterval * 1000; write(user, due);
       }
+      if(user.nextRead<=now && user.liveSeq>user.marked && activeReads<options.inflight){
+        user.nextRead=now+30000;activeReads++;const seq=user.liveSeq;
+        void request(user,'/api/read','POST',{target:user.channel,seq},now).then(result=>{if(result.ok)user.marked=Math.max(user.marked,seq);}).finally(()=>activeReads--);
+      }
     }
     // Mixed-client runs keep observing the measured cohort during the delivery drain.
     if (now >= end + (options.tag ? options.timeout * 1000 : 0)) return;
@@ -205,9 +239,9 @@ process.once('message', async ({ origin, users, options, worker }) => {
     if (message.type === 'start') {
       start = message.at + options.warmup * 1000; end = start + options.duration * 1000;
       for (const user of clients) {
-        user.nextWrite = message.at + user.index / (options.tag ? clients.length : options.users) * options.messageInterval * 1000;
+        user.nextWrite = message.at + user.index / (options.tag ? (options.scheduleMembers ?? clients.length) : options.users) * options.messageInterval * 1000;
         // Stagger initial boot across warmup instead of an artificial simultaneous login storm.
-        if (!user.booted) setTimeout(() => markDirty(user, { all: true }), Math.max(0, message.at - Date.now()) +
+        if (!options.writeOnly && !user.booted) setTimeout(() => markDirty(user, { all: true }), Math.max(0, message.at - Date.now()) +
           user.index / options.users * options.warmup * 1000);
       }
       running = true;
@@ -230,10 +264,14 @@ process.once('message', async ({ origin, users, options, worker }) => {
   // Ramp socket creation in small batches, without tying ramp speed to response throughput.
   const rampStart = Date.now(), pending = new Set();
   for (let i = 0; i < clients.length; i++) {
+    if(options.writeOnly)break;
     const wait = rampStart + i / clients.length * options.ramp * 1000 - Date.now();
     if (wait > 0) await new Promise(r => setTimeout(r, wait));
-    const promise = connect(clients[i]); pending.add(promise); promise.finally(() => pending.delete(promise));
+    const promise = initialConnect(clients[i]); pending.add(promise); promise.finally(() => pending.delete(promise));
   }
   await Promise.all(pending);
-  process.send?.({ type: 'ready', worker, connected: stats.sse.active, failures: stats.sse.failures });
+  process.send?.({ type: 'ready', worker, connected: stats.sse.active,
+    failures: stats.sse.failures-(stats.sse.recoveredSetupFailures||0),
+    connectionAttempts:stats.bootstrap.streamAttempts,connectionFailures:stats.bootstrap.streamFailures,
+    connectionStatuses:stats.bootstrap.streamStatuses });
 });

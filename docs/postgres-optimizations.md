@@ -1,5 +1,55 @@
 # PostgreSQL performance work
 
+## High-population channel work, October 13
+
+Channel details now join local/remote avatars and the viewer's contact names into
+the roster query. They retain fresh permission checks, aliases, avatar revisions,
+member roles and handle redaction without issuing profile queries for each member.
+A synthetic PostgreSQL roster with 2,000 local members and 1,400 remote followers
+returned identical details using **10 queries instead of 8,210**. One comparison
+read took 55 ms instead of 5.8 seconds. Other correctness tests ran on the same
+workstation, so query count and response equality are the primary evidence;
+these timings do not establish user capacity. The comparison and source hashes
+are in `test-results/fanout-fixes-roster.json`.
+
+Node and native channel announcements now address their channel actor rather
+than copying the entire follower list into every peer's signed body. The durable
+recipient rows, current admissions, blocks, retry order and auditing remain.
+Direct and membership activities retain recipient-specific addressing. Bodies
+and activity IDs remain stable across peers and retries; legacy follower-list
+announcements remain receivable. The public 64 KiB inbox limit is unchanged.
+
+The native sender loads each selected activity once and shares its immutable
+data between recipient jobs, including a precomputed announcement flag.
+Native failure/cancellation writes are set-based; Node writes use bounded CASE
+updates. Individual attempt counts, retry deadlines, permanent failures and
+revocations retain their semantics. Successful completion was already batched.
+Regression tests cover 1,400-recipient payloads, bounded roster queries, personal
+aliases and avatar freshness, and grouped retries/exhaustion/revocation/rejection.
+
+The full eight-instance validation used 2,000 viewers on the channel host and
+200 on each other instance, 100 seed messages, 120 seconds of warmup and 120
+seconds of measurement at 0.1 posts/user/minute. Every replica received the seed
+history, and all 3,400 clients completed initial reads and retained their streams.
+The seed announcements measured 2,538–2,539 bytes, compared with about 107 KB
+before compact addressing; there were no HTTP 413 failures in this run.
+
+**The chat capacity target still failed.** Of 680 scheduled posts, 287 were API
+accepted, 392 failed and one was dropped by the generator. Posting p95 was 20.05
+seconds. Only 16 measured messages were committed on the host by the saved
+snapshot; none reached the replicas. The large host accepted seven of its 400
+offered posts; the smaller instances accepted all 280 remote submissions, which
+remained queued rather than proving home commitment or replica delivery.
+
+Saved PostgreSQL statistics identify recipient queue insertion and successful
+completion updates as the largest SQL costs, averaging about 891 ms per bulk
+insert attempt and 927 ms per completion statement. These statistics include
+warmup and drain, and can include rolled-back attempts. The sender's head-selection
+query also hit its 15-second statement timeout once. This establishes remaining
+queue/foreground contention under this local load, not a complete causal profile.
+Artifacts are in `test-results/fwdxp/2026-10-14T00-04-43-520Z/`, including
+`report.json`, `postgres-statements.json` and `native-stage-summary.json`.
+
 The October 12 changes address PostgreSQL's database round trips directly. The
 SQLite FWDXP load results do not establish PostgreSQL capacity.
 

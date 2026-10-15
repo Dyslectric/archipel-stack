@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 impl State {
     pub async fn receive(&self, input: Authentication) -> Result<(), Failure> {
+        let stream = input.stream.clone();
         let _admission = self.chat.admission.try_acquire().map_err(|_| {
             Failure(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -86,7 +87,14 @@ impl State {
             return Err(Failure::unsupported());
         }
         let authentication_timer = self.chat.timings.time(Stage::InboxAuthentication);
-        let sender = self.authenticate(input).await?;
+        // Only the bearer-authenticated local gateway can supply a checkpoint.
+        // It obtained the frame over a pinned HTTPS connection to this channel.
+        let sender = if let Some(checkpoint) = &stream {
+            if !announce || checkpoint.actor != checkpoint.channel || activity["actor"] != checkpoint.channel {
+                return Err(Failure(StatusCode::FORBIDDEN, "Invalid channel stream authority."));
+            }
+            self.actor(&checkpoint.actor).await?
+        } else { self.authenticate(input).await? };
         drop(authentication_timer);
         let activity_id = string(&activity, "id")?;
         if activity["actor"] != sender["id"] {
@@ -116,6 +124,11 @@ impl State {
                     StatusCode::CONFLICT,
                     "Activity ID reused with different content.",
                 ));
+            }
+            if let Some(checkpoint) = &stream {
+                let mut tx = self.chat.protocol_database.begin().await?;
+                stream_checkpoint(self.config(), &mut tx, checkpoint).await?;
+                tx.commit().await?;
             }
             return Ok(());
         }
@@ -193,6 +206,7 @@ impl State {
             if previous != hash {
                 return Err(Failure(StatusCode::CONFLICT, "Conflicting activity."));
             }
+            if let Some(checkpoint) = &stream { stream_checkpoint(self.config(), &mut tx, checkpoint).await?; tx.commit().await?; }
             return Ok(());
         }
         let enabled: Option<String> = sqlx::query_scalar(
@@ -230,8 +244,12 @@ impl State {
         if sqlx::query("SELECT 1 FROM channel_mirrors WHERE channel_id=$1 UNION ALL SELECT 1 FROM channel_bridges WHERE channel_id=$1 UNION ALL SELECT 1 FROM instance_settings WHERE key='xmpp_domain' AND value<>'' LIMIT 1")
             .bind(&channel_id).fetch_optional(&mut *tx).await?.is_some() { return Err(Failure::unsupported()); }
         if announce {
-            let admitted: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM federation_subscriptions s JOIN users u ON u.id=s.user_id WHERE s.channel_id=$1 AND s.status='accepted' AND u.banned=0 AND u.admission_status='approved' AND u.federation_receive=1 AND u.federation_subscribe=1)")
-                .bind(&channel_id).fetch_one(&mut *tx).await?;
+            // Stream admission is checked by unique Follow ID in the atomic
+            // checkpoint before commit. It must not search local subscribers.
+            let admitted: bool = if stream.is_some() { true } else {
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM federation_subscriptions s JOIN users u ON u.id=s.user_id WHERE s.channel_id=$1 AND s.status='accepted' AND u.banned=0 AND u.admission_status='approved' AND u.federation_receive=1 AND u.federation_subscribe=1)")
+                    .bind(&channel_id).fetch_one(&mut *tx).await?
+            };
             if !admitted {
                 return Err(Failure(
                     StatusCode::FORBIDDEN,
@@ -305,12 +323,12 @@ impl State {
         let mut outgoing = false;
         if !announce {
             let recipients: Vec<String> = sqlx::query_scalar(
-                "SELECT actor FROM federation_follows WHERE channel_id=$1 AND status='accepted'",
+                "SELECT actor FROM federation_follows WHERE channel_id=$1 AND status='accepted' AND (stream_capable=0 OR stream_start IS NULL)",
             )
             .bind(&channel_id)
             .fetch_all(&mut *tx)
             .await?;
-            if !recipients.is_empty() {
+            {
                 let stored: String =
                     sqlx::query_scalar("SELECT document FROM federation_objects WHERE id=$1")
                         .bind(string(note, "id")?)
@@ -347,13 +365,14 @@ impl State {
             .bind(Utc::now().timestamp_millis())
             .execute(&mut *tx)
             .await?;
-        let mut notices = vec![json!({"table":"messages","rows":[{"channel_id":channel_id}]})];
+        let mut notices = vec![json!({"table":"messages","rows":[{"channel_id":channel_id,"object":note["id"]}]})];
         if !note["topic"].is_null() {
             notices.push(json!({"table":"topics","rows":[{"channel_id":channel_id}]}));
         }
         if outgoing {
             notices.push(json!({"table":"federation_outgoing","rows":[{"user_id":user.get::<&str,_>("id")}]}));
         }
+        if let Some(checkpoint) = &stream { stream_checkpoint(self.config(), &mut tx, checkpoint).await?; }
         crate::changes::append(&mut tx, json!(notices)).await?;
         tx.commit().await?;
         Ok(())
@@ -479,8 +498,11 @@ impl State {
         if banned {
             sqlx::query("DELETE FROM federation_follows WHERE channel_id=$1 AND actor=$2 AND status<>'blocked'").bind(key).bind(sender_id).execute(&mut *tx).await?;
         } else {
-            sqlx::query("INSERT INTO federation_follows(channel_id,actor,follow_id,status) VALUES($1,$2,$3,$4) ON CONFLICT(channel_id,actor) DO UPDATE SET follow_id=excluded.follow_id,status=excluded.status").bind(key).bind(sender_id).bind(activity_id).bind(if blocked{"blocked"}else if accept{"accepted"}else{"pending"}).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO federation_follows(channel_id,actor,follow_id,status) VALUES($1,$2,$3,$4) ON CONFLICT(channel_id,actor) DO UPDATE SET follow_id=excluded.follow_id,status=excluded.status,stream_start=CASE WHEN federation_follows.follow_id=excluded.follow_id THEN federation_follows.stream_start ELSE NULL END").bind(key).bind(sender_id).bind(activity_id).bind(if blocked{"blocked"}else if accept{"accepted"}else{"pending"}).execute(&mut *tx).await?;
         }
+        let capable = accept && self.config().channel_transport && sender["channelEvents"]["version"] == 1;
+        let tail: i64 = sqlx::query_scalar("SELECT COALESCE((SELECT tail FROM federation_channel_state WHERE channel_id=$1),0)").bind(key).fetch_one(&mut *tx).await?;
+        let start: Option<i64> = sqlx::query_scalar("UPDATE federation_follows SET stream_start=CASE WHEN $3 THEN COALESCE(stream_start,$4) ELSE NULL END,stream_capable=CASE WHEN $3 THEN 1 ELSE 0 END,instance_start=CASE WHEN $3 THEN COALESCE(instance_start,(SELECT tail FROM federation_instance_state WHERE id=1)) ELSE NULL END WHERE channel_id=$1 AND actor=$2 RETURNING stream_start").bind(key).bind(sender_id).bind(capable).bind(tail).fetch_optional(&mut *tx).await?.flatten();
         if accept || blocked {
             let response = federation::activity(
                 self.config(),
@@ -491,6 +513,7 @@ impl State {
             let id = string(&response, "id")?;
             let mut response = response.clone();
             response["to"] = json!([sender_id]);
+            if capable { let instance_start:i64=sqlx::query_scalar("SELECT instance_start FROM federation_follows WHERE channel_id=$1 AND actor=$2").bind(key).bind(sender_id).fetch_one(&mut *tx).await?; response["object"]["channelEvents"] = json!({"version":1,"cursor":start.unwrap_or(tail),"instanceCursor":instance_start}); }
             sqlx::query("INSERT INTO federation_outgoing(id,activity,signer,user_id,channel_id,purpose,created_at) VALUES($1,$2,$3,NULL,$4,'membership',$5)").bind(id).bind(response.to_string()).bind(object).bind(key).bind(Utc::now().timestamp_millis()).execute(&mut *tx).await?;
             sqlx::query("INSERT INTO federation_deliveries(activity_id,recipient) VALUES($1,$2)")
                 .bind(id)
@@ -956,4 +979,20 @@ fn truncate(value: &str, limit: usize) -> String {
 }
 pub(crate) fn js_trim(value: &str) -> &str {
     value.trim_matches(|c|matches!(c,'\u{0009}'..='\u{000d}'|' '|'\u{00a0}'|'\u{1680}'|'\u{2000}'..='\u{200a}'|'\u{2028}'|'\u{2029}'|'\u{202f}'|'\u{205f}'|'\u{3000}'|'\u{feff}'))
+}
+
+// Admission, imported mutation and durable checkpoint share one transaction.
+async fn stream_checkpoint(config: &crate::Config, tx: &mut Transaction<'_, Postgres>, checkpoint: &crate::outbox::StreamCheckpoint) -> Result<(), Failure> {
+    if checkpoint.after < 0 || checkpoint.cursor != checkpoint.after.checked_add(1).ok_or(bad("Invalid channel checkpoint."))? || checkpoint.actor != checkpoint.channel {
+        return Err(bad("Invalid channel checkpoint."));
+    }
+    let enabled: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM instance_settings WHERE key='federation_enabled' AND value='true')").fetch_one(&mut **tx).await?;
+    if !enabled { return Err(Failure(StatusCode::FORBIDDEN,"Federation is disabled.")); }
+    federation::allowed(config, tx, &checkpoint.channel).await?;
+    let row = sqlx::query("SELECT c.id,s.stream_start,p.cursor FROM channels c JOIN federation_subscriptions s ON s.channel_id=c.id JOIN users u ON u.id=s.user_id JOIN federation_channel_cursors p ON p.channel_id=c.id WHERE c.remote_actor=$1 AND s.follow_id=$2 AND s.status='accepted' AND u.banned=0 AND u.admission_status='approved' AND u.federation_receive=1 AND u.federation_subscribe=1 FOR UPDATE OF p FOR SHARE OF s,u")
+        .bind(&checkpoint.channel).bind(&checkpoint.follow).fetch_optional(&mut **tx).await?.ok_or(Failure(StatusCode::CONFLICT,"Channel consumption admission changed."))?;
+    let start = row.get::<Option<i64>,_>("stream_start").ok_or(bad("Channel stream was not negotiated."))?;
+    if checkpoint.after != row.get::<i64,_>("cursor").max(start) { return Err(Failure(StatusCode::CONFLICT,"Channel consumption checkpoint changed.")); }
+    sqlx::query("UPDATE federation_channel_cursors SET cursor=$1,error=NULL,retry_at=0 WHERE channel_id=$2").bind(checkpoint.cursor).bind(row.get::<&str,_>("id")).execute(&mut **tx).await?;
+    Ok(())
 }

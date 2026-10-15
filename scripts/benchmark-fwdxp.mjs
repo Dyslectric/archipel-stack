@@ -1,35 +1,42 @@
 import { fork, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createServer } from 'node:net';
-import { mkdirSync, writeFileSync, readFileSync, existsSync, unlinkSync, readdirSync, appendFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, unlinkSync, readdirSync, appendFileSync, copyFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import os from 'node:os';
 import { histogram, mergeHistogram, summarize } from './benchmark-metrics.mjs';
-import { deliveryCoverage } from './benchmark-topology.mjs';
+import { deliveryCoverage, memberCounts, roomHost } from './benchmark-topology.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const options = { instances: 3, members: 1000, rooms: 99, history: 10, ramp: 20, bootRamp: 20,
   warmup: 120, duration: 120, messageInterval: 60, inflight: 64, timeout: 20, bootstrapTimeout: 300,
   peerRate: 1000, inboxRate: 2000, batch: 20, interval: 1000, concurrency: 4, profile: 0, postgres:0,nativeChat:0,
-  nativeWorkers: 4, nativePool: 4, nativeHistory: 0, postgresBuffers:128 };
+  nativeWorkers: 4, nativePool: 4, nativeHistory: 0, postgresBuffers:128, channelTransport:"stream", listenerOnlyPeers:0, webWorkers:1,connectRetries:0 };
 const names = { instances: 'instances', members: 'members', rooms: 'rooms', history: 'history', ramp: 'ramp',
   'boot-ramp': 'bootRamp', warmup: 'warmup', duration: 'duration', 'message-interval': 'messageInterval',
   inflight: 'inflight', timeout: 'timeout', 'bootstrap-timeout': 'bootstrapTimeout',
   'peer-rate': 'peerRate', 'inbox-rate': 'inboxRate', batch: 'batch', interval: 'interval', concurrency: 'concurrency', profile: 'profile',postgres:'postgres','native-chat':'nativeChat',
-  'native-workers': 'nativeWorkers', 'native-pool': 'nativePool', 'native-history':'nativeHistory', 'postgres-buffers':'postgresBuffers' };
+  'native-workers': 'nativeWorkers', 'native-pool': 'nativePool', 'native-history':'nativeHistory', 'postgres-buffers':'postgresBuffers',
+  'listener-only-peers':'listenerOnlyPeers','web-workers':'webWorkers','connect-retries':'connectRetries' };
 const args = process.argv.slice(2);
 if (args.includes('--help')) {
   console.log(`Signed FWDXP shared-channel benchmark; no Prosody or native XMPP clients.
 Usage: npm run benchmark:fwdxp -- --instances 3 --members 1000 --rooms 99
-All members are web protocol clients. Rooms are global and must divide evenly across hosts.
+All members are web protocol clients. Rooms are global and divide evenly across hosts by default.
+  --members-per-instance 2000,200,200,200,200,200,200,200 (overrides --members)
+  --room-host 0 (host every room on this zero-based instance; permits a single room)
+  --listener-only-peers 1 (only room-host users connect/post; other instances replicate without web clients)
+  --web-workers 1 (1–32 generator shards per active instance, with the same total offered rate)
+  --connect-retries 0 (0–5 retries for initial SSE connection failures, recorded separately)
 Options: --history 10 --ramp 20 --boot-ramp 20 --warmup 120 --duration 120
   --message-interval 60 --inflight 64 --timeout 20 --bootstrap-timeout 300
   --peer-rate 1000 (deliveries/minute/peer; 0 disables cap) --inbox-rate 2000 (requests/minute/address)
   --batch 20 (deliveries/round) --interval 1000 (milliseconds between rounds)
   --concurrency 4 (independent deliveries in flight; 1–32)
+  --channel-transport stream (off, batch, stream; same durable log for batch and stream)
   --profile 0 (optional CPU profile seconds during measured chat; adds overhead)
   --postgres 1 (isolated PostgreSQL 17 instead of SQLite)
   --native-chat 1 (native Rust chat/auth/overview/FWDXP receipt and delivery; requires --postgres 1 and archipel-native:dev)
@@ -42,21 +49,36 @@ Real signatures/proofs/admission/inbox validation and production queue worker ar
 Exit 0: target met; 2: target missed; 1: harness error.`); process.exit(0);
 }
 for (let i = 0; i < args.length; i += 2) {
+  if (args[i] === '--channel-transport') { options.channelTransport = args[i+1]; if(!['off','batch','stream'].includes(options.channelTransport))throw new Error('Invalid channel transport.'); continue; }
+  if (args[i] === '--members-per-instance') {
+    options.membersPerInstance = (args[i + 1] ?? '').split(',').map(Number); continue;
+  }
+  if (args[i] === '--room-host') {
+    options.roomHost = Number(args[i + 1]); continue;
+  }
   const key = names[args[i]?.replace(/^--/, '')], value = Number(args[i + 1]);
   if (!key || args[i + 1] === undefined || !Number.isFinite(value) || value < 0) throw new Error(`Invalid ${args[i]}`);
   options[key] = value;
 }
 for (const key of ['instances', 'members', 'rooms', 'history', 'inflight', 'peerRate', 'inboxRate', 'batch', 'interval', 'concurrency', 'nativeWorkers', 'nativePool'])
   if (!Number.isSafeInteger(options[key])) throw new Error(`${key} must be an integer`);
-if (options.instances < 2 || options.instances > 16 || options.rooms < options.instances || options.rooms % options.instances ||
-  options.members < options.rooms || options.inflight < 1 || options.batch < 1 || options.batch > 1000 ||
+if (options.roomHost !== undefined && (!Number.isSafeInteger(options.roomHost) || options.roomHost < 0 || options.roomHost >= options.instances)) throw new Error('Invalid room host.');
+if (options.instances < 2 || options.instances > 16 || options.rooms < 1 ||
+  (options.roomHost === undefined && (options.rooms < options.instances || options.rooms % options.instances)) ||
+  options.inflight < 1 || options.batch < 1 || options.batch > 1000 ||
   options.interval < 100 || options.interval > 600000 || options.concurrency < 1 || options.concurrency > 32 || options.inboxRate < 1 || options.duration <= 0 ||
   options.messageInterval <= 0 || options.timeout <= 0 || options.bootstrapTimeout <= 0) throw new Error('Invalid workload counts or pacing.');
 if (![0,1].includes(options.postgres) || ![0,1].includes(options.nativeChat) || (options.nativeChat && !options.postgres)) throw new Error('Native chat requires --postgres 1; backend switches must be 0 or 1.');
 if (options.nativeWorkers < 1 || options.nativeWorkers > 32 || options.nativePool < 2 || options.nativePool > 32) throw new Error('Invalid native process/pool budget.');
 if (![0,1].includes(options.nativeHistory) || (options.nativeHistory && !options.nativeChat)) throw new Error('Native history seeding requires --native-chat 1.');
 if(!Number.isSafeInteger(options.postgresBuffers) || options.postgresBuffers<16 || options.postgresBuffers>8192)throw new Error('Invalid PostgreSQL buffer budget.');
-options.tag = randomBytes(5).toString('hex'); options.users = options.members;
+if(![0,1].includes(options.listenerOnlyPeers) || (options.listenerOnlyPeers && (options.roomHost===undefined || options.rooms!==1)))throw new Error('Listener-only peers require one explicit room host and one room.');
+if(!Number.isSafeInteger(options.webWorkers) || options.webWorkers<1 || options.webWorkers>32)throw new Error('Invalid web generator worker count.');
+if(!Number.isSafeInteger(options.connectRetries) || options.connectRetries<0 || options.connectRetries>5)throw new Error('Invalid initial connection retry count.');
+options.membersPerInstance = memberCounts(options);
+options.webMembersPerInstance=options.membersPerInstance.map((n,i)=>options.listenerOnlyPeers && i!==options.roomHost?0:n);
+const totalMembers = options.webMembersPerInstance.reduce((a, b) => a + b, 0);
+options.tag = randomBytes(5).toString('hex'); options.users = totalMembers;
 options.native = 0; options.schedule = 'uniform-within-each-protocol';
 const output = resolve(root, 'test-results', 'fwdxp', new Date().toISOString().replace(/[:.]/g, '-'));
 mkdirSync(output, { recursive: true });
@@ -146,6 +168,22 @@ async function cleanup() {
       writeFileSync(resolve(output, 'cleanup-warning.txt'), 'Some delivery workers did not confirm a successful drain before shutdown. Inspect post-window snapshot retries separately.\n');
   }
   for (const name of apps) await docker('stop', '--time', '30', name).catch(() => {});
+  // Read final evidence independently of the compatibility connection being tested.
+  // Preserve its snapshot too, so a failed worker cannot silently corrupt counts.
+  if(options.postgres && report.measurement) for(let i=0;i<options.instances;i++) {
+    try {
+      const path=resolve(output,`snapshot-${i}.json`);
+      if(existsSync(path))copyFileSync(path,resolve(output,`app-snapshot-${i}.json`));
+      const schema=`instance_${i}`;
+      const query=`SELECT jsonb_build_object('snapshotSource','independent PostgreSQL read after application shutdown',
+        'messages',(SELECT COALESCE(jsonb_agg(jsonb_build_object('body',body,'channel_id',channel_id)),'[]'::jsonb) FROM ${schema}.messages WHERE body LIKE 'BENCH|${options.tag}|%'),
+        'channelCursors',(SELECT COALESCE(jsonb_agg(to_jsonb(c)),'[]'::jsonb) FROM ${schema}.federation_channel_cursors c),
+        'channelLogs',(SELECT COALESCE(jsonb_agg(to_jsonb(c)),'[]'::jsonb) FROM ${schema}.federation_channel_state c),
+        'queues',(SELECT COALESCE(jsonb_agg(to_jsonb(q)),'[]'::jsonb) FROM (SELECT d.status,o.purpose,COUNT(*) AS count,SUM(d.attempts) AS attempts FROM ${schema}.federation_deliveries d JOIN ${schema}.federation_outgoing o ON o.id=d.activity_id GROUP BY d.status,o.purpose) q),
+        'errors',(SELECT COALESCE(jsonb_agg(to_jsonb(q)),'[]'::jsonb) FROM (SELECT error,COUNT(*) AS count FROM ${schema}.federation_deliveries WHERE error IS NOT NULL GROUP BY error) q));`;
+      writeFileSync(path,await docker('exec',`${prefix}-postgres`,'psql','-U','postgres','-d','archipel','-At','-c',query));
+    } catch(error) { writeFileSync(resolve(output,`snapshot-error-${i}.txt`),String(error)); }
+  }
   for (const name of containers) {
     try { writeFileSync(resolve(output, `${name}.log`), await docker('logs', name)); } catch {}
   }
@@ -166,6 +204,7 @@ const report = { options, output, protocol: 'FWDXP', pass: false,
     ...(options.nativeChat?['FWDXP posting, pages, overview, authentication, plain Note receipt/relay and network delivery use native workers. Membership/history bootstrap and other APIs retain compatibility.']:[]),
     'Signed FWDXP uses supported loopback development HTTP, excluding HTTPS, reverse proxy, Internet latency, browser rendering and OIDC login.',
     'All members are web protocol clients, one shared room per member. No native XMPP connections or XMPP bridges run.',
+    ...(options.listenerOnlyPeers?[`${options.instances-1} remote instances have admission identities and consume real signed channel feeds, with no remote web clients or posting load. Local web population: ${totalMembers}.`]:[]),
     ...(options.nativeHistory?['Real Follow/Accept joins initially empty rooms; Rust then commits and signs/delivers the seed messages to every replica before web startup. Existing-history Accept/bootstrap retains compatibility and is excluded in this setup mode.']:['Real Follow/Accept and signed history bootstrap use faster fixture-only pacing; chat settings are restored before SSE/API bootstrap.']),
     'API acceptance of a remote post means queued submission. Stored home/replica messages and recipient observations are measured separately.',
     'Missing observations have no latency sample; the configured delivery drain is included.' ] };
@@ -173,9 +212,9 @@ try {
   await docker('info', '--format', '{{.ServerVersion}}');
   if (options.nativeChat) report.nativeImage = await docker('image','inspect','--format','{{.Id}}','archipel-native:dev');
   const sources = ['native/Cargo.toml','native/Cargo.lock',...readdirSync(resolve(root,'native/src')).filter(name=>name.endsWith('.rs')).sort().map(name=>`native/src/${name}`),
-    'src/native-chat.ts','src/server.ts','scripts/benchmark-fwdxp-server.ts','src/federation.ts','src/events.ts','src/app.ts','client/chat.ts','scripts/benchmark-fwdxp.mjs','scripts/benchmark-worker.mjs'];
+    'src/instance-feed.ts','migrations/031_instance_feed.sql','migrations/instance-feed.triggers','migrations/instance-feed.pg','src/channel-feed.ts','src/config.ts','src/federation-net.ts','migrations/030_channel_events.sql','src/native-chat.ts','src/store.ts','src/db.ts','src/pg-worker.ts','src/server.ts','scripts/benchmark-fwdxp-server.ts','src/federation.ts','src/events.ts','src/app.ts','client/chat.ts','scripts/benchmark-fwdxp.mjs','scripts/benchmark-topology.mjs','scripts/benchmark-worker.mjs','scripts/benchmark-web-group.mjs'];
   report.sourceSHA256 = Object.fromEntries(sources.map(name=>[name,createHash('sha256').update(readFileSync(resolve(root,name))).digest('hex')]));
-  console.log(`${options.instances} FWDXP instances, ${options.members} active members each, ${options.rooms} shared rooms.\nResults: ${output}`);
+  console.log(`${options.instances} FWDXP instances, ${options.webMembersPerInstance.join('/')} active web members, ${options.instances-1} ${options.listenerOnlyPeers?'listener-only':'other'} peers, ${options.rooms} shared rooms.\nResults: ${output}`);
   await execute(process.execPath, [resolve(root, 'node_modules/typescript/bin/tsc'), '-p', 'tsconfig.build.json'], { cwd: root, timeout: 120000 });
   writeFileSync(resolve(root, 'build/package.json'), readFileSync(resolve(root, 'package.json')));
   mkdirSync(resolve(root, 'build/node_modules'), { recursive: true }); mkdirSync(resolve(root, 'build/migrations'), { recursive: true });
@@ -205,7 +244,7 @@ try {
   }
   for (let i = 0; i < options.instances; i++) {
     const name = `${prefix}-app-${i}`; containers.push(name); apps.push(name);
-    writeFileSync(resolve(output, `input-${i}.json`), JSON.stringify({ ...options, instance: i, port: ports[i],
+    writeFileSync(resolve(output, `input-${i}.json`), JSON.stringify({ ...options, members: options.membersPerInstance[i], instance: i, port: ports[i],
       database: '/tmp/instance.sqlite', output: '/fixture',
       ...(options.postgres?{postgresUrl,schema:`instance_${i}`} : {}),
       ...(options.nativeChat?{nativeUrl:`http://127.0.0.1:${nativePorts[i]}`,nativeSecret}: {}) }));
@@ -216,7 +255,7 @@ try {
       '--mount', `type=bind,src=${output},dst=/fixture`,
       'node:24-bookworm-slim', 'node', 'scripts/benchmark-fwdxp-server.js', `/fixture/input-${i}.json`);
   }
-  await until(() => ports.every((_, i) => json(`ready-${i}.json`)?.type === 'ready'), 180, 'instance seeding');
+  await until(() => ports.every((_, i) => json(`ready-${i}.json`)?.type === 'ready'), options.bootstrapTimeout, 'instance seeding');
   if(options.nativeChat) for(let i=0;i<options.instances;i++) {
     const name=`${prefix}-native-${i}`;containers.push(name);
     await docker('run','--detach','--name',name,'--network',`container:${anchor}`,
@@ -224,7 +263,7 @@ try {
       '--env',`NATIVE_BRIDGE_SECRET=${nativeSecret}`,'--env',`NATIVE_PORT=${nativePorts[i]}`,'--env','NATIVE_HOST=127.0.0.1','--env','DEV_AUTH=true',
       '--env',`NATIVE_WORKERS=${options.nativeWorkers}`,'--env',`NATIVE_DATABASE_POOL=${options.nativePool}`,
       '--env',`FEDERATION_SEND_RATE=${options.batch}`,'--env',`FEDERATION_SEND_CONCURRENCY=${options.concurrency}`,
-      '--env',`FEDERATION_PEER_SEND_RATE=${options.peerRate}`,'archipel-native:dev');
+      '--env',`FEDERATION_PEER_SEND_RATE=${options.peerRate}`,'--env',`FEDERATION_CHANNEL_TRANSPORT=${options.channelTransport}`,'archipel-native:dev');
     let healthy=false;
     for(let attempt=0;attempt<30;attempt++) {
       try { await docker('exec',name,'archipel-chat','--check');healthy=true;break; } catch { await sleep(1000); }
@@ -236,17 +275,17 @@ try {
   writeFileSync(resolve(output, 'setup.json'), JSON.stringify({ actors: Object.assign({}, ...initial.map(row => row.actors)) }));
   await until(() => ports.every((_, i) => json(`ready-${i}.json`)?.type === 'configured'), options.bootstrapTimeout, 'signed subscriptions');
   const fixtures = ports.map((_, i) => json(`ready-${i}.json`));
-  const expected = fixtures.map((row, i) => row.users.filter(u => u.room % options.instances !== i).length);
+  const expected = fixtures.map((row, i) => row.users.filter(u => roomHost(options, u.room) !== i).length);
   await until(() => expected.every((n, i) => {
     const row = last.get(`server-${i}`);
-    return row?.subscriptions.find(s => s.status === 'accepted')?.count === n && row.pending === 0 &&
+    return row && (row.subscriptions.find(s => s.status === 'accepted')?.count ?? 0) === n && row.pending === 0 &&
       !row.deliveries.some(d => ['failed', 'cancelled'].includes(d.status) && d.count > 0);
   }), options.bootstrapTimeout, 'signed Follow/Accept/history completion');
   report.setup.acceptedSubscriptions = expected; report.setup.bootstrap = ports.map((_, i) => last.get(`server-${i}`));
   if(options.nativeHistory) {
     writeFileSync(resolve(output,'start-native-history'),'ready');
     await until(()=>ports.every((_,i)=>json(`history-${i}.json`)),options.bootstrapTimeout,'native history production');
-    await until(()=>ports.every((_,i)=>last.get(`server-${i}`)?.pending===0),options.bootstrapTimeout,'signed native history delivery');
+    await until(()=>ports.every((_,i)=>last.get(`server-${i}`)?.pending===0 && last.get(`server-${i}`)?.seedCopies===options.rooms*options.history),options.bootstrapTimeout,'signed native history delivery');
     writeFileSync(resolve(output,'check-native-history'),'ready');
     await until(()=>ports.every((_,i)=>json(`history-check-${i}.json`)),60,'native history replica checks');
     report.setup.nativeHistory=ports.map((_,i)=>json(`history-check-${i}.json`));
@@ -257,13 +296,25 @@ try {
   report.setup.chatSettings = ports.map((_, i) => json(`settings-${i}.json`));
   console.log(`Signed subscriptions accepted: ${expected.join('/')}; queues drained. Chat settings: ${options.peerRate}/minute/peer, ${options.inboxRate}/minute inbound, ${options.batch}/round every ${options.interval}ms.`);
   await Promise.all(fixtures.map(async (fixture, i) => {
-    const p = fork(resolve(root, 'scripts/benchmark-worker.mjs'), [], { cwd: root, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
+    const users=options.webMembersPerInstance[i]?fixture.users:[];
+    const p = fork(resolve(root, options.webWorkers>1 && users.length>1?'scripts/benchmark-web-group.mjs':'scripts/benchmark-worker.mjs'), [], { cwd: root, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
     workers.push(p); p.on('message', m => { if (m.type === 'telemetry') { const row = { source: `web-${i}`, ...m }; samples.push(row); last.set(row.source, row); } });
-    const ready = waitFor(p, 'ready', (options.ramp + options.timeout + 60) * 1000);
-    p.send({ origin: fixture.origin, users: fixture.users, options, worker: i }); await ready;
+    const ready = waitFor(p, 'ready', (options.ramp + (options.connectRetries+1)*options.timeout + options.connectRetries*2 + 60) * 1000);
+    p.send({ origin: fixture.origin, users, options, worker: i });
+    const connected=await ready;
+    (report.setup.webConnections??=[])[i]=connected;
+    if(connected.connected!==options.webMembersPerInstance[i] || connected.failures)throw new Error(`Instance ${i + 1} failed to open every web stream.`);
   }));
+  const webBootstrapAt=Date.now();
   for (const p of workers) p.send({ type: 'bootstrap' });
-  await until(() => ports.every((_, i) => last.get(`web-${i}`)?.bootstrapped === options.members), options.bootstrapTimeout, 'web initial reads');
+  await until(() => {
+    const rows=ports.map((_,i)=>last.get(`web-${i}`));
+    for(const [i,row] of rows.entries()) {
+      if(row?.time>=webBootstrapAt && row.connected!==options.webMembersPerInstance[i])
+        throw new Error(`Instance ${i + 1} lost web streams during initial reads: ${row.connected}/${options.webMembersPerInstance[i]}.`);
+    }
+    return rows.every((row,i)=>row?.bootstrapped===options.webMembersPerInstance[i]);
+  }, options.bootstrapTimeout, 'web initial reads');
   report.setup.webBootstrapComplete = true;
   if(options.postgres) {
     await docker('exec',`${prefix}-postgres`,'psql','-U','postgres','-d','archipel','-c','CREATE EXTENSION IF NOT EXISTS pg_stat_statements; SELECT pg_stat_statements_reset();');
@@ -312,13 +363,15 @@ try {
     authorsObservedOwnCommittedPost: sum(w => w.deliveries.selfObserved), webObserved: sum(w => w.deliveries.visible),
     streamsAtStop: sum(w => w.sse.activeAtStop), pendingRefreshes: sum(w => w.refresh.pendingAtStop),
     incrementalPages:sum(w=>w.refresh.incrementalPages || 0),fullPages:sum(w=>w.refresh.fullPages || 0),
-    scheduledPostsPerSecond: options.instances * options.members / options.messageInterval,
+    liveDeltaMessages:sum(w=>w.sse.deltaMessages || 0),
+    scheduledPostsPerSecond: totalMembers / options.messageInterval,
     postLatency: summarize(post), visibleLatency: summarize(visible), ...deliveryCoverage(options,
       report.instances.map(row => ({ ...row, native: { writes: { scheduled: 0, scheduledByRoom: {} } } }))) };
   report.classification = 'chat-after-complete-signed-bootstrap';
 } catch (e) {
   report.error = String(e); report.classification = 'harness-or-bootstrap-error';
-  report.setup.webBootstrap=Array.from({length:options.instances},(_,i)=>({bootstrapped:last.get(`web-${i}`)?.bootstrapped,stats:last.get(`web-${i}`)?.bootstrap}));
+  report.setup.webBootstrap=Array.from({length:options.instances},(_,i)=>({connected:last.get(`web-${i}`)?.connected,
+    bootstrapped:last.get(`web-${i}`)?.bootstrapped,stats:last.get(`web-${i}`)?.bootstrap}));
   console.error(e);
 }
 finally {
@@ -343,7 +396,7 @@ finally {
       const seen = new Set(), home = new Set();
       for (const m of messages) {
         const parts = m.body.split('|'), due = Number(parts[5]), key = parts.slice(0, 6).join('|');
-        if (due >= start && due < end) { seen.add(key); if (Number(parts[2]) % options.instances === row.instance) home.add(key); }
+        if (due >= start && due < end) { seen.add(key); if (roomHost(options, Number(parts[2])) === row.instance) home.add(key); }
       }
       const queues = snapshot?snapshot.queues:db.prepare("SELECT d.status,o.purpose,COUNT(*) AS count,SUM(d.attempts) AS attempts FROM federation_deliveries d JOIN federation_outgoing o ON o.id=d.activity_id GROUP BY d.status,o.purpose").all();
       const errors = snapshot?snapshot.errors:db.prepare("SELECT error,COUNT(*) AS count FROM federation_deliveries WHERE error IS NOT NULL GROUP BY error").all();
@@ -351,8 +404,8 @@ finally {
         foreignReplicaCopies: seen.size - home.size, queues, errors };
     });
     const t = report.totals;
-    report.checks = { allStreamsRetained: report.instances.every(r => r.web.sse.activeAtStop === options.members && r.web.sse.failures === 0),
-      allAuthorsOffered: report.instances.every(r => r.web.writes.scheduled >= .99 * options.members * options.duration / options.messageInterval),
+    report.checks = { allStreamsRetained: report.instances.every(r => r.web.sse.activeAtStop === options.webMembersPerInstance[r.instance] && r.web.sse.failures-(r.web.sse.recoveredSetupFailures||0) === 0),
+      allAuthorsOffered: report.instances.every(r => r.web.writes.scheduled >= .99 * options.webMembersPerInstance[r.instance] * options.duration / options.messageInterval),
       apiAccepted99Percent: t.webAccepted >= .99 * t.scheduled, noGeneratorDrops: t.generatorDropped === 0,
       ownCommittedPostsObserved99Percent: t.authorsObservedOwnCommittedPost >= .99 * t.scheduled,
       recipientObservations99Percent: t.webObserved >= .99 * t.webExpectedFromOfferedPosts,
@@ -363,20 +416,20 @@ finally {
     if(options.nativeChat) {
       report.nativeChat=Array.from({length:options.instances},(_,i)=>json(`final-${i}.json`)?.nativeChat);
       report.nativeFederation=Array.from({length:options.instances},(_,i)=>json(`final-${i}.json`)?.nativeFederation);
-      report.checks.nativeFederationExercised=report.nativeFederation.every(s=>s && s.received>0 && s.ticks>0 && s.unsupported===0);
+      report.checks.nativeFederationExercised=report.nativeFederation.every((s,i)=>s && (s.received>0 || (options.listenerOnlyPeers && i===options.roomHost)) && s.ticks>0 && s.unsupported===0);
       report.checks.nativeSenderNoErrors=report.nativeFederation.every(s=>s && s.senderErrors===0);
-      report.checks.nativePathsExercised=report.nativeChat.every(s=>s && s.posts>0 && s.pages>0 && s.overviews>0 && s.sessions>0 && s.unsupported===0 && s.errors===0);
-      report.checks.incrementalPagesExercised=t.incrementalPages>0;
+      report.checks.nativePathsExercised=report.nativeChat.every((s,i)=>s && (!options.webMembersPerInstance[i] || (s.posts>0 && s.pages>0 && s.overviews>0 && s.sessions>0)) && s.unsupported===0 && s.errors===0);
+      report.checks.incrementalDeliveryExercised=t.incrementalPages>0 || t.liveDeltaMessages>0;
       report.pass=Object.values(report.checks).every(Boolean);
     }
   }
   writeFileSync(resolve(output, 'report.json'), JSON.stringify(report, null, 2) + '\n');
   const t = report.totals, ms = n => n === null ? 'n/a' : `${n.toFixed(1)} ms`;
   const markdown = `# FWDXP shared-channel benchmark\n\n${report.pass ? 'PASS' : 'TARGET NOT MET'}; ${report.classification}\n\n` +
-    `${options.instances} instances × ${options.members} active web members; ${options.rooms} shared rooms; ${options.instances * options.members / options.messageInterval} scheduled posts/second.\n\n` +
+    `${options.instances} instances with ${options.webMembersPerInstance.join('/')} active web members (${totalMembers} total)${options.listenerOnlyPeers?`; ${options.instances-1} listener-only peers`:''}; ${options.rooms} shared rooms${options.roomHost === undefined ? '' : ` hosted on instance ${options.roomHost + 1}`}; ${totalMembers / options.messageInterval} scheduled posts/second.\n\n` +
     `Chat pacing: ${options.peerRate} deliveries/minute/peer, ${options.inboxRate} inbound requests/minute/address, ${options.batch} deliveries/round with ${options.interval} ms between completed rounds; ${options.concurrency} independent deliveries in flight.\n\n` +
     (t ? `| Metric | Result |\n|---|---:|\n| Scheduled posts | ${t.scheduled} |\n| API accepted / failed / generator dropped | ${t.webAccepted} / ${t.webFailed} / ${t.generatorDropped} |\n` +
-      `| Streams retained | ${t.streamsAtStop} / ${options.instances * options.members} |\n| Authors observing their committed posts | ${t.authorsObservedOwnCommittedPost} / ${t.scheduled} |\n` +
+      `| Streams retained | ${t.streamsAtStop} / ${totalMembers} |\n| Authors observing their committed posts | ${t.authorsObservedOwnCommittedPost} / ${t.scheduled} |\n` +
       `| Recipient observations | ${t.webObserved} / ${t.webExpectedFromOfferedPosts} (${(100 * t.webObserved / t.webExpectedFromOfferedPosts).toFixed(2)}%) |\n` +
       `| API posting p95 | ${ms(t.postLatency.p95Ms)} |\n| Observed visibility p95 | ${ms(t.visibleLatency.p95Ms)} |\n` +
       `| Committed copies per instance | ${report.replication.map(r => r.committedCopies ?? 'missing').join(' / ')}; ${t.scheduled} expected each |\n\n` : '') +

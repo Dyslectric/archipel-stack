@@ -705,10 +705,14 @@ const sections: Section[] = [
     async draw(el) {
       const status = await api<{
         recent: { recipient: string; status: string; error: string | null }[];
+        channelStreams?: { cursors: { id: string; name: string; error: string | null }[] };
       }>("/admin/federation");
       el.innerHTML = status.recent.length
         ? `<table class="list"><thead><tr><th>Status</th><th>Recipient</th><th>Error</th></tr></thead><tbody>${status.recent.map((d) => `<tr><td><span class="pill ${d.status === "delivered" ? "good" : d.error ? "bad" : "warn"}">${esc(d.status)}</span></td><td><code>${esc(d.recipient)}</code></td><td class="muted">${esc(d.error || "")}</td></tr>`).join("")}</tbody></table>`
         : '<p class="card empty muted">No queued deliveries yet.</p>';
+      const streams = status.channelStreams?.cursors || [];
+      if (streams.length) el.innerHTML += card("Channel synchronization",
+        `<table class="list"><thead><tr><th>Channel</th><th>Status</th></tr></thead><tbody>${streams.map(c => `<tr><td><a href="#/c/${esc(c.id)}">${esc(c.name)}</a></td><td>${c.error ? `<span class="bad">${esc(c.error)}</span>` : "No synchronization error"}</td></tr>`).join("")}</tbody></table>`);
     },
   },
   {

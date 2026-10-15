@@ -47,7 +47,7 @@ pub async fn read(
               WHERE p.user_id=$1 AND p.target='topic:'||m.topic_id AND p.hidden=1))
           ) n WHERE n.n>0
         ) SELECT jsonb_build_object(
-          'dms','[]'::jsonb,'unread',COALESCE((SELECT jsonb_object_agg(channel_id,n) FROM unread),'{}'::jsonb),
+          'dms','[]'::jsonb,'message_cursor',(SELECT seq FROM latest),'unread',COALESCE((SELECT jsonb_object_agg(channel_id,n) FROM unread),'{}'::jsonb),
           'prefs',COALESCE((SELECT jsonb_object_agg(target,jsonb_build_object('hidden',hidden!=0,'notify',
             CASE WHEN notify IS NULL THEN 'null'::jsonb WHEN notify=2 THEN to_jsonb('mentions'::text) ELSE to_jsonb(notify!=0) END))
             FROM conversation_prefs WHERE user_id=$1),'{}'::jsonb),

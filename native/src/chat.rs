@@ -98,8 +98,8 @@ impl State {
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        if version != Some(29) {
-            return Err("Native chat requires the migrated schema version 29".into());
+        if version != Some(31) {
+            return Err("Native chat requires the migrated schema version 31".into());
         }
         crate::queue_heads::initialize(&database).await?;
         if config.connections < 2 {
@@ -410,7 +410,7 @@ async fn execute(
             // Channel readers are notified when the home actually commits it.
             vec![]
         } else {
-            vec![json!({"table":"messages","rows":[{"channel_id":job.channel}]})]
+            vec![json!({"table":"messages","rows":[{"channel_id":job.channel,"id":result.get("id")} ]})]
         };
         if outgoing {
             changes.push(json!({"table":"federation_outgoing","rows":[{"user_id":id}]}));

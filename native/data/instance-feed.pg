@@ -1,0 +1,58 @@
+CREATE OR REPLACE FUNCTION instance_feed_append() RETURNS trigger LANGUAGE plpgsql AS $body$
+DECLARE next_seq BIGINT;
+BEGIN
+  UPDATE federation_instance_state SET tail=tail+1 WHERE id=1 RETURNING tail INTO next_seq;
+  INSERT INTO federation_instance_events(seq,channel_id,channel_seq,activity_id,created_at,public,epoch)
+    SELECT next_seq,NEW.channel_id,NEW.seq,NEW.activity_id,NEW.created_at,CASE WHEN c.visibility='public' THEN 1 ELSE 0 END,COALESCE(e.epoch,1)
+      FROM channels c LEFT JOIN federation_channel_epochs e ON e.channel_id=c.id WHERE c.id=NEW.channel_id;
+  RETURN NEW;
+END $body$;
+DROP TRIGGER IF EXISTS instance_feed_append ON federation_channel_events;
+CREATE TRIGGER instance_feed_append AFTER INSERT ON federation_channel_events FOR EACH ROW EXECUTE FUNCTION instance_feed_append();
+CREATE OR REPLACE FUNCTION instance_feed_epoch() RETURNS trigger LANGUAGE plpgsql AS $body$
+DECLARE channel_key TEXT;
+BEGIN
+  IF TG_TABLE_NAME='channels' THEN channel_key:=NEW.id;
+  ELSIF TG_OP='DELETE' THEN channel_key:=OLD.channel_id;
+  ELSE channel_key:=NEW.channel_id;
+  END IF;
+  IF NOT EXISTS(SELECT 1 FROM channels WHERE id=channel_key) THEN RETURN NULL; END IF;
+  INSERT INTO federation_channel_epochs(channel_id,epoch) VALUES(channel_key,1)
+    ON CONFLICT(channel_id) DO UPDATE SET epoch=federation_channel_epochs.epoch+1;
+  IF TG_TABLE_NAME='federation_follows' AND TG_OP<>'DELETE' THEN
+    IF NEW.status='accepted' THEN
+      UPDATE federation_follows SET key_epoch=(SELECT epoch FROM federation_channel_epochs WHERE channel_id=channel_key) WHERE channel_id=channel_key AND actor=NEW.actor;
+    END IF;
+  END IF;
+  RETURN NULL;
+END $body$;
+DROP TRIGGER IF EXISTS instance_feed_follow_insert ON federation_follows;
+CREATE TRIGGER instance_feed_follow_insert AFTER INSERT OR DELETE ON federation_follows FOR EACH ROW EXECUTE FUNCTION instance_feed_epoch();
+DROP TRIGGER IF EXISTS instance_feed_follow_update ON federation_follows;
+CREATE TRIGGER instance_feed_follow_update AFTER UPDATE OF status,follow_id ON federation_follows FOR EACH ROW WHEN(OLD.status IS DISTINCT FROM NEW.status OR OLD.follow_id IS DISTINCT FROM NEW.follow_id) EXECUTE FUNCTION instance_feed_epoch();
+DROP TRIGGER IF EXISTS instance_feed_privacy ON channels;
+CREATE TRIGGER instance_feed_privacy AFTER UPDATE OF visibility,federation_enabled ON channels FOR EACH ROW WHEN(OLD.visibility IS DISTINCT FROM NEW.visibility OR OLD.federation_enabled IS DISTINCT FROM NEW.federation_enabled) EXECUTE FUNCTION instance_feed_epoch();
+DROP TRIGGER IF EXISTS instance_feed_rule ON channel_rules;
+CREATE TRIGGER instance_feed_rule AFTER INSERT OR UPDATE OR DELETE ON channel_rules FOR EACH ROW EXECUTE FUNCTION instance_feed_epoch();
+CREATE OR REPLACE FUNCTION instance_feed_user_policy() RETURNS trigger LANGUAGE plpgsql AS $body$
+BEGIN
+  INSERT INTO federation_channel_epochs(channel_id,epoch)
+    SELECT channel_id,1 FROM federation_follows WHERE actor=NEW.remote_actor AND status='accepted'
+    ON CONFLICT(channel_id) DO UPDATE SET epoch=federation_channel_epochs.epoch+1;
+  RETURN NULL;
+END $body$;
+DROP TRIGGER IF EXISTS instance_feed_user_policy ON users;
+CREATE TRIGGER instance_feed_user_policy AFTER UPDATE OF banned,admission_status,federation_receive,federation_subscribe ON users FOR EACH ROW EXECUTE FUNCTION instance_feed_user_policy();
+CREATE OR REPLACE FUNCTION instance_feed_block() RETURNS trigger LANGUAGE plpgsql AS $body$
+DECLARE blocked_target TEXT;
+BEGIN
+  IF TG_OP='DELETE' THEN blocked_target:=OLD.target; ELSE blocked_target:=NEW.target; END IF;
+  INSERT INTO federation_channel_epochs(channel_id,epoch)
+    SELECT DISTINCT channel_id,1 FROM federation_follows WHERE status='accepted' AND (actor=blocked_target OR actor LIKE blocked_target||'/%')
+    ON CONFLICT(channel_id) DO UPDATE SET epoch=federation_channel_epochs.epoch+1;
+  RETURN NULL;
+END $body$;
+DROP TRIGGER IF EXISTS instance_feed_block ON federation_blocks;
+CREATE TRIGGER instance_feed_block AFTER INSERT OR UPDATE OR DELETE ON federation_blocks FOR EACH ROW EXECUTE FUNCTION instance_feed_block();
+DROP TRIGGER IF EXISTS instance_feed_channel_ban ON channel_instance_bans;
+CREATE TRIGGER instance_feed_channel_ban AFTER INSERT OR UPDATE OR DELETE ON channel_instance_bans FOR EACH ROW EXECUTE FUNCTION instance_feed_epoch();

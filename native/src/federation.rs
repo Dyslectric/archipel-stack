@@ -287,14 +287,29 @@ pub async fn queue(
     user: &str,
     channel: &str,
 ) -> Result<(), Failure> {
-    activity["to"] = json!(recipients);
+    // Channel announcements have a stable conversation audience. Delivery rows
+    // retain the individual recipients, without expanding the wire body per user.
+    let broadcast = activity["type"] == "Announce" || activity["type"] == "Update" && activity["object"]["type"] == "Group";
+    activity["to"] = if broadcast {
+        json!([activity["actor"]])
+    } else {
+        json!(recipients)
+    };
     let id = activity["id"].as_str().ok_or_else(signing_error)?;
     sqlx::query("INSERT INTO federation_outgoing(id,activity,signer,user_id,channel_id,purpose,created_at) VALUES($1,$2,$3,$4,$5,$6,$7)")
         .bind(id).bind(activity.to_string()).bind(activity["actor"].as_str().ok_or_else(signing_error)?)
         .bind(user).bind(channel).bind(purpose).bind(chrono::Utc::now().timestamp_millis()).execute(&mut **tx).await?;
-    // One bounded bulk query, retaining one retry/audit row per recipient.
-    sqlx::query("INSERT INTO federation_deliveries(activity_id,recipient) SELECT $1,recipient FROM unnest($2::text[]) AS recipient ON CONFLICT(activity_id,recipient) DO NOTHING")
-        .bind(id).bind(recipients).execute(&mut **tx).await?;
+    if broadcast {
+        sqlx::query("INSERT INTO federation_channel_state(channel_id) VALUES($1) ON CONFLICT DO NOTHING").bind(channel).execute(&mut **tx).await?;
+        // The tail row serializes sequence allocation with transaction commit,
+        // so a later committed event never overtakes an uncommitted earlier one.
+        let seq: i64 = sqlx::query_scalar("UPDATE federation_channel_state SET tail=tail+1 WHERE channel_id=$1 RETURNING tail").bind(channel).fetch_one(&mut **tx).await?;
+        sqlx::query("INSERT INTO federation_channel_events(channel_id,seq,activity_id,created_at) VALUES($1,$2,$3,$4)").bind(channel).bind(seq).bind(id).bind(chrono::Utc::now().timestamp_millis()).execute(&mut **tx).await?;
+    }
+    // Negotiated channel consumers retain admission rows, without per-event
+    // follower delivery rows. Legacy and individual activities retain retries.
+    sqlx::query("INSERT INTO federation_deliveries(activity_id,recipient) SELECT $1,recipient FROM unnest($2::text[]) AS recipient WHERE NOT($3 AND EXISTS(SELECT 1 FROM federation_follows f WHERE f.channel_id=$4 AND f.actor=recipient AND f.stream_capable=1 AND f.stream_start IS NOT NULL)) ON CONFLICT(activity_id,recipient) DO NOTHING")
+        .bind(id).bind(recipients).bind(broadcast).bind(channel).execute(&mut **tx).await?;
     let _ = config;
     Ok(())
 }

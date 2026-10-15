@@ -29,6 +29,8 @@ import {
   chatChannel,
   redrawChat,
   refreshCurrent,
+  applyMessageDelta,
+  adoptMessageOverview,
   resetChat,
   showChat,
   fusionToolbarHtml,
@@ -73,6 +75,7 @@ async function loadOverview() {
   state.dms = overview.dms;
   state.userBlocks = overview.user_blocks;
   state.unread = { ...overview.unread };
+  adoptMessageOverview(overview.message_cursor);
   for (const c of overview.dms)
     if (c.unread) state.unread[`dm:${c.peer}`] = c.unread;
   adoptLayout(overview.layout);
@@ -381,7 +384,8 @@ function connection(up: boolean) {
 }
 // ---- keeping up: the server says when something on screen may have changed, and the page
 // looks again at what the notice names ----
-type Notice = { all?: true; me?: true; admin?: true; channels?: string[]; read?: true; rooms?: true; content?: true; sending?: true };
+type Notice = { all?: true; me?: true; admin?: true; channels?: string[]; read?: true; rooms?: true; content?: true; sending?: true; delta?:Parameters<typeof applyMessageDelta>[0] };
+const deltaQueue=new Map<string,NonNullable<Notice["delta"]>>();
 const GAP = 1500; // a busy conversation is looked at again this often at most
 let stream: EventSource | null = null,
   news: Notice | null = null,
@@ -391,6 +395,7 @@ let stream: EventSource | null = null,
 async function refresh(notice: Notice) {
   const session = state.session;
   if (!session?.user) return;
+  if(notice.delta){applyMessageDelta(notice.delta);if(!notice.all && !notice.me && !notice.channels && !notice.read && !notice.rooms)return;}
   try {
     // A notice about conversations alone leaves the account, channel list and emoji as they are.
     if (!notice.all && !notice.me && session.user.admission_status === "approved") {
@@ -472,6 +477,9 @@ async function refresh(notice: Notice) {
 // Notices that arrive while the page is busy, hidden or was only just refreshed are kept
 // together, and looked at in one go.
 function changed(notice: Notice) {
+  if(notice.delta){const delta=notice.delta,previous=deltaQueue.get(delta.channel);deltaQueue.set(delta.channel,previous?{...delta,messages:[...new Map([...previous.messages,...delta.messages].map(m=>[m.id,m])).values()],added:[...new Set([...(previous.added||[]),...(delta.added||[])])]}:delta);const {delta:_,...rest}=notice;notice=rest;
+    if(deltaQueue.size>256 || [...deltaQueue.values()].reduce((n,d)=>n+d.messages.length,0)>4096){deltaQueue.clear();notice={...notice,all:true};}
+  }
   const content = (!news?.channels || news.content === true) && (!notice.channels || notice.content === true);
   news = {
     ...news,
@@ -491,7 +499,8 @@ function changed(notice: Notice) {
       refreshBusy = true;
       refreshedAt = Date.now();
       let failed = false;
-      void refresh(notice)
+      const deltas=[...deltaQueue.values()];deltaQueue.clear();
+      void refresh(notice).then(()=>{for(const delta of deltas)applyMessageDelta(delta);})
         .catch(() => {
           // Tried again with the next notice, or when the stream is back: never in a loop.
           failed = true;
@@ -515,7 +524,8 @@ function hangUp() {
 // everything is looked at once: whatever happened meanwhile was not announced.
 function listen() {
   if (stream || retryTimer || document.hidden || !state.session?.user) return;
-  const source = (stream = new EventSource("/api/events"));
+  const watch=/^#\/c\/([^/?]+)/.exec(location.hash)?.[1]||"";
+  const source = (stream = new EventSource(`/api/events?deltas=1&watch=${encodeURIComponent(watch)}`));
   source.onopen = () => {
     connection(true);
     changed({ all: true });
@@ -534,6 +544,7 @@ function listen() {
     }, 4000);
   };
 }
+addEventListener("hashchange",()=>{hangUp();listen();});
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) hangUp();
   else listen();

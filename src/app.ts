@@ -159,6 +159,25 @@ export function createApp(config: Config, store: Store) {
       .type("application/activity+json")
       .json(federation.history(actor, String(req.params.id), before));
   });
+  app.get(["/actors/channels/:id/events", "/actors/channels/:id/stream"],
+    rateLimit({ windowMs: 60000, limit: config.rateLimitFederation }), async (req, res) => {
+      const actor = await federation.authenticate(req);
+      const after = Number(req.query.after ?? req.headers["last-event-id"] ?? "invalid");
+      if (!Number.isSafeInteger(after) || after < 0) throw new Problem(400, "Invalid channel event cursor.");
+      if (req.path.endsWith("/stream")) await federation.channelFeed.open(req, res, actor, String(req.params.id), after);
+      else res.type("application/json").json(federation.channelFeed.page(actor, String(req.params.id), after));
+    });
+  app.get(["/federation/events", "/federation/stream"],
+    rateLimit({ windowMs: 60000, limit: config.rateLimitFederation }), async (req, res) => {
+      // Public events and opaque private ciphertext share one origin stream.
+      const after = Number(req.query.after ?? req.headers["last-event-id"] ?? "invalid");
+      if (req.path.endsWith("/stream")) await federation.channelFeed.instance.open(req, res, after);
+      else res.json(federation.channelFeed.instance.page(after));
+    });
+  app.get("/actors/channels/:id/keys/:epoch", async (req, res) => {
+    const actor = await federation.authenticate(req);
+    res.set("Cache-Control", "no-store").json(federation.channelFeed.instance.key(actor, String(req.params.id), Number(req.params.epoch)));
+  });
   app.get("/actors/channels/:id/members", async (req, res) => {
     const actor = await federation.authenticate(req);
     res
@@ -842,10 +861,16 @@ export function createApp(config: Config, store: Store) {
     res.status(201).json(store.createChannel(user(res), req.body || {})),
   );
   app.get("/api/channels/:id", (req, res) => {
-    const detail = store.details(user(res), String(req.params.id));
+    const detail = store.details(user(res), String(req.params.id),req.query.members==="0"?false:undefined);
     // A followed channel's member list is its home's to tell; it is asked again in the background.
     void federation.refreshRoster(user(res), detail.id).catch(() => {});
     res.json(detail);
+  });
+  app.get("/api/channels/:id/member-page",(req,res)=>{
+    const after=req.query.after??"",limit=Number(req.query.limit??100);
+    if(typeof after!=="string" || after.length>200 || !Number.isSafeInteger(limit) || limit<1 || limit>200)throw new Problem(400,"Invalid member page.");
+    const detail=store.details(user(res),String(req.params.id),{after,limit});
+    res.json({members:detail.members,next:detail.members_cursor});
   });
   app.patch("/api/channels/:id", (req, res) =>
     res.json(

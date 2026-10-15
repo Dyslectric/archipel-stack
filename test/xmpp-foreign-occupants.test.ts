@@ -139,7 +139,7 @@ test("foreign posts are archived with a remote author before distribution, dedup
   f.xmpp.operation(f.from("join"));
   denied(() => f.xmpp.operation({ ...post, s2s: undefined }));
   // An ActivityPub follower of the same channel must not be sent XMPP-authored content.
-  f.store.db.prepare("INSERT INTO federation_follows VALUES(?,?,?,'accepted')").run(f.plaza.id, "https://ap.example/actors/users/1", "https://ap.example/follows/1");
+  f.store.db.prepare("INSERT INTO federation_follows(channel_id,actor,follow_id,status) VALUES(?,?,?,'accepted')").run(f.plaza.id, "https://ap.example/actors/users/1", "https://ap.example/follows/1");
   const saved = f.xmpp.operation(post) as { id: string };
   assert.deepEqual(f.xmpp.operation(post), saved);
   assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE channel_id=?").get(f.plaza.id)!.n, 1);

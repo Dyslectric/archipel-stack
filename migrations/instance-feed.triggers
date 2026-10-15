@@ -1,0 +1,55 @@
+CREATE TRIGGER IF NOT EXISTS instance_feed_append AFTER INSERT ON federation_channel_events BEGIN
+  UPDATE federation_instance_state SET tail=tail+1 WHERE id=1;
+  INSERT INTO federation_instance_events(seq,channel_id,channel_seq,activity_id,created_at,public,epoch)
+    SELECT s.tail,NEW.channel_id,NEW.seq,NEW.activity_id,NEW.created_at,CASE WHEN c.visibility='public' THEN 1 ELSE 0 END,COALESCE(e.epoch,1)
+      FROM federation_instance_state s JOIN channels c ON c.id=NEW.channel_id LEFT JOIN federation_channel_epochs e ON e.channel_id=c.id WHERE s.id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS instance_feed_follow_insert AFTER INSERT ON federation_follows BEGIN
+  INSERT INTO federation_channel_epochs(channel_id,epoch) VALUES(NEW.channel_id,1) ON CONFLICT(channel_id) DO UPDATE SET epoch=epoch+1;
+  UPDATE federation_follows SET key_epoch=(SELECT epoch FROM federation_channel_epochs WHERE channel_id=NEW.channel_id) WHERE channel_id=NEW.channel_id AND actor=NEW.actor;
+END;
+CREATE TRIGGER IF NOT EXISTS instance_feed_follow_delete AFTER DELETE ON federation_follows BEGIN
+  INSERT INTO federation_channel_epochs(channel_id,epoch) SELECT OLD.channel_id,1 WHERE EXISTS(SELECT 1 FROM channels WHERE id=OLD.channel_id) ON CONFLICT(channel_id) DO UPDATE SET epoch=epoch+1;
+END;
+CREATE TRIGGER IF NOT EXISTS instance_feed_follow_update AFTER UPDATE OF status,follow_id ON federation_follows WHEN OLD.status IS NOT NEW.status OR OLD.follow_id IS NOT NEW.follow_id BEGIN
+  INSERT INTO federation_channel_epochs(channel_id,epoch) VALUES(NEW.channel_id,1) ON CONFLICT(channel_id) DO UPDATE SET epoch=epoch+1;
+  UPDATE federation_follows SET key_epoch=(SELECT epoch FROM federation_channel_epochs WHERE channel_id=NEW.channel_id) WHERE channel_id=NEW.channel_id AND actor=NEW.actor AND NEW.status='accepted';
+END;
+CREATE TRIGGER IF NOT EXISTS instance_feed_privacy AFTER UPDATE OF visibility,federation_enabled ON channels WHEN OLD.visibility IS NOT NEW.visibility OR OLD.federation_enabled IS NOT NEW.federation_enabled BEGIN
+  INSERT INTO federation_channel_epochs(channel_id,epoch) VALUES(NEW.id,1) ON CONFLICT(channel_id) DO UPDATE SET epoch=epoch+1;
+END;
+CREATE TRIGGER IF NOT EXISTS instance_feed_rule_insert AFTER INSERT ON channel_rules BEGIN
+  INSERT INTO federation_channel_epochs(channel_id,epoch) VALUES(NEW.channel_id,1) ON CONFLICT(channel_id) DO UPDATE SET epoch=epoch+1;
+END;
+CREATE TRIGGER IF NOT EXISTS instance_feed_rule_delete AFTER DELETE ON channel_rules BEGIN
+  INSERT INTO federation_channel_epochs(channel_id,epoch) SELECT OLD.channel_id,1 WHERE EXISTS(SELECT 1 FROM channels WHERE id=OLD.channel_id) ON CONFLICT(channel_id) DO UPDATE SET epoch=epoch+1;
+END;
+CREATE TRIGGER IF NOT EXISTS instance_feed_rule_update AFTER UPDATE ON channel_rules BEGIN
+  INSERT INTO federation_channel_epochs(channel_id,epoch) VALUES(NEW.channel_id,1) ON CONFLICT(channel_id) DO UPDATE SET epoch=epoch+1;
+END;
+CREATE TRIGGER IF NOT EXISTS instance_feed_user_policy AFTER UPDATE OF banned,admission_status,federation_receive,federation_subscribe ON users BEGIN
+  INSERT INTO federation_channel_epochs(channel_id,epoch)
+    SELECT channel_id,1 FROM federation_follows WHERE actor=NEW.remote_actor AND status='accepted'
+    ON CONFLICT(channel_id) DO UPDATE SET epoch=epoch+1;
+END;
+CREATE TRIGGER IF NOT EXISTS instance_feed_block_insert AFTER INSERT ON federation_blocks BEGIN
+  INSERT INTO federation_channel_epochs(channel_id,epoch)
+    SELECT DISTINCT channel_id,1 FROM federation_follows WHERE status='accepted' AND (actor=NEW.target OR actor LIKE NEW.target||'/%')
+    ON CONFLICT(channel_id) DO UPDATE SET epoch=epoch+1;
+END;
+CREATE TRIGGER IF NOT EXISTS instance_feed_block_delete AFTER DELETE ON federation_blocks BEGIN
+  INSERT INTO federation_channel_epochs(channel_id,epoch)
+    SELECT DISTINCT channel_id,1 FROM federation_follows WHERE status='accepted' AND (actor=OLD.target OR actor LIKE OLD.target||'/%')
+    ON CONFLICT(channel_id) DO UPDATE SET epoch=epoch+1;
+END;
+CREATE TRIGGER IF NOT EXISTS instance_feed_block_update AFTER UPDATE ON federation_blocks BEGIN
+  INSERT INTO federation_channel_epochs(channel_id,epoch)
+    SELECT DISTINCT channel_id,1 FROM federation_follows WHERE status='accepted' AND (actor=OLD.target OR actor LIKE OLD.target||'/%' OR actor=NEW.target OR actor LIKE NEW.target||'/%')
+    ON CONFLICT(channel_id) DO UPDATE SET epoch=epoch+1;
+END;
+CREATE TRIGGER IF NOT EXISTS instance_feed_channel_ban_insert AFTER INSERT ON channel_instance_bans BEGIN
+  INSERT INTO federation_channel_epochs(channel_id,epoch) VALUES(NEW.channel_id,1) ON CONFLICT(channel_id) DO UPDATE SET epoch=epoch+1;
+END;
+CREATE TRIGGER IF NOT EXISTS instance_feed_channel_ban_delete AFTER DELETE ON channel_instance_bans BEGIN
+  INSERT INTO federation_channel_epochs(channel_id,epoch) SELECT OLD.channel_id,1 WHERE EXISTS(SELECT 1 FROM channels WHERE id=OLD.channel_id) ON CONFLICT(channel_id) DO UPDATE SET epoch=epoch+1;
+END;

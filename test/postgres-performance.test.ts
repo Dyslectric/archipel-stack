@@ -69,3 +69,21 @@ test("PostgreSQL page metadata costs stay bounded as the number of authors grows
   assert.equal(page.length, 31);
   assert.equal(f.db.statistics().queries - before.queries, small);
 });
+
+test("PostgreSQL channel roster query count stays bounded as membership grows", options, t => {
+  const f = fixture(); t.after(() => f.store.close());
+  let before = f.db.statistics(); f.store.details(f.alice, f.channel.id);
+  const small = f.db.statistics().queries - before.queries;
+  f.store.transaction(() => {
+    for (let i = 0; i < 50; i++) {
+      const member = f.store.loginIdentity("test", `roster-${i}`, `Roster ${i}`, []);
+      f.store.join(member, f.channel.id);
+      if (i % 2) f.db.prepare("UPDATE users SET remote_actor=? WHERE id=?")
+        .run(`https://remote.example/actors/users/${i}`, member.id);
+    }
+  });
+  before = f.db.statistics(); const details = f.store.details(f.alice, f.channel.id);
+  assert.equal(details.members.length, 51);
+  assert.equal(f.db.statistics().queries - before.queries, small);
+  assert.ok(details.members.every(member => member.avatar_url === null));
+});

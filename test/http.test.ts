@@ -1268,9 +1268,11 @@ test("media follows current membership and account approval, and removed referen
   assert.equal((await alice.request(path)).status, 403);
 
   // Old databases migrate conservatively: an old URL is never a private draft bypass.
-  f.store.db.exec("ALTER TABLE attachments DROP COLUMN published; ALTER TABLE channel_roles DROP COLUMN allow_access; ALTER TABLE channel_held_roles DROP COLUMN allow_access; PRAGMA user_version=24");
+  const sqliteTriggers="DROP TRIGGER instance_feed_append; DROP TRIGGER instance_feed_follow_insert; DROP TRIGGER instance_feed_follow_delete; DROP TRIGGER instance_feed_follow_update; DROP TRIGGER instance_feed_privacy; DROP TRIGGER instance_feed_rule_insert; DROP TRIGGER instance_feed_rule_delete; DROP TRIGGER instance_feed_rule_update; DROP TRIGGER instance_feed_user_policy; DROP TRIGGER instance_feed_block_insert; DROP TRIGGER instance_feed_block_delete; DROP TRIGGER instance_feed_block_update; DROP TRIGGER instance_feed_channel_ban_insert; DROP TRIGGER instance_feed_channel_ban_delete;";
+  if(f.store.db.dialect==="sqlite")f.store.db.exec(sqliteTriggers);
+  f.store.db.exec("DROP TABLE federation_instance_events; DROP TABLE federation_instance_state; DROP TABLE federation_channel_keys; DROP TABLE federation_channel_epochs; DROP TABLE federation_instance_incoming; DROP TABLE federation_instance_cursors; DROP TABLE federation_received_keys; DROP INDEX federation_legacy_followers; ALTER TABLE federation_follows DROP COLUMN key_epoch; ALTER TABLE federation_follows DROP COLUMN instance_start; ALTER TABLE federation_subscriptions DROP COLUMN instance_start; DROP TABLE federation_channel_events; DROP TABLE federation_channel_state; DROP TABLE federation_channel_cursors; DROP TABLE federation_channel_peers; ALTER TABLE federation_follows DROP COLUMN stream_start; ALTER TABLE federation_follows DROP COLUMN stream_capable; ALTER TABLE federation_subscriptions DROP COLUMN stream_start; ALTER TABLE attachments DROP COLUMN published; ALTER TABLE channel_roles DROP COLUMN allow_access; ALTER TABLE channel_held_roles DROP COLUMN allow_access; PRAGMA user_version=24");
   f.store.db.migrate();
-  assert.equal(f.store.db.version(), 29);
+  assert.equal(f.store.db.version(), 31);
   assert.equal((await bob.request(path)).status, 403);
   const dmFile = f.store.addAttachment(f.store.user(author.id), bytes, "direct.png");
   f.store.sendDirect(f.store.user(author.id), (await alice.session()).user.id, `![direct](${dmFile.url})`);
@@ -1410,10 +1412,10 @@ test("request limits follow the configured per-minute rates", async (t) => {
 });
 
 // Reads a browser's event stream: every notice it is sent, in order.
-async function events(t: TestContext, origin: string, who: ReturnType<typeof browser>) {
+async function events(t: TestContext, origin: string, who: ReturnType<typeof browser>, query="") {
   const abort = new AbortController();
   t.after(() => abort.abort());
-  const response = await fetch(`${origin}/api/events`, {
+  const response = await fetch(`${origin}/api/events${query}`, {
     signal: abort.signal,
     headers: { Cookie: [...who.cookies].map(([key, value]) => `${key}=${value}`).join("; ") },
   });
@@ -1448,6 +1450,31 @@ async function events(t: TestContext, origin: string, who: ReturnType<typeof bro
     },
   };
 }
+
+test("shared browser deltas preserve handle privacy, blocks, revocation and bounded roster pages",async t=>{
+  const f=await application(t),alice=browser(f.origin),bob=browser(f.origin),charlie=browser(f.origin);
+  const owner=await alice.login("alice"),reader=await bob.login("bob"),outsider=await charlie.login("charlie");
+  const a=f.store.user(owner.id),b=f.store.user(reader.id);
+  const channel=f.store.createChannel(a,{name:"delta-private",mode:"timeline",visibility:"members",admission:"open",hide_handles:true});
+  f.store.join(b,channel.id);await new Promise(done=>setTimeout(done,100));
+  const member=await events(t,f.origin,bob,`?deltas=1&watch=${channel.id}`),other=await events(t,f.origin,charlie,`?deltas=1&watch=${channel.id}`);
+  const first=f.store.post(a,channel.id,{body:"Shared without handles"});
+  const notices=await member.take(),delta=notices.find((n:any)=>n.delta)?.delta as any;
+  assert.equal(delta.messages[0].body,first.body);assert.equal(delta.messages[0].username,"");assert.equal(delta.messages[0].author_actor_url,null);
+  assert.deepEqual(await other.take(),[]);
+  const compact=await (await bob.request(`/api/channels/${channel.id}?members=0`)).json();
+  assert.deepEqual(compact.members,[]);assert.equal(compact.members_cursor,"");
+  const page=await(await bob.request(`/api/channels/${channel.id}/member-page?limit=1`)).json();assert.equal(page.members.length,1);assert.ok(page.next);
+  const next=await(await bob.request(`/api/channels/${channel.id}/member-page?limit=1&after=${page.next}`)).json();assert.equal(next.members.length,1);assert.notEqual(next.members[0].id,page.members[0].id);
+  assert.equal((await charlie.request(`/api/channels/${channel.id}/member-page`)).status,403);
+  assert.equal((await bob.request(`/api/channels/${channel.id}/member-page?limit=201`)).status,400);
+  f.store.setUserBlock(b,`${f.origin}/actors/users/${owner.id}`,true);await member.take();
+  f.store.post(a,channel.id,{body:"Blocked secret"});
+  const hidden=(await member.take()).find((n:any)=>n.delta)?.delta as any;
+  assert.equal(hidden.messages.at(-1).body,"This message is hidden because you blocked this user.");assert.deepEqual(hidden.added,[]);
+  f.store.setMember(a,channel.id,reader.id,{rule:"block"});await member.take();
+  f.store.post(a,channel.id,{body:"After revocation"});assert.deepEqual(await member.take(),[]);
+});
 
 test("open browsers are told what changed for them: their channels, their own messages, and nothing kept from them", async (t) => {
   const f = await application(t);

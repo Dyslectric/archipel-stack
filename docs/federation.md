@@ -61,8 +61,8 @@ the same recipient, preserving order across retries. Withdrawal and removal
 activities can still be sent after a user's grant is revoked.
 
 Turning the instance off rejects incoming activities and cancels outbound work
-when the worker checks it. Re-enabling does not replay cancelled work or recover
-events missed while disabled. Turning a home channel off withdraws remote
+when the worker checks it. Re-enabling does not replay cancelled inbox work. Negotiated channel streams may
+catch up retained events when their current policies still allow them. Turning a home channel off withdraws remote
 admission; existing followers need approval again after it is re-enabled.
 Policy changes cannot erase copies that a peer already received.
 
@@ -149,7 +149,11 @@ recipients can proceed.
 
 Channel-wide Announce activities for followers advertising the exact same inbox
 share one signed POST. Their individual durable delivery rows, current admission
-and block checks, retries and ordering are retained. Direct messages and other
+and block checks, retries and ordering are retained. An announcement's `to` field
+addresses its channel actor; the follower list stays in the delivery queue rather
+than growing the signed body sent to every peer. The body and activity ID remain
+identical across peers and retries. Older announcements with explicit follower
+lists remain receivable. Direct messages and other
 recipient-specific activities are delivered individually. Round and peer limits
 count physical POST attempts, including failed attempts. Whatever the pace, no more
 than `FEDERATION_PEER_SEND_RATE` deliveries per minute (default 100; 0 removes
@@ -165,6 +169,35 @@ emoji images to 256 KiB.
 
 Actors also carry `archipelVersion`, the protocol's earlier name, and either name
 is accepted from a peer.
+
+## Channel streams
+
+`FEDERATION_CHANNEL_TRANSPORT` chooses `stream` (default), `batch`, or `off`.
+Streaming and batch reads use the same durable channel event log and receiver
+cursor; negotiation happens when a follow is accepted. Configure both Node and
+native processes consistently, and leave/rejoin existing follows to negotiate a
+different transport. Old follows and peers without the capability continue to
+receive individual inbox activities with shared-inbox consolidation.
+
+Channel broadcasts for negotiated followers do not create per-follower delivery
+rows. Individual membership, role and direct activities retain their existing
+queues. The receiver keeps one durable cursor per channel, and the home keeps
+peer progress separately from individual follower admission. Administration's
+federation status includes `channelStreams` statistics, cursors and retry errors.
+
+Streams reconnect with fresh signed requests every thirty seconds and recheck
+authorization before each page. A peer's sending allowance counts nonempty event
+pages along with ordinary Node inbox POSTs; each page carries at most 32 events.
+Native POST pacing remains separate from the Node stream page allowance. Up to
+128 remote channels are consumed concurrently per frontend, with rotation after
+each lease; a frontend serves at most 128 concurrent channel streams. Idle
+streams share a batched authorization and log-tail query every 250 ms. Batch consumers poll on sender rounds.
+
+Expired cursors produce an explicit recovery error. Leave and rejoin that channel
+to load up to 100 current history records and start a new admission cursor.
+Events outside retention are not automatically reconstructed. Turning federation
+off stops live access; re-enabling may catch up retained stream events whose
+current policies still permit them. Legacy cancelled deliveries remain cancelled.
 
 ## Personal and adopted emoji
 

@@ -189,6 +189,25 @@ npm run benchmark:fwdxp -- --instances 6 --members 500 --rooms 96 \
   --peer-rate 2000 --inbox-rate 4000 --batch 100 --interval 100 --concurrency 8
 ```
 
+For one channel hosted on the first of eight instances, with 2,000 users there
+and 200 on each other instance, use explicit populations and a zero-based room host:
+
+```sh
+npm run benchmark:fwdxp -- --instances 8 --members-per-instance 2000,200,200,200,200,200,200,200 --rooms 1 --room-host 0 \
+  --postgres 1 --native-chat 1 --native-workers 2 --native-pool 4 \
+  --history 0 --bootstrap-timeout 900 \
+  --message-interval 600 --warmup 120 --duration 600 \
+  --peer-rate 0 --inbox-rate 10000 --batch 100 --interval 100 --concurrency 32 --postgres-buffers 512
+```
+
+All 3,400 users subscribe to the same channel. A 600-second per-user message
+interval offers 0.1 messages per user per minute: 340 per minute globally, or
+5.67 per second. The ten-minute measured interval schedules one post per user.
+Delivery expectations, bootstrap barriers, stream checks and reports use each
+instance's actual population. The channel's home instance has no foreign
+subscriptions; other instances use real signed Follow/Accept to join it.
+These commands use explicit fixture pacing and process/pool budgets.
+
 This is a capacity experiment, not a confirmed production sizing recommendation.
 `--native-workers` and `--native-pool` select the process and connection budgets.
 Two workers with four connections each reserve up to 15 database connections per
@@ -277,3 +296,78 @@ the durable queue, and saves nested statement timings to
 `test-results/native-queue-write-profile.json` (or its first argument). It drops
 its temporary schema on exit. Single-connection SQL timings exclude signatures,
 network, readers and contention; use the FWDXP workload to establish capacity.
+
+## Channel event transports
+
+Implementation details and completed high-population measurements are in
+[Channel event transport measurements](channel-stream-benchmarks.md).
+
+FWDXP runs accept `--channel-transport off|batch|stream` (default `stream`).
+`off` exercises legacy follower delivery rows; `batch` and `stream` consume the
+same durable channel log once per peer. Snapshots and telemetry include channel
+log tails, receiver cursors, transport counters and recovery errors. Queue counts
+alone no longer describe broadcast backlog. Replica message counts and receiver
+observations remain the pass criteria; SSE connection counts do not prove receipt.
+
+Native workers now handle supported Follow admission and outgoing queues during
+setup, with the existing compatibility path handling Accept/history/roster reads.
+For negotiated channel consumers, concurrent admissions share the first bounded
+history/roster fetch and import; subsequent local followers reuse that channel
+copy. Each individual Follow/Accept still authenticates and retains its admission.
+The native-history barrier waits for seed messages committed on every replica,
+including deliveries through streams, before opening web clients.
+
+Use small runs for timing checks while changing transport code. High-population
+measurements should start only after streaming receipt, replay and atomic cursor
+checks pass. Keep measured runs separate from other benchmarks and test workloads.
+
+## One large instance with listening peers
+
+Schema 31 benchmarks negotiate one origin stream carrying clear public events
+and encrypted private events. The fixture's room is private. Browser protocol
+clients opt into shared message deltas, read compact channel metadata and
+coalesce read acknowledgements for 30 seconds. This exercises transport and API
+work without DOM layout or rendering. Reports include raw intake/materialization
+counters and origin cursors separately from channel import cursors. Per-message
+full-page reads are no longer expected; `liveDeltaMessages` proves incremental
+delivery when no page refresh is needed. The same offered, accepted, committed
+and observed-message criteria still apply.
+
+`--listener-only-peers 1` keeps web clients and scheduled posting on the explicit
+`--room-host`. Other instances retain real identities, signed admission and
+durable channel consumers, but open no web clients and offer no posts. Use one
+fixture identity per listening peer in `--members-per-instance`; these identities
+are excluded from active-user and recipient-observation counts. All replicas
+must still commit the measured messages.
+
+`--web-workers 8` shards each active instance's generators across eight processes.
+Global user indices and the instance's original scheduling denominator remain
+unchanged, so sharding does not multiply the offered rate. The `--inflight` limit
+applies to each shard. Telemetry sums their CPU/RSS and takes the worst shard's
+event-loop p95; generator manager/root process overhead is additional. Histograms
+are merged by sample counts rather than averaging percentiles.
+
+For 10,000 local users at 40 posts/second, with twelve listening peers:
+
+```sh
+node scripts/benchmark-fwdxp.mjs --instances 13 \
+  --members-per-instance 10000,1,1,1,1,1,1,1,1,1,1,1,1 \
+  --rooms 1 --room-host 0 --listener-only-peers 1 --web-workers 8 \
+  --connect-retries 2 \
+  --postgres 1 --native-chat 1 --native-workers 4 --native-pool 4 --channel-transport stream \
+  --history 100 --native-history 1 --ramp 120 --boot-ramp 120 --bootstrap-timeout 900 \
+  --message-interval 250 --warmup 30 --duration 120 --inflight 16 \
+  --peer-rate 0 --inbox-rate 10000 --batch 100 --interval 100 --concurrency 32 --postgres-buffers 512
+```
+
+This offers 10,000 / 250 = 40 posts/second from the local instance, independently
+of the twelve peer identities. Every local client must complete initial reads
+before measured chat. Optional `--connect-retries 2` retries failed initial SSE
+connections after two seconds; attempts, status/error codes and recovered setup
+failures remain recorded. Connection failures after setup still fail the retention
+check. PostgreSQL runs now save independent final database
+snapshots after application shutdown, retaining the application's original
+snapshots as `app-snapshot-*.json`. This preserves replication evidence when the
+compatibility database worker fails during the test. These instances still share
+one workstation and PostgreSQL server; separate the local, peer and database
+resource samples before interpreting hardware capacity.

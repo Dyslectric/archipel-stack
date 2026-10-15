@@ -106,7 +106,7 @@ for (let instance = 0; instance < 5; instance++) {
     original("UPDATE users SET federation_send=1,federation_post=1 WHERE id=?").run(users[0].id);
     let federationFanout: Record<string, unknown> = {};
     store.transaction(() => {
-      for (let n = 0; n < 1000; n++) original("INSERT INTO federation_follows VALUES(?,?,?,'accepted')")
+      for (let n = 0; n < 1000; n++) original("INSERT INTO federation_follows(channel_id,actor,follow_id,status) VALUES(?,?,?,'accepted')")
         .run(channels[0].id, `https://peer.example/actors/users/${randomUUID()}`, `diagnostic-follow-${n}`);
       store.post(store.user(users[0].id), channels[0].id, { body: "Federation fan-out diagnostic only" });
       const outgoing = original("SELECT id,activity FROM federation_outgoing WHERE channel_id=? ORDER BY created_at DESC LIMIT 1").get(channels[0].id)!;

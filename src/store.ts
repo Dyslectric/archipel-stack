@@ -186,6 +186,13 @@ const everyone = `
     WHERE r.channel_id=? AND NOT EXISTS (SELECT 1 FROM memberships m WHERE m.channel_id=r.channel_id AND m.user_id=r.user_id)`;
 
 export class Store {
+  private memberCounts=new Map<string,{stamp:string;count:number}>();
+  private memberCount(id:string) {
+    const stamp=["memberships","federation_follows","channel_roster"].map(t=>this.db.revision(t)).join("|");
+    const cached=this.memberCounts.get(id);if(cached?.stamp===stamp)return cached.count;
+    const count=Number(this.db.prepare(`SELECT COUNT(*) AS n FROM (${everyone})`).get(id,id,id)!.n);
+    this.memberCounts.set(id,{stamp,count});return count;
+  }
   db: Database;
   private messagePageBytes = 0;
   private messagePages = new Map<string, { version: string; until: number; bytes: number;
@@ -262,11 +269,11 @@ export class Store {
       throw new Problem(403, "Instance membership approval is required.");
     return user;
   }
-  profile(user: User, own = false) {
+  profile(user: User, own = false, avatarUrl?: string | null) {
     return {
       id: user.id,
       actor_url: user.remote_actor || `${this.baseUrl}/actors/users/${user.id}`,
-      avatar_url: this.avatarUrl(user.id),
+      avatar_url: avatarUrl === undefined ? this.avatarUrl(user.id) : avatarUrl,
       username: user.username,
       display_name: user.display_name,
       ...(own
@@ -1280,29 +1287,30 @@ export class Store {
         !channel.remote_actor &&
         rule !== "block" &&
         (channel.admission === "open" || rule === "allow"),
-      member_count: Number(
-        (
-          this.db
-            .prepare(`SELECT COUNT(*) AS n FROM (${everyone})`)
-            .get(channel.id, channel.id, channel.id) as { n: number }
-        ).n,
-      ),
+      member_count: this.memberCount(channel.id),
     };
   }
   // Everyone in a channel: members here, a home channel's accepted followers on other
   // instances, and whoever a followed channel's home says is in it.
-  members(id: string) {
+  members(id: string, viewer?: User, page?: { after: string; limit: number }) {
     return this.db
       .prepare(
-        `SELECT u.*, e.role, e.held, COALESCE(g.see_members,0) AS see_members, COALESCE(g.see_handles,0) AS see_handles, cr.id AS channel_role_id, cr.name AS channel_role_name FROM (${everyone}) e JOIN users u ON u.id=e.user_id LEFT JOIN channel_grants g ON g.channel_id=? AND g.user_id=e.user_id LEFT JOIN channel_member_roles a ON a.channel_id=? AND a.user_id=e.user_id AND e.role='member' LEFT JOIN channel_roles cr ON cr.id=a.role_id ORDER BY u.username`,
+        `SELECT u.*, e.role, e.held, COALESCE(g.see_members,0) AS see_members, COALESCE(g.see_handles,0) AS see_handles, cr.id AS channel_role_id, cr.name AS channel_role_name,
+          CASE WHEN COALESCE(u.remote_actor,'')='' THEN '/api/avatars/'||u.id||'?v='||av.revision ELSE '/api/remote-avatars/'||ra.id||'?v='||ra.revision END AS member_avatar_url,
+          cn.display_name AS member_contact_name
+          FROM (${everyone}) e JOIN users u ON u.id=e.user_id LEFT JOIN channel_grants g ON g.channel_id=? AND g.user_id=e.user_id LEFT JOIN channel_member_roles a ON a.channel_id=? AND a.user_id=e.user_id AND e.role='member' LEFT JOIN channel_roles cr ON cr.id=a.role_id
+          LEFT JOIN user_avatars av ON av.user_id=u.id LEFT JOIN remote_avatars ra ON ra.peer=u.remote_actor
+          LEFT JOIN contact_names cn ON cn.user_id=? AND cn.peer=u.remote_actor ${page?"WHERE u.id>? ORDER BY u.id LIMIT ?":"ORDER BY u.username"}`,
       )
-      .all(id, id, id, id, id) as unknown as (User & {
+      .all(id, id, id, id, id, viewer?.id ?? null,...(page?[page.after,page.limit]:[])) as unknown as (User & {
       role: string;
       held: number; // a membership kept here, which this instance can change
       see_members: number;
       see_handles: number;
       channel_role_id: string | null;
       channel_role_name: string | null;
+      member_avatar_url: string | null;
+      member_contact_name: string | null;
     })[];
   }
   listChannels(user: User) {
@@ -1513,19 +1521,20 @@ export class Store {
         .prepare(`DELETE FROM ${table} WHERE channel_id=? AND user_id=?`)
         .run(channelId, userId);
   }
-  details(user: User, id: string) {
+  details(user: User, id: string, roster?: false | { after: string; limit: number }) {
     const channel = this.channel(id);
     this.requireRead(user, channel);
-    const members = this.sees(user, channel, "members") ? this.members(id) : [];
+    const members = roster!==false && this.sees(user, channel, "members") ? this.members(id, user,roster) : [];
     const topics = this.db
       .prepare("SELECT * FROM topics WHERE channel_id=? ORDER BY created_at")
       .all(id);
     const handles = this.sees(user, channel, "handles");
     return {
       ...this.channelInfo(user, channel),
+      ...(roster!==undefined?{members_cursor:roster===false?"":members.length===roster.limit?members.at(-1)!.id:null}:{}),
       members: members.map((u) => ({
-        ...this.profile(u), role: u.role, held: !!u.held,
-        display_name: u.remote_actor ? this.contactName(user, u.remote_actor) ?? u.display_name : u.display_name,
+        ...this.profile(u, false, u.member_avatar_url), role: u.role, held: !!u.held,
+        display_name: u.remote_actor ? u.member_contact_name ?? u.display_name : u.display_name,
         see_members: !!u.see_members,
         see_handles: !!u.see_handles,
         channel_role: u.channel_role_id
@@ -2084,6 +2093,23 @@ export class Store {
         `${this.baseUrl}/actors/users/${message.author_id}`,
       avatar_url: message.history_placeholder ? null : metadata ? metadata.avatar : this.avatarUrl(message.author_id),
     };
+  }
+  /** Shared immutable projection for the delivery plane, never a viewer's page. */
+  liveMessageBatch(id: string, after: number, changed: string[]) {
+    const channel=this.channel(id),bans=this.emojiBans(channel),marks=changed.map(()=>"?").join(",");
+    const rows=this.db.prepare(`SELECT m.*,u.username,u.display_name,u.remote_actor AS live_actor,
+      a.revision AS live_avatar,r.id AS live_remote_avatar,r.revision AS live_remote_revision
+      FROM messages m JOIN users u ON u.id=m.author_id LEFT JOIN user_avatars a ON a.user_id=u.id
+      LEFT JOIN remote_avatars r ON r.peer=u.remote_actor WHERE m.channel_id=? AND
+      (m.seq>? ${changed.length?`OR m.id IN (${marks}) OR m.remote_object IN (${marks})`:""}) ORDER BY m.seq LIMIT 100`)
+      .all(id,after,...changed,...changed);
+    return rows.map(row=>{
+      const {live_actor,live_avatar,live_remote_avatar,live_remote_revision,...message}=row;
+      const avatar=live_actor?live_remote_avatar?`/api/remote-avatars/${live_remote_avatar}?v=${live_remote_revision}`:null
+        :live_avatar?`/api/avatars/${row.author_id}?v=${live_avatar}`:null;
+      const info=this.messageInfo(message as Message,undefined,{author:{id:row.author_id,remote_actor:live_actor} as User,avatar});
+      return {...this.unbanned(info,channel,bans),live_remote:!!live_actor || !!row.remote_object};
+    });
   }
   // The emoji a message used that still exist, each with whose it is and the host it came from.
   private liveEmojis(tags: string): CustomEmoji[] {
@@ -2968,18 +2994,20 @@ export class Store {
   overview(user: User) {
     const me = this.active(user.id),
       unread: Record<string, number> = {};
+    const message_cursor=Number(this.db.prepare("SELECT COALESCE(MAX(seq),0) AS seq FROM messages").get()!.seq);
     for (const c of this.joined(me)) {
       const n = Number(
         this.db
           .prepare(
-            `${this.hiddenThreads}SELECT COUNT(*) AS n FROM messages m WHERE ${this.unreadWhere}`,
+            `${this.hiddenThreads}SELECT COUNT(*) AS n FROM messages m WHERE ${this.unreadWhere} AND m.seq<=?`,
           )
-          .get(...this.unreadArgs(me, c.id, this.channelMark(me.id, c.id)))?.n,
+          .get(...this.unreadArgs(me, c.id, this.channelMark(me.id, c.id)),message_cursor)?.n,
       );
       if (n) unread[c.id] = n;
     }
     return {
       dms: this.conversations(me),
+      message_cursor,
       unread,
       prefs: this.prefs(me),
       layout: this.layout(me),

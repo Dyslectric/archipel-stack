@@ -121,7 +121,7 @@ try {
   }));
   const totals = { writes: { scheduled: 0, successful: 0, failed: 0, dropped: 0, users: 0, latency: histogram() },
     refresh: { started: 0, completed: 0, failed: 0, pendingAtStop: 0, latency: histogram() },
-    sse: { opened: 0, failures: 0, notices: 0, bytes: 0 }, requests: {}, bytes: 0 };
+    sse: { opened: 0, failures: 0, notices: 0, bytes: 0, deltaMessages:0 }, requests: {}, bytes: 0 };
   for (const { stats } of collected) {
     totals.bytes += stats.bytes;
     for (const group of ['writes', 'refresh', 'sse']) for (const key of Object.keys(totals[group])) {

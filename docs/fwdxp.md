@@ -153,7 +153,126 @@ required, and redirects are not followed.
 An inbox request is at most 64 KiB. Responses fetched from a peer, and emoji
 images, are at most 256 KiB.
 
+Channel `Announce` activities address the channel actor in `to`. The sender keeps
+the authorized followers in its durable delivery queue and may consolidate
+recipients sharing an inbox into one POST. This keeps the announcement body
+independent of subscriber count, with one stable activity ID and body across
+peers and retries. Receivers continue to accept older announcements that list
+individual followers. Current local subscriptions and permissions determine
+who may read the imported channel copy.
+
+## Optional channel event transport
+
+Peers may negotiate `channelEvents: { "version": 1 }` on a Person actor.
+A supporting home Group advertises `channelEvents` with `version: 1`, `batches`
+(`<channel actor>/events`) and `stream` (`<channel actor>/stream`) URLs. Both
+endpoints must remain on the Group's origin and exact channel path. This is an
+optional FWDXP extension; individual inbox activities remain version 1.
+
+When accepting a capable follower, the home includes
+`channelEvents: { "version": 1, "cursor": <integer> }` in the embedded Follow
+object. The cursor marks the admission boundary before history is fetched. The
+home retains one immutable channel broadcast event per change, in channel commit
+order, rather than creating delivery rows for each capable follower. Followers
+without this negotiation retain inbox delivery. Direct messages, user posts to
+the home, membership decisions and individual roles continue to use inboxes.
+
+A follower authenticates GET requests with its ordinary HTTP signature and an
+`after=<cursor>` query parameter. Batch responses are JSON:
+
+```json
+{"type":"ChannelEvents","channel":"<Group actor>","follow":"<Follow ID>",
+ "after":10,"cursor":12,"events":[
+   {"seq":11,"activity":"<original serialized activity JSON>"},
+   {"seq":12,"activity":null}]}
+```
+
+Activities preserve their original IDs, serialization and author proofs. A null
+activity advances past content cancelled by current sending policy. Cursors
+also advance past authors blocked or inactive on the receiver, preserving the
+activity ID/digest for conflict detection while discarding the content. Blocking
+the channel's home or losing all permitted local subscribers stops consumption.
+Sequences must be contiguous, and the response must belong to the requested channel and
+current follow. Each receiver consumes once per channel regardless of its number
+of local subscribers; importing an event and advancing its durable cursor must
+commit atomically. Duplicate activity IDs remain subject to conflict detection.
+
+The stream endpoint sends the same bounded pages as SSE `data` frames, with the
+last sequence in `id`. Requests identify the receiving follower; authenticated
+HTTPS to the advertised home authenticates response content. Author proofs still
+require independent verification. A receiver must not treat an arbitrary inbox
+body as authenticated stream content. Production redirects and private-address
+targets remain prohibited. Loopback HTTP retains the development exception.
+
+Live authorization is checked before each page, including channel federation,
+follower admission, blocks and sender permissions. Streams use thirty-second
+leases and reconnect with a fresh signed request and the last committed cursor.
+Pages contain at most 32 events and 240,000 bytes of event JSON; frames/responses
+remain below 256 KiB and individual activities below the 64 KiB inbox limit.
+Slow readers are disconnected instead of accumulating an unbounded buffer.
+
+Archipel retains at most seven days or 100,000 events per channel, pruning on
+reads. A cursor older than retained history returns HTTP 410; it is never advanced
+silently. Recovery requires leaving and rejoining to import the existing bounded
+history snapshot. This does not promise full archival recovery. A new admission
+cannot resume before its admission cursor, even when requesting an older cursor.
+
+## Multiplexed instance feed extension
+
+A Group can additionally advertise `channelEvents.instanceStream` and
+`channelEvents.instanceBatches`, at `/federation/stream` and `/federation/events`
+on its own origin. Accept's Follow object includes `channelEvents.instanceCursor`
+alongside the channel admission cursor. A receiver starts one consumer per
+origin, regardless of its channel or local follower count. Older peers continue
+to use the channel endpoints or individual inbox deliveries.
+Existing admissions without an instance cursor retain the channel transport
+until they renegotiate by leaving and rejoining; upgrading does not silently
+move a durable consumer past unseen history.
+
+The instance sequence is assigned under a transactional row lock when the
+channel event is appended, so committed events cannot arrive out of order.
+An `InstanceEvents` page contains `origin`, `after`, `cursor` and up to 32 events,
+within the same page/frame limits as the channel transport. Each event contains
+`seq`, `channel` (the Group actor), `channelSeq` and `epoch`. Public events have
+`payload: {activity, actors}`. The original activity JSON and its origin proof
+remain unchanged. Same-origin actor documents may accompany the activity to
+avoid an author-discovery request on the ordered import path. A relayed author's
+identity must still be obtained from that author's own origin.
+
+Private events instead have `encrypted: {iv, tag, data}` using AES-256-GCM,
+with a random 96-bit nonce, a 128-bit tag and a random 256-bit channel epoch key.
+Associated data is UTF-8 JSON `[1,origin,seq,channel,channelSeq,epoch]`.
+The whole payload, including actor metadata, is encrypted once and the frame is
+persisted. All peers receive the same ciphertext. Public events and private
+ciphertext can be read through the same public origin feed; this exposes channel
+actor IDs, sequence numbers, epochs and timing, not private message bodies.
+
+Keys are obtained through signed GETs to `/actors/channels/:id/keys/:epoch`,
+with current follower admission, account, channel and instance block checks.
+The response `{channel,epoch,secret}` uses base64 key bytes and is never cached
+by HTTP intermediaries. Production requires authenticated HTTPS. Admission
+changes, rejoining with a new Follow ID, privacy/federation changes and block
+changes rotate the epoch. A new admission cannot fetch keys from before its
+grant; a revoked admission cannot fetch subsequent keys. Revocation cannot
+erase previously downloaded plaintext or keys. This is encryption between
+instances, not encryption that excludes their administrators.
+
+Receivers atomically stage the bounded raw page and advance the origin cursor
+before resolving keys, authors or optional assets. Up to eight channel
+materializers run independently; each message import and channel checkpoint
+remain atomic. A stalled channel does not stop raw intake or another channel.
+Avatars use a separate bounded background queue. Source retention maintenance
+deletes at most 1,000 old events per round outside the read path, targeting seven
+days or 100,000 events per origin, and advances the corresponding channel floors.
+Received unclaimed frames retain a 100,000-event admission-race horizon. Falling
+outside replay history produces an explicit gap instead of skipping messages.
+
+Publication does not enumerate negotiated followers. One fixed set of message,
+activity and feed appends remains; legacy recipients still require their delivery
+rows. Transport intake has bounded work per page. Delivering bytes to multiple
+peers or browser connections necessarily scales with those connections.
+
 ## Not in version 1
 
-Key rotation, federated mirrors, writable failover between homes, and
+Federated mirrors, writable failover between homes, and
 reconciliation between copies of a channel are not defined.
