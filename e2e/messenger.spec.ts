@@ -357,6 +357,16 @@ test("a timeline reply links back to the message it answers", async ({ page }) =
   await expect(answer.locator(".reply-context")).toContainText("Who is in today?");
   await answer.locator(".reply-context").click();
   await expect(first).toHaveClass(/flash-target/);
+  // What was answered folds its thread out under it; a reply's time finds it in the timeline.
+  const thread = first.locator("details.inline-thread");
+  await expect(thread.locator("summary")).toContainText("1 reply");
+  await expect(thread.locator(".thread-reply")).toHaveCount(0);
+  await thread.locator("summary").click();
+  await expect(thread.locator(".thread-reply")).toContainText("I am.");
+  await thread.locator(".thread-reply-time").click();
+  await expect(page.locator(".message").filter({ hasText: "I am." }).last()).toHaveClass(/flash-target/);
+  await thread.locator("summary").click();
+  await expect(thread.locator(".thread-reply")).toHaveCount(0);
   // Quoting replies too; the reply can be dropped and the quote kept.
   const box = page.getByRole("textbox", { name: "Message", exact: true });
   await first.hover();

@@ -989,9 +989,45 @@ function chatMessage(m: Message, cont: boolean) {
     !m.deleted_at ? `<button type="button" class="icon-button" data-message-menu="${m.id}" aria-label="More message actions" aria-haspopup="menu" title="More">${icon("more")}</button>` : "",
   ].join("");
   if (appStyle() === "fusion-compact")
-    return `<article class="message compact-message picker-host${m.deleted_at ? " deleted" : ""}${queuedClass(m)}" id="m-${m.id}"><span class="compact-time">${time}</span><div class="compact-author">${author(m)}${handleTag(m.username)}</div><div class="message-content">${context}${bodyHtml(m)}${edited(m)}</div>${tools ? `<div class="message-actions">${tools}</div>` : ""}</article>`;
+    return `<article class="message compact-message picker-host${m.deleted_at ? " deleted" : ""}${queuedClass(m)}" id="m-${m.id}"><span class="compact-time">${time}</span><div class="compact-author">${author(m)}${handleTag(m.username)}</div><div class="message-content">${context}${bodyHtml(m)}${edited(m)}${threadUnder(m)}</div>${tools ? `<div class="message-actions">${tools}</div>` : ""}</article>`;
   return `<article class="message picker-host${cont ? " cont" : ""}${m.deleted_at ? " deleted" : ""}${queuedClass(m)}" id="m-${m.id}"><div class="msg-gutter">${cont ? time : avatar(m)}</div>
-    <div class="message-content">${cont ? "" : `<div class="message-meta">${author(m)}${handleTag(m.username)}${time}${edited(m)}</div>`}${context}${bodyHtml(m)}${cont ? edited(m) : ""}</div>${tools ? `<div class="message-actions">${tools}</div>` : ""}</article>`;
+    <div class="message-content">${cont ? "" : `<div class="message-meta">${author(m)}${handleTag(m.username)}${time}${edited(m)}</div>`}${context}${bodyHtml(m)}${cont ? edited(m) : ""}${threadUnder(m)}</div>${tools ? `<div class="message-actions">${tools}</div>` : ""}</article>`;
+}
+// Who answered whom among the messages on the page. A message that was answered folds its
+// thread out under it; the replies stay in the timeline where they were said, too.
+let answers = new Map<string, Message[]>();
+const openThreads = new Set<string>();
+// What a folded thread says of itself: how many replies, the latest, and the first three who
+// answered. Each message's is worked out once a render, from those of the replies under it.
+type ThreadSummary = { count: number; last: Message; people: Message[] };
+let summaries = new Map<string, ThreadSummary | null>();
+function summaryOf(id: string): ThreadSummary | null {
+  if (summaries.has(id)) return summaries.get(id)!;
+  const kids = answers.get(id);
+  let out: ThreadSummary | null = null;
+  if (kids?.length) {
+    const sum: ThreadSummary = { count: 0, last: kids[0], people: [] };
+    for (const k of kids) {
+      const below = summaryOf(k.id);
+      sum.count += 1 + (below?.count || 0);
+      for (const r of [k, ...(below?.people || [])])
+        if (sum.people.length < 3 && !sum.people.some((p) => p.author_id === r.author_id)) sum.people.push(r);
+      for (const r of [k, below?.last]) if (r && r.seq > sum.last.seq) sum.last = r;
+    }
+    out = sum;
+  }
+  summaries.set(id, out);
+  return out;
+}
+function threadUnder(m: Message) {
+  const kids = answers.get(m.id),
+    summary = summaryOf(m.id);
+  if (!kids || !summary) return "";
+  const { count, last, people } = summary;
+  const row = (r: Message, depth: number): string =>
+    `<div class="thread-reply${r.deleted_at ? " deleted" : ""}${queuedClass(r)}" style="--depth:${Math.min(depth, 4)}">${avatar(r, "small")}<div class="thread-reply-main"><div class="message-meta">${author(r)}<button type="button" class="thread-reply-time" data-jump="${r.id}" title="Show it in the timeline"><time datetime="${esc(r.created_at)}" title="${esc(full(r.created_at))}">${esc(clock(r.created_at))}</time></button>${edited(r)}</div>${editing === r.id ? '<p class="muted small">Being edited in the timeline.</p>' : bodyHtml(r)}</div></div>${(answers.get(r.id) || []).map((k) => row(k, depth + 1)).join("")}`;
+  // A folded thread keeps nothing of it on the page: opening it draws it.
+  return `<details class="inline-thread" data-thread="${m.id}"${openThreads.has(m.id) ? " open" : ""}><summary>${people.map((p) => avatar(p, "small")).join("")}<strong>${count} repl${count === 1 ? "y" : "ies"}</strong><span class="muted">Last reply ${esc(dayLabel(last.created_at))} ${esc(clock(last.created_at))}</span>${icon("chevron-down", "chev")}</summary>${openThreads.has(m.id) ? `<div class="inline-thread-body">${kids.map((k) => row(k, 0)).join("")}${repliable(m) ? `<button type="button" class="small secondary thread-reply-button" data-reply="${m.id}">${icon("reply")} Reply to ${esc(m.display_name)}</button>` : ""}</div>` : ""}</details>`;
 }
 // Consecutive messages from one person within ten minutes share a header, as in Zulip.
 function chatKids(list: Message[]): Node[] {
@@ -1009,6 +1045,10 @@ function chatKids(list: Message[]): Node[] {
 function chatNodes(list: Message[]): Node[] {
   const c = current!,
     groups: Message[][] = [];
+  answers = new Map();
+  summaries = new Map();
+  for (const m of everything())
+    if (m.parent_id) { const kids = answers.get(m.parent_id); if (kids) kids.push(m); else answers.set(m.parent_id, [m]); }
   for (const m of list) {
     const last = groups.at(-1)?.at(-1);
     if (
@@ -1248,6 +1288,8 @@ function render(
     : `<p class="card empty muted">${messageSearch ? "No messages match." : c.mode === "threaded" ? (hiddenCount ? "Every thread here is hidden." : "No threads yet.") : narrow ? "No messages in this topic yet." : messages.length ? "Every topic here is hidden. Open one from the sidebar to read it." : "No messages yet."}</p>`;
   for (const d of $$<HTMLDetailsElement>(folds, list))
     d.open = !collapsed.has(d.dataset.key!);
+  for (const d of $$<HTMLDetailsElement>("details.inline-thread", list))
+    d.open = openThreads.has(d.dataset.thread!);
   refreshTimes(list);
   const arrived = popped.filter((key) =>
     messages.some((m) => m.id === key && m.author_id !== me().id),
@@ -1377,6 +1419,12 @@ function wireFeed() {
       const d = e.target as HTMLDetailsElement;
       if (!d.isConnected) return;
       if (d.matches("details.reply-box") && d.open) $("textarea", d).focus();
+      if (d.matches("details.inline-thread")) {
+        if (d.open === openThreads.has(d.dataset.thread!)) return;
+        if (d.open) openThreads.add(d.dataset.thread!);
+        else openThreads.delete(d.dataset.thread!);
+        return render();
+      }
       if (!d.matches(folds)) return;
       if (d.open) collapsed.delete(d.dataset.key!);
       else collapsed.add(d.dataset.key!);

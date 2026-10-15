@@ -70,7 +70,7 @@
   :is(input, select, textarea):focus { box-shadow: 0 0 0 1px var(--accent); }
   :is(button, .button) { font-weight: 400; }
   button:not(:is(.icon-button, .act, .link, .side-toggle, .menu-item, .style-choice, .ep-emoji, .es-item, .bar, .author, .member-name,
-      .name-button, .reaction, .reply-context, .section-toggle, .danger, .side-foot, [data-fusion-action])):not(.seg *, .ep-tabs *, .fusion-toolbar *),
+      .name-button, .reaction, .reply-context, .thread-reply-time, .section-toggle, .danger, .side-foot, [data-fusion-action])):not(.seg *, .ep-tabs *, .fusion-toolbar *),
   .button {
     background: var(--fusion-button); color: var(--text); border: 1px solid var(--line);
     &:hover { background: var(--fusion-button-hover); }
@@ -243,7 +243,7 @@
   .group-body > article.selected-message, .group-body > article.selected-message:hover,
   .post.selected-message > .thread-row, .comment.selected-message > summary, .comments > .comment.selected-message > summary {
     background: var(--fusion-selection); color: var(--fusion-selection-text);
-    :is(.author, time, .compact-time, .message-meta, .byline, .handle, .edited, .muted, .fold, .mode-tag, .collapsed-note, .reply-context,
+    :is(.author, time, .compact-time, .message-meta, .byline, .handle, .edited, .muted, .fold, .mode-tag, .collapsed-note, .reply-context, .thread-reply-time,
       .reply-context strong, .pref-button, a, blockquote) { color: inherit; }
     .markdown :is(code, pre) { background: color-mix(in srgb, currentColor 10%, transparent); border-color: color-mix(in srgb, currentColor 28%, transparent); color: inherit; }
     .markdown blockquote { border-color: color-mix(in srgb, currentColor 45%, transparent); }
