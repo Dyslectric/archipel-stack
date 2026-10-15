@@ -69,6 +69,15 @@ let current: Channel | null = null,
   pending: Message[] = [], // written here, still on their way to the channel's home instance
   olderCursor: number | null = null;
 let refreshCursor: number | undefined, refreshStamp: string | undefined, historyExpanded = false;
+// The page holds a window of a few server pages around what is being read, however long the
+// history. Scrolling fetches the next page at either end and lets go of the far one. What was
+// let go below is remembered by the cursor that fetches it again, nearest the window last.
+const PAGE = 100, WINDOW = 300;
+let newer: { before: number | null; first: number }[] = [],
+  paging = false;
+const live = () => !newer.length; // the window reaches the newest message
+const ceiling = () => newer.at(-1)?.first ?? Infinity;
+const inWindow = (m: Message) => m.seq >= (olderCursor ?? -Infinity) && m.seq < ceiling();
 let narrow: string | null = null, // the topic being read on its own
   reply: Message | null = null,
   editing: string | null = null;
@@ -107,7 +116,7 @@ export function updateFusionToolbar() {
   search.placeholder = c?.mode === "threaded" ? "Search threads" : "Search messages";
   const status = document.querySelector("#fusion-status-place");
   const view = document.querySelector<HTMLElement>(".app")?.dataset.view;
-  const threads = c?.mode === "threaded" && olderCursor === null ? messages.filter(m => !m.parent_id).length : 0;
+  const threads = c?.mode === "threaded" && olderCursor === null && live() ? messages.filter(m => !m.parent_id).length : 0;
   if (status) status.textContent = active && c
     ? threads ? `${c.name}, ${threads} thread${threads === 1 ? "" : "s"}` : `${c.name}, ${c.member_count} member${c.member_count === 1 ? "" : "s"}`
     : view === "channels" ? document.querySelector<HTMLElement>("#channel-table-body")?.dataset.summary || "Channel directory" : view === "settings" ? "Settings"
@@ -166,6 +175,7 @@ export function resetChat() {
   messages = [];
   pending = [];
   refreshCursor = undefined; refreshStamp = undefined; historyExpanded = false;
+  newer = [];
   generation++;
   renderMembers();
 }
@@ -198,22 +208,136 @@ const pagePath = (id: string, before?: number | null) =>
   id.startsWith("dm:")
     ? `/dms/messages?peer=${encodeURIComponent(id.slice(3))}${before ? `&before=${before}` : ""}`
     : `/channels/${id}/messages${before ? `?before=${before}` : ""}`;
-async function load(id: string, metadata = true): Promise<[Channel, Page]> {
+// `before` reads the page ending there instead of the newest one.
+async function load(id: string, metadata = true, before?: number): Promise<[Channel, Page]> {
   if (id.startsWith("dm:")) {
-    const data = await api<Page & { conversation: Conversation }>(pagePath(id));
+    const data = await api<Page & { conversation: Conversation }>(pagePath(id, before));
     return [dmChannel(data.conversation), data];
   }
   if (!metadata && current?.id === id) {
     const list = document.querySelector<HTMLElement>("#message-list");
     if ((list && list.scrollHeight-list.scrollTop-list.clientHeight>=80) || selectedMessage || editing || reply) historyExpanded=true;
-    const suffix = !historyExpanded && refreshCursor!==undefined && refreshStamp
+    const suffix = before === undefined && !historyExpanded && refreshCursor!==undefined && refreshStamp
       ? `?after=${refreshCursor}&stamp=${encodeURIComponent(refreshStamp)}` : "";
-    return [current, await api<Page>(pagePath(id)+suffix)];
+    return [current, await api<Page>(pagePath(id, before)+suffix)];
   }
   return Promise.all([
     api<Channel>(`/channels/${id}?members=0`),
-    api<Page>(pagePath(id)),
+    api<Page>(pagePath(id, before)),
   ]);
+}
+const bySeq = (a: Message, b: Message) => a.seq - b.seq;
+// Within a screen of what is being read. Such a message stays on the page even outside the window.
+function nearView(id: string) {
+  const el = document.getElementById(`m-${id}`),
+    list = document.querySelector<HTMLElement>("#message-list");
+  if (!el || !list) return false;
+  const box = list.getBoundingClientRect(),
+    r = el.getBoundingClientRect();
+  return r.height > 0 && r.bottom > box.top - list.clientHeight && r.top < box.bottom + list.clientHeight;
+}
+// Whether the reader is nearer the old end of what is loaded.
+function readingOlder() {
+  const list = document.querySelector<HTMLElement>("#message-list");
+  return !!list && list.scrollTop + list.clientHeight / 2 < list.scrollHeight / 2;
+}
+// Lets go of the end of the window away from the reader until it fits. Older messages are simply
+// dropped: the cursor reads them again. Newer ones go a page at a time, so each comes back whole.
+function trim(dropNewer = readingOlder()) {
+  const keep = (m: Message) => inWindow(m) || nearView(m.id);
+  messages = messages.filter(keep);
+  for (let held = messages.filter(inWindow); held.length > WINDOW; held = messages.filter(inWindow)) {
+    if (dropNewer) {
+      const chunk = held.slice(-Math.min(PAGE, held.length - WINDOW));
+      if (live()) pending = [];
+      newer.push({ before: newer.at(-1)?.first ?? null, first: chunk[0].seq });
+    } else olderCursor = held[held.length - WINDOW].seq;
+    messages = messages.filter(keep);
+  }
+}
+function mergePage(page: Message[]) {
+  const all = new Map(messages.map((m) => [m.id, m]));
+  for (const m of page) all.set(m.id, m);
+  messages = [...all.values()].sort(bySeq);
+}
+async function loadOlder() {
+  if (paging || !current || !olderCursor) return;
+  const id = current.id,
+    token = generation;
+  paging = true;
+  try {
+    const page = await api<Page>(pagePath(id, olderCursor));
+    if (token !== generation) return;
+    historyExpanded = true;
+    mergePage(page.messages);
+    olderCursor = page.older_cursor;
+    trim(true);
+    lastSignature = signature();
+    render({ anchor: true });
+  } finally {
+    paging = false;
+  }
+  requestAnimationFrame(() => atEdge(false));
+}
+// Fetches again what was let go below. Messages may have arrived meanwhile, so a page that no
+// longer reaches the window is set aside to read later and the gap under it is read first.
+async function loadNewer() {
+  if (paging || !current || live()) return;
+  const id = current.id,
+    token = generation;
+  paging = true;
+  try {
+    for (let tries = 0; tries < 8 && !live(); tries++) {
+      const next = newer.at(-1)!,
+        page = await api<Page>(pagePath(id, next.before));
+      if (token !== generation) return;
+      newer.pop();
+      const start = page.messages[0]?.seq;
+      if (page.older_cursor && start !== undefined && start > next.first) {
+        newer.push({ before: next.before, first: start }, { before: start, first: next.first });
+        continue;
+      }
+      mergePage(page.messages);
+      if (live()) {
+        pending = page.pending || [];
+        refreshCursor = page.refresh_cursor; refreshStamp = page.refresh_stamp;
+        markSeen();
+      }
+      trim(false);
+      lastSignature = signature();
+      render({ anchor: true });
+      break;
+    }
+  } finally {
+    paging = false;
+  }
+  requestAnimationFrame(() => atEdge(false));
+}
+// Back to the newest messages, from wherever the reader is.
+async function jumpToLatest() {
+  if (!current) return;
+  const id = current.id,
+    token = generation;
+  const page = await api<Page>(pagePath(id));
+  if (token !== generation) return;
+  messages = page.messages;
+  pending = page.pending || [];
+  olderCursor = page.older_cursor;
+  newer = [];
+  refreshCursor = page.refresh_cursor; refreshStamp = page.refresh_stamp; historyExpanded = false;
+  lastSignature = signature();
+  markSeen();
+  render({ bottom: true });
+}
+// Near either end of what is on the page, the next page is fetched. Without the reader scrolling,
+// only a short window is filled out, so an empty topic doesn't walk the whole history.
+function atEdge(scrolled: boolean) {
+  const list = document.querySelector<HTMLElement>("#message-list");
+  if (!list || paging || !current) return;
+  const room = list.clientHeight * 1.5;
+  if (list.scrollTop < room && olderCursor && (scrolled || messages.filter(inWindow).length < WINDOW))
+    action(loadOlder);
+  else if (!live() && list.scrollHeight - list.scrollTop - list.clientHeight < room) action(loadNewer);
 }
 // Having this conversation on screen is reading it.
 let readTimer=0;
@@ -224,7 +348,7 @@ addEventListener("pagehide",flushLiveReads);
 document.addEventListener("visibilitychange",()=>{if(document.hidden)flushLiveReads();});
 function markSeen(defer=false) {
   const last = messages.at(-1)?.seq;
-  if (!current?.role || !last || document.hidden) return;
+  if (!current?.role || !last || document.hidden || !live()) return;
   if (last <= marked && !state.unread[current.id]) return;
   marked = last;
   delete state.unread[current.id];
@@ -237,7 +361,7 @@ function markSeen(defer=false) {
 }
 const me = () => state.session.user!;
 // What is on the page: the conversation, then what is still being sent to it.
-const everything = () => (pending.length ? [...messages, ...pending] : messages);
+const everything = () => (pending.length && live() ? [...messages, ...pending] : messages);
 const signature = () => JSON.stringify([messages, pending, state.userBlocks]);
 const deltaCursors=new Map<string,number>();
 let overviewCursor=0;
@@ -251,8 +375,10 @@ export function applyMessageDelta(delta:{channel:string;messages:Message[];curso
   const list=document.querySelector<HTMLElement>("#message-list");
   if((list && list.scrollHeight-list.scrollTop-list.clientHeight>=80) || selectedMessage || editing || reply)historyExpanded=true;
   const previous=new Map(messages.map(m=>[m.id,m]));
-  for(const message of delta.messages){if(!message || typeof message.id!=="string" || !Number.isSafeInteger(message.seq))continue;previous.set(message.id,{...previous.get(message.id),...message});}
-  messages=[...previous.values()].sort((a,b)=>a.seq-b.seq);if(!historyExpanded)messages=messages.slice(-100);
+  // Away from the newest messages only those on the page change; the rest are read on the way down.
+  for(const message of delta.messages){if(!message || typeof message.id!=="string" || !Number.isSafeInteger(message.seq) || (!live() && !previous.has(message.id)))continue;previous.set(message.id,{...previous.get(message.id),...message});}
+  messages=[...previous.values()].sort(bySeq);
+  if(live() && !historyExpanded && messages.length>PAGE){messages=messages.slice(-PAGE);olderCursor=messages[0].seq;}else trim();
   const committed=new Set(messages.map(m=>m.id));pending=pending.filter(m=>!committed.has(m.id));
   refreshCursor=Math.max(refreshCursor||0,delta.cursor);refreshStamp=undefined;
   markSeen(true);render();renderSidebar();
@@ -355,6 +481,8 @@ async function selectChannel(id: string, topicId?: string) {
   messages = page.messages;
   pending = page.pending || [];
   olderCursor = page.older_cursor;
+  newer = [];
+  rosterFailed = false;
   refreshCursor = page.refresh_cursor; refreshStamp = page.refresh_stamp; historyExpanded = false;
   reply = editing = null;
   selectedMessage = null; messageSearch = "";
@@ -379,6 +507,7 @@ function paint() {
   renderMembers();
   renderComposer(false);
   render({ bottom: true });
+  requestAnimationFrame(() => atEdge(false));
 }
 
 // ---- who is here: the channel's members, beside the conversation ----
@@ -520,7 +649,7 @@ hooks.memberAct = (who, act) => {
     await refreshCurrent();
   });
 };
-let rosterLoading=false,rosterAuto="";
+let rosterLoading=false,rosterAuto="",rosterFailed=false;
 async function loadMemberPage() {
   if(rosterLoading || !current || current.members_cursor==null)return;
   const channel=current,token=generation;rosterLoading=true;
@@ -528,7 +657,7 @@ async function loadMemberPage() {
     const page=await api<{members:User[];next:string|null}>(`/channels/${channel.id}/member-page?after=${encodeURIComponent(channel.members_cursor??"")}`);
     if(current!==channel || generation!==token)return;
     channel.members=[...(channel.members||[]),...page.members];channel.members_cursor=page.next;
-  }catch{toast("Members could not be loaded.");}
+  }catch{rosterFailed=true;toast("Members could not be loaded.");}
   finally{rosterLoading=false;renderMembers();}
 }
 function renderMembers() {
@@ -555,8 +684,21 @@ function renderMembers() {
           : "";
       })
       .join("")}${c.members_cursor!=null?`<button type="button" data-more-members ${rosterLoading?"disabled":""}>${rosterLoading?"Loading…":"Load more members"}</button>`:""}</div>`;
-  if (panel.dataset.html !== html) panel.innerHTML = panel.dataset.html = html;
-  panel.querySelector("[data-more-members]")?.addEventListener("click",()=>void loadMemberPage(),{once:true});
+  if (panel.dataset.html !== html) {
+    const top = panel.querySelector(".panel-body")?.scrollTop ?? 0;
+    panel.innerHTML = panel.dataset.html = html;
+    const body = $(".panel-body", panel);
+    body.scrollTop = top;
+    body.addEventListener("scroll", moreMembers, { passive: true });
+  }
+  panel.querySelector("[data-more-members]")?.addEventListener("click",()=>{rosterFailed=false;void loadMemberPage();},{once:true});
+  requestAnimationFrame(moreMembers);
+}
+// The next page of members comes as the reader nears the end of those loaded, or while they don't fill the panel.
+function moreMembers() {
+  const body = document.querySelector<HTMLElement>("#member-list .panel-body");
+  if (!body || rosterLoading || rosterFailed || current?.members_cursor == null) return;
+  if (body.scrollHeight - body.scrollTop - body.clientHeight < body.clientHeight) void loadMemberPage();
 }
 
 export function sortedTopics() {
@@ -1023,6 +1165,10 @@ function render(
   const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 80,
     oldHeight = list.scrollHeight,
     oldTop = list.scrollTop;
+  // The first message in view stays put while pages come and go around it.
+  const box = list.getBoundingClientRect(),
+    anchor = opts.anchor ? $$(".message[id]", list).find((el) => el.getBoundingClientRect().bottom > box.top)?.id : undefined,
+    anchorTop = anchor ? document.getElementById(anchor)!.getBoundingClientRect().top : 0;
   // A hidden topic is read by opening it; hidden threads by asking for them.
   const quiet = c.mode === "threaded" ? hiddenThreads() : new Set<Message>(),
     away = new Set([...quiet].map((m) => m.id)),
@@ -1078,8 +1224,11 @@ function render(
     messages.some((m) => m.id === key && m.author_id !== me().id),
   );
   if (opts.bottom) list.scrollTop = list.scrollHeight;
-  else if (opts.anchor)
-    list.scrollTop = oldTop + Math.max(0, list.scrollHeight - oldHeight);
+  else if (opts.anchor) {
+    const el = anchor && document.getElementById(anchor);
+    if (el) list.scrollTop += el.getBoundingClientRect().top - anchorTop;
+    else list.scrollTop = oldTop + Math.max(0, list.scrollHeight - oldHeight);
+  }
   else if (!threaded() && atBottom)
     list.scrollTo({
       top: list.scrollHeight,
@@ -1098,6 +1247,12 @@ function inView(el: Element) {
 function updatePill() {
   const list = $("#message-list"),
     pill = $<HTMLButtonElement>("#new-pill");
+  if (!live()) {
+    unseen = [];
+    pill.hidden = false;
+    pill.innerHTML = `${icon("arrow-down")} Jump to latest`;
+    return;
+  }
   if (unseen.length) {
     if (
       !threaded() &&
@@ -1157,6 +1312,7 @@ function wireFeed() {
   const list = $("#message-list");
   let ticking = false;
   list.addEventListener("scroll", () => {
+    if (!paging) atEdge(true);
     if (ticking || !unseen.length) return;
     ticking = true;
     requestAnimationFrame(() => {
@@ -1165,6 +1321,7 @@ function wireFeed() {
     });
   });
   $("#new-pill").addEventListener("click", () => {
+    if (!live()) return action(jumpToLatest);
     if (threaded() && unseen.length) reveal(unseen.shift()!);
     else list.scrollTo({ top: list.scrollHeight, behavior: "smooth" });
     updatePill();
@@ -1371,17 +1528,7 @@ function wireFeed() {
     } else if ((hit = on("[data-delete]"))) {
       removeMessage(hit.dataset.delete!);
     } else if (on("#older-messages"))
-      action(async () => {
-        const id = current!.id,
-          token = generation;
-        const page = await api<Page>(pagePath(id, olderCursor));
-        if (token !== generation) return;
-        historyExpanded = true;
-        messages = [...page.messages, ...messages];
-        olderCursor = page.older_cursor;
-        lastSignature = signature();
-        render({ anchor: true });
-      });
+      action(loadOlder);
     else if ((hit = on(".group-body > article")) && !on("a, button, form, .spoiler") && !(touch() && on(".emoji, .custom-emoji"))) {
       // Touch screens have no hover: a tap shows a message's buttons, under it.
       const shown = hit.classList.contains("show-actions");
@@ -1554,6 +1701,7 @@ function renderComposer(keepDraft = true) {
         if (reply && threaded() && isFusion()) selectedMessage = null;
         reply = null;
         sent();
+        if (!live()) await jumpToLatest();
         if (message.queued) pending = [...pending, message];
         else merge(message);
         if (narrow && topicId && narrow !== topicId)
@@ -1585,8 +1733,11 @@ export function redrawChat(composer = false, header = false) {
 export async function refreshCurrent(metadata = true) {
   if (!current) return;
   const id = current.id,
-    token = generation;
-  const [detail, page] = await load(id, metadata);
+    token = generation,
+    top = ceiling(),
+    bottom = olderCursor,
+    // Away from the newest messages it is the window that is read again, from its top.
+    [detail, page] = await load(id, metadata, live() ? undefined : top);
   if (generation !== token) return;
   const roleChanged = detail.role !== current.role,
     federationChanged =
@@ -1600,24 +1751,39 @@ export async function refreshCurrent(metadata = true) {
       detail.description !== current.description ||
       detail.dm?.avatar_url !== current.dm?.avatar_url ||
       detail.name !== current.name;
+  // A refresh without the roster keeps the pages of it already read, unless people came or went.
+  if (detail.members_cursor === "" && !detail.members?.length && current.members_cursor !== "") {
+    if (detail.member_count === current.member_count) {
+      detail.members = current.members;
+      detail.members_cursor = current.members_cursor;
+    } else rosterAuto = "";
+  }
   current = detail;
   if (narrow && !topicOf(narrow)) return go(`#/c/${id}`);
   // Refresh earlier loaded pages too so edits/removals never remain visible in cached history.
   let fresh = page.incremental
-      ? [...messages.filter(message=>!page.messages.some(next=>next.id===message.id)),...page.messages].sort((a,b)=>a.seq-b.seq).slice(-100)
+      ? [...messages.filter(message=>!page.messages.some(next=>next.id===message.id)),...page.messages].sort(bySeq).slice(-PAGE)
       : page.messages,
     cursor = page.older_cursor;
-  const oldest = messages[0]?.seq;
-  while (!page.incremental && cursor && oldest && fresh[0].seq > oldest) {
+  const oldest = bottom ?? messages[0]?.seq;
+  while (!page.incremental && cursor && oldest && fresh.length && fresh[0].seq > oldest) {
     const previous = await api<Page>(pagePath(id, cursor));
     if (generation !== token) return;
     fresh = [...previous.messages, ...fresh];
     cursor = previous.older_cursor;
   }
-  messages = fresh;
-  pending = page.pending || [];
-  olderCursor = cursor;
-  refreshCursor = page.refresh_cursor; refreshStamp = page.refresh_stamp;
+  // Scrolling meanwhile moved the window; what it fetched is newer than this.
+  if (top === ceiling() && bottom === olderCursor && !paging) {
+    // What is in sight outside the window stays until the reader moves on.
+    const strays = messages.filter((m) => !inWindow(m) && nearView(m.id) && !fresh.some((f) => f.id === m.id));
+    messages = [...fresh, ...strays].sort(bySeq);
+    olderCursor = cursor;
+    if (live()) {
+      pending = page.pending || [];
+      refreshCursor = page.refresh_cursor; refreshStamp = page.refresh_stamp;
+    }
+    trim();
+  }
   if (!document.querySelector("#rows")) return;
   markSeen();
   if (roleChanged || federationChanged || headerChanged || topicsChanged)

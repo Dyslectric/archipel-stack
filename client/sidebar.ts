@@ -44,6 +44,11 @@ const titles: Record<SideKind, string> = {
 const kinds = Object.keys(titles) as SideKind[];
 let html = "",
   saving = 0;
+// However many conversations there are, rows are put on the page a few screens at a time, in the
+// order they are listed; more follow as the reader scrolls toward the end.
+const ROWS = 150;
+let budget = ROWS,
+  left = 0;
 let drag: { type: "item" | "group" | "section"; kind: SideKind; id: string } | null = null;
 const topicExpansion = new Map<string, boolean>();
 const topicCache = new Map<string, Topic[]>();
@@ -337,6 +342,7 @@ function sectionHtml(kind: SideKind) {
   const items = (ids: string[]) =>
     ids
       .filter((id) => rows.has(id))
+      .filter(() => left-- > 0)
       .map((id) => {
         const row = rows.get(id)!;
         return `<div class="side-item" draggable="true" data-item="${esc(id)}"><div class="side-row">${row.link}<button type="button" class="icon-button row-menu" data-item-menu aria-haspopup="menu" aria-label="Organise ${esc(row.name)}" title="Move or group">${icon("more")}</button></div>${row.extra}</div>`;
@@ -357,7 +363,7 @@ function sectionHtml(kind: SideKind) {
     .map(
       (g) =>
         `<div class="side-group" data-group="${esc(g.id)}"><div class="group-head" draggable="true"><button type="button" class="side-toggle" data-fold="${esc(g.id)}" aria-expanded="${!g.collapsed}">${icon("chevron-down", "chev")}<span class="grow">${esc(g.name)}</span>${g.collapsed ? news(g.items) : ""}</button><button type="button" class="icon-button row-menu" data-group-menu aria-haspopup="menu" aria-label="Organise group ${esc(g.name)}" title="Rename, move or delete">${icon("more")}</button></div>
-        ${g.collapsed ? "" : `<div class="side-items" data-list="${esc(g.id)}">${items(g.items) || '<p class="muted small side-empty">Nothing in this group yet.</p>'}</div>`}</div>`,
+        ${g.collapsed ? "" : `<div class="side-items" data-list="${esc(g.id)}">${items(g.items) || (g.items.some((id) => rows.has(id)) ? "" : '<p class="muted small side-empty">Nothing in this group yet.</p>')}</div>`}</div>`,
     )
     .join("");
   const looking =
@@ -377,7 +383,9 @@ export function renderSidebar() {
   }
   const list = document.querySelector("#channel-list");
   if (!list || drag) return;
-  const next = sections().map(sectionHtml).join("");
+  left = budget;
+  let next = sections().map(sectionHtml).join("");
+  if (left < 0) next += '<p class="muted small side-empty" data-side-more>Loading more…</p>';
   if (next === html && list.childElementCount) return;
   list.innerHTML = html = next;
 }
@@ -471,14 +479,26 @@ function groupMenu(button: HTMLElement) {
   });
 }
 
+function moreRows(list: HTMLElement) {
+  if (!list.isConnected || !list.querySelector("[data-side-more]")) return;
+  if (list.scrollHeight - list.scrollTop - list.clientHeight > list.clientHeight) return;
+  budget += ROWS;
+  renderSidebar();
+  requestAnimationFrame(() => moreRows(list));
+}
+
 // ---- the sidebar itself: as wide as the reader drags it, or folded away. Kept for this browser. ----
 export function sidebarFrame(view: HTMLElement) {
   view.innerHTML = `<div class="workspace"><aside class="sidebar" id="sidebar" aria-label="Conversations">
     <nav id="channel-list" aria-label="Your conversations"></nav>
     <button type="button" class="side-foot" data-new-dm>${icon("pencil")}<span>New direct message</span></button>
     <div class="side-resize" id="side-resize" role="separator" aria-orientation="vertical" aria-label="Sidebar width" aria-valuemin="180" aria-valuemax="520" tabindex="0" title="Drag to resize. Double-click to reset."></div></aside></div>`;
-  wireSidebar(view.querySelector<HTMLElement>("#channel-list")!);
+  const list = view.querySelector<HTMLElement>("#channel-list")!;
+  wireSidebar(list);
+  budget = ROWS;
+  list.addEventListener("scroll", () => moreRows(list), { passive: true });
   renderSidebar();
+  requestAnimationFrame(() => moreRows(list));
   return view.querySelector<HTMLElement>(".workspace")!;
 }
 
