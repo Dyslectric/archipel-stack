@@ -2503,7 +2503,7 @@ export class Federation {
         else
           this.store.db
             .prepare(
-              "INSERT INTO federation_follows(channel_id,actor,follow_id,status) VALUES(?,?,?,?) ON CONFLICT(channel_id,actor) DO UPDATE SET follow_id=excluded.follow_id,status=excluded.status,stream_start=CASE WHEN federation_follows.follow_id=excluded.follow_id THEN federation_follows.stream_start ELSE NULL END",
+              "INSERT INTO federation_follows(channel_id,actor,follow_id,status) VALUES(?,?,?,?) ON CONFLICT(channel_id,actor) DO UPDATE SET follow_id=excluded.follow_id,status=excluded.status,stream_start=CASE WHEN federation_follows.follow_id=excluded.follow_id THEN federation_follows.stream_start ELSE NULL END,instance_start=CASE WHEN federation_follows.follow_id=excluded.follow_id THEN federation_follows.instance_start ELSE NULL END",
             )
             .run(
               channel.id,

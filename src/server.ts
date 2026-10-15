@@ -27,7 +27,9 @@ const pushTimer = setInterval(() => {
     .catch(() => console.error("Notification worker failed."));
 }, 1500);
 pushTimer.unref();
-const server = app.listen(config.port, config.host, () => {
+// A deep accept queue lets every browser reconnecting after a restart wait for
+// a turn, instead of having its connection dropped and retried seconds later.
+const server = app.listen({ port: config.port, host: config.host, backlog: 4096 }, () => {
   console.log(`Archipel Server is running at ${config.baseUrl}`);
   console.log(`Database: ${store.db.dialect === "postgres" ? "PostgreSQL" : "SQLite"}.`);
   console.log(

@@ -1,3 +1,4 @@
+import { availableParallelism } from "node:os";
 import { parseTrustedProxies } from "./proxy.js";
 
 export interface Config {
@@ -38,6 +39,10 @@ export interface Config {
   federationSendConcurrency: number;
   /** Outbound federation deliveries per minute to one peer host; 0 is unlimited. */
   federationPeerSendRate: number;
+  /** Processes that write event streams once enough browsers are connected. */
+  eventWorkers: number;
+  /** Open streams before writing moves to those processes. */
+  eventWorkerThreshold: number;
   federationChannelTransport: "off" | "batch" | "stream";
 }
 
@@ -165,6 +170,8 @@ export function loadConfig(env = process.env): Config {
     federationSendInterval: rate("FEDERATION_SEND_INTERVAL", 1000, 100, 600000),
     federationSendConcurrency: rate("FEDERATION_SEND_CONCURRENCY", 4, 1, 32),
     federationPeerSendRate: rate("FEDERATION_PEER_SEND_RATE", 100, 0),
+    eventWorkers: rate("EVENT_WORKERS", Math.min(4, Math.max(0, availableParallelism() - 2)), 0, 32),
+    eventWorkerThreshold: rate("EVENT_WORKER_THRESHOLD", 512, 0),
     adminSubjects: (env.ADMIN_SUBJECTS || "")
       .split(",")
       .map((s) => s.trim())

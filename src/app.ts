@@ -45,7 +45,7 @@ export function createApp(config: Config, store: Store) {
   const push = new Push(store, config);
   const readMarks = new ReadMarks(store, writes);
   const native = new NativeChat(store, config);
-  const events = new Events(store,native);
+  const events = new Events(store,native,{workers:config.eventWorkers,threshold:config.eventWorkerThreshold});
   const device = new DeviceSignIn(store, config.baseUrl);
   const app = express();
   app.locals.events = events;
@@ -489,7 +489,8 @@ export function createApp(config: Config, store: Store) {
   // What changed is pushed to open browsers. An account still waiting for approval listens
   // too: being let in is news to it.
   app.get("/api/events", async (req, res) => {
-    await events.open(req, res, cookie(req, authCookie));
+    // The pacing middleware has just read this request's session from the native service.
+    await events.open(req, res, cookie(req, authCookie), res.locals.nativeSession);
   });
   const user = (res: Response) => res.locals.user as User;
   // Unsupported native features re-enter compatibility with a fresh session,

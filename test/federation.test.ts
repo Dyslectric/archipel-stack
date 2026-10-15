@@ -216,6 +216,23 @@ test("instance admission routing stays cached and rejoining recovers an expired 
   assert.equal(b.store.db.prepare("SELECT error FROM federation_instance_cursors").get()!.error,null);
 });
 
+test("a replacement Follow after a lost Undo starts from a fresh origin boundary",async t=>{
+  const env={FEDERATION_CHANNEL_TRANSPORT:"batch",FEDERATION_PEER_SEND_RATE:"0"};
+  const a=await instance(t,env),b=await instance(t,env),home=channel(a),actor=a.fed.channelActor(home);
+  const sub=await b.fed.subscribe(b.bob,actor);await drain(a,b);
+  a.store.post(a.alice,home.id,{body:"Before retained horizon"});
+  a.store.db.prepare("UPDATE federation_instance_state SET floor=1").run();
+  await b.fed.tick();assert.match(b.store.db.prepare("SELECT error FROM federation_instance_cursors").get()!.error,/expired/);
+  // The home never hears an Undo: its follower row survives with the old Follow and boundary.
+  const before=Number(a.store.db.prepare("SELECT instance_start FROM federation_follows").get()!.instance_start);
+  b.store.db.prepare("DELETE FROM federation_subscriptions WHERE channel_id=?").run(sub.channel.id);
+  await b.fed.subscribe(b.bob,actor);await drain(b,a);
+  const after=Number(a.store.db.prepare("SELECT instance_start FROM federation_follows").get()!.instance_start);
+  assert.ok(after>before,`replacement Follow kept the old origin boundary ${before}`);
+  a.store.post(a.alice,home.id,{body:"After replacement"});await b.fed.tick();
+  assert.ok(b.store.messages(b.bob,sub.channel.id).some(m=>m.body==="After replacement"));
+});
+
 async function waitUntil(predicate: () => boolean, timeout = 5000) {
   const end = Date.now() + timeout;
   while (!predicate()) { if (Date.now() >= end) assert.fail("Channel stream did not settle"); await new Promise(done => setTimeout(done, 25)); }

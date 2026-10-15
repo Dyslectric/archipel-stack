@@ -1,5 +1,8 @@
 # Benchmarking active chat users
 
+For a same-host comparison of room delivery against Prosody and ejabberd, see
+[room delivery parity](parity-benchmark.md).
+
 Run from the repository with Node 24+ and `npm ci` dependencies installed:
 
 ```sh

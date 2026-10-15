@@ -10,12 +10,18 @@ pub async fn append(tx: &mut Transaction<'_, Postgres>, changes: Value) -> Resul
         .await?;
     Ok(())
 }
-pub fn start(pool: PgPool, channel: String) -> tokio::task::JoinHandle<()> {
+/// Publishes as soon as a forwarded mutation is woken through `wake`; the
+/// interval remains a fallback for writers that do not pass the gateway.
+pub fn start(
+    pool: PgPool,
+    channel: String,
+    wake: std::sync::Arc<tokio::sync::Notify>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(80));
+        let mut interval = tokio::time::interval(Duration::from_millis(1000));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            tokio::select! { _ = interval.tick() => {}, _ = wake.notified() => {} }
             if publish(&pool, &channel).await.is_err() {
                 // Rows remain durable on any failure; a later round retries.
                 tokio::time::sleep(Duration::from_millis(200)).await;
@@ -25,6 +31,12 @@ pub fn start(pool: PgPool, channel: String) -> tokio::task::JoinHandle<()> {
 }
 async fn publish(pool: &PgPool, channel: &str) -> Result<(), Failure> {
     let mut tx = pool.begin().await?;
+    // Only notices are removed here. If a crash lost this commit they would be
+    // published again, which listeners already treat as a harmless repeat, so
+    // the relay need not wait for its WAL to reach disk.
+    sqlx::query("SET LOCAL synchronous_commit = off")
+        .execute(&mut *tx)
+        .await?;
     let rows = sqlx::query(
         "SELECT seq,payload FROM native_changes ORDER BY seq LIMIT 512 FOR UPDATE SKIP LOCKED",
     )

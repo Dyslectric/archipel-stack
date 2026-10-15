@@ -1,6 +1,27 @@
 import type { Config } from "./config.js";
 import { randomUUID,createHash } from "node:crypto";
+import http from "node:http";
+import https from "node:https";
 import { Problem, type Store,type User } from "./store.js";
+// Hot-path calls to the native service share kept-alive connections. Plain
+// node:http costs much less per call than fetch, which matters when a crowd of
+// browsers reconnects at once. Redirects are never followed.
+const agents = { http: new http.Agent({ keepAlive: true, maxSockets: 256 }), https: new https.Agent({ keepAlive: true, maxSockets: 256 }) };
+function rpc(url: string, secret: string, body: string, timeout: number) {
+  return new Promise<{ status: number; type: string; body: Buffer }>((resolve, reject) => {
+    const target = new URL(url), secure = target.protocol === "https:";
+    const req = (secure ? https : http).request(target, { method: "POST", agent: secure ? agents.https : agents.http,
+      headers: { Authorization: `Bearer ${secret}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } }, res => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("end", () => resolve({ status: res.statusCode || 0, type: String(res.headers["content-type"] || ""), body: Buffer.concat(chunks) }));
+      res.on("error", reject);
+    });
+    req.setTimeout(timeout, () => req.destroy(new Error("timeout")));
+    req.on("error", reject);
+    req.end(body);
+  });
+}
 const invalidUtf16 = (value: string) => /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(value);
 
 // Migration boundary: only an explicit, pre-mutation "unsupported" response
@@ -72,17 +93,14 @@ export class NativeChat {
   private async call(job: Record<string, unknown>) {
     await this.store.db.listenExternalChanges().catch(()=>{throw new Problem(503,"Native change notifications unavailable.");});
     this.statistics.requests++;
-    const response = await fetch(`${this.config.nativeChatUrl}/v1/chat`, {
-      method: "POST", redirect: "error", signal: AbortSignal.timeout(20000),
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.config.nativeBridgeSecret}` },
-      body: JSON.stringify(job),
-    }).catch(() => { this.statistics.errors++;throw new Problem(503, "Native chat worker unavailable."); });
-    const text = await response.text().catch(()=>{this.statistics.errors++;throw new Problem(503,"Native chat worker unavailable.");});
+    const response = await rpc(`${this.config.nativeChatUrl}/v1/chat`, this.config.nativeBridgeSecret, JSON.stringify(job), 20000)
+      .catch(() => { this.statistics.errors++;throw new Problem(503, "Native chat worker unavailable."); });
+    const text = response.body.toString("utf8");
     if (Buffer.byteLength(text) > (["messages","overview"].includes(String(job.op)) ? 4 * 1024 * 1024 : 262144)) {this.statistics.errors++;throw new Problem(502, "Invalid native worker response.");}
     let reply: { result?: unknown; user?: string; changed?: boolean; code?: string; error?: string };
     try { reply = JSON.parse(text); } catch { this.statistics.errors++;throw new Problem(502, "Invalid native worker response."); }
     if (response.status === 501 && reply.code === "native_unsupported") {this.statistics.unsupported++;return undefined;}
-    if (!response.ok) {this.statistics.errors++;throw new Problem(response.status, reply.error || "Native chat worker failed.");}
+    if (response.status < 200 || response.status > 299) {this.statistics.errors++;throw new Problem(response.status, reply.error || "Native chat worker failed.");}
     if (typeof reply.user !== "string" || typeof reply.changed !== "boolean" || reply.result === undefined) {
       this.statistics.errors++;throw new Problem(502, "Invalid native worker response.");
     }
@@ -120,12 +138,11 @@ export class NativeChat {
   }
   private async rawRead(job:Record<string,unknown>) {
     await this.store.db.listenExternalChanges();this.statistics.requests++;
-    const response=await fetch(`${this.config.nativeChatUrl}/v1/read`,{method:"POST",redirect:"error",signal:AbortSignal.timeout(20000),
-      headers:{Authorization:`Bearer ${this.config.nativeBridgeSecret}`,"Content-Type":"application/json"},body:JSON.stringify(job),
-    }).catch(()=>{this.statistics.errors++;throw new Problem(503,"Native read service unavailable.");});
-    const body=Buffer.from(await response.arrayBuffer().catch(()=>{this.statistics.errors++;throw new Problem(503,"Native read service unavailable.");}));
+    const response=await rpc(`${this.config.nativeChatUrl}/v1/read`,this.config.nativeBridgeSecret,JSON.stringify(job),20000)
+      .catch(()=>{this.statistics.errors++;throw new Problem(503,"Native read service unavailable.");});
+    const body=response.body;
     if(body.length>4*1024*1024+4096){this.statistics.errors++;throw new Problem(502,"Native read response is too large.");}
-    if(!response.ok) {
+    if(response.status<200 || response.status>299) {
       let error:{code?:string;error?:string};
       try{error=JSON.parse(body.toString());if(!error || typeof error!=="object")throw new Error();}
       catch{this.statistics.errors++;throw new Problem(502,"Invalid native read response.");}
@@ -134,7 +151,7 @@ export class NativeChat {
     }
     // The authenticated worker emits the public JSON projection directly. Do
     // not parse and serialize a full message page again on the Node edge.
-    if(!response.headers.get("content-type")?.startsWith("application/json") || body[0]!==123){this.statistics.errors++;throw new Problem(502,"Invalid native read response.");}
+    if(!response.type.startsWith("application/json") || body[0]!==123){this.statistics.errors++;throw new Problem(502,"Invalid native read response.");}
     this.statistics.completed++;if(job.op==="messages")this.statistics.pages++;else this.statistics.overviews++;
     return body;
   }

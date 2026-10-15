@@ -116,6 +116,14 @@ including Cloudflare's, from closing a quiet stream. Without HTTP/2 a browser
 allows only six connections to one host; Archipel Server keeps a stream only for tabs
 that are in view, so many open tabs do not use them up.
 
+Once `EVENT_WORKER_THRESHOLD` streams are open (default 512), each new stream's
+socket is handed to one of `EVENT_WORKERS` writing processes (default: logical
+CPUs minus two, at most four; `0` keeps every stream in the server process). The
+server still decides what each reader receives; the writers only copy prepared
+frames to sockets, so delivery to many readers uses more than one core. A
+handed-over stream ends when its session does, as before. Stop the server with
+SIGTERM so the streams close before its listener does.
+
 ## External proxy network and trusted proxy
 
 For a Traefik deployment, setup asks for:

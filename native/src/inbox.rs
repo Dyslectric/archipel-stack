@@ -498,7 +498,7 @@ impl State {
         if banned {
             sqlx::query("DELETE FROM federation_follows WHERE channel_id=$1 AND actor=$2 AND status<>'blocked'").bind(key).bind(sender_id).execute(&mut *tx).await?;
         } else {
-            sqlx::query("INSERT INTO federation_follows(channel_id,actor,follow_id,status) VALUES($1,$2,$3,$4) ON CONFLICT(channel_id,actor) DO UPDATE SET follow_id=excluded.follow_id,status=excluded.status,stream_start=CASE WHEN federation_follows.follow_id=excluded.follow_id THEN federation_follows.stream_start ELSE NULL END").bind(key).bind(sender_id).bind(activity_id).bind(if blocked{"blocked"}else if accept{"accepted"}else{"pending"}).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO federation_follows(channel_id,actor,follow_id,status) VALUES($1,$2,$3,$4) ON CONFLICT(channel_id,actor) DO UPDATE SET follow_id=excluded.follow_id,status=excluded.status,stream_start=CASE WHEN federation_follows.follow_id=excluded.follow_id THEN federation_follows.stream_start ELSE NULL END,instance_start=CASE WHEN federation_follows.follow_id=excluded.follow_id THEN federation_follows.instance_start ELSE NULL END").bind(key).bind(sender_id).bind(activity_id).bind(if blocked{"blocked"}else if accept{"accepted"}else{"pending"}).execute(&mut *tx).await?;
         }
         let capable = accept && self.config().channel_transport && sender["channelEvents"]["version"] == 1;
         let tail: i64 = sqlx::query_scalar("SELECT COALESCE((SELECT tail FROM federation_channel_state WHERE channel_id=$1),0)").bind(key).fetch_one(&mut *tx).await?;

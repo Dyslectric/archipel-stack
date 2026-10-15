@@ -1270,7 +1270,7 @@ test("media follows current membership and account approval, and removed referen
   // Old databases migrate conservatively: an old URL is never a private draft bypass.
   const sqliteTriggers="DROP TRIGGER instance_feed_append; DROP TRIGGER instance_feed_follow_insert; DROP TRIGGER instance_feed_follow_delete; DROP TRIGGER instance_feed_follow_update; DROP TRIGGER instance_feed_privacy; DROP TRIGGER instance_feed_rule_insert; DROP TRIGGER instance_feed_rule_delete; DROP TRIGGER instance_feed_rule_update; DROP TRIGGER instance_feed_user_policy; DROP TRIGGER instance_feed_block_insert; DROP TRIGGER instance_feed_block_delete; DROP TRIGGER instance_feed_block_update; DROP TRIGGER instance_feed_channel_ban_insert; DROP TRIGGER instance_feed_channel_ban_delete;";
   if(f.store.db.dialect==="sqlite")f.store.db.exec(sqliteTriggers);
-  f.store.db.exec("DROP TABLE federation_instance_events; DROP TABLE federation_instance_state; DROP TABLE federation_channel_keys; DROP TABLE federation_channel_epochs; DROP TABLE federation_instance_incoming; DROP TABLE federation_instance_cursors; DROP TABLE federation_received_keys; DROP INDEX federation_legacy_followers; ALTER TABLE federation_follows DROP COLUMN key_epoch; ALTER TABLE federation_follows DROP COLUMN instance_start; ALTER TABLE federation_subscriptions DROP COLUMN instance_start; DROP TABLE federation_channel_events; DROP TABLE federation_channel_state; DROP TABLE federation_channel_cursors; DROP TABLE federation_channel_peers; ALTER TABLE federation_follows DROP COLUMN stream_start; ALTER TABLE federation_follows DROP COLUMN stream_capable; ALTER TABLE federation_subscriptions DROP COLUMN stream_start; ALTER TABLE attachments DROP COLUMN published; ALTER TABLE channel_roles DROP COLUMN allow_access; ALTER TABLE channel_held_roles DROP COLUMN allow_access; PRAGMA user_version=24");
+  f.store.db.exec((f.store.db.dialect === "sqlite" ? "DROP TRIGGER IF EXISTS instance_feed_append; DROP TRIGGER IF EXISTS instance_feed_follow_insert; DROP TRIGGER IF EXISTS instance_feed_follow_delete; DROP TRIGGER IF EXISTS instance_feed_follow_update; DROP TRIGGER IF EXISTS instance_feed_privacy; DROP TRIGGER IF EXISTS instance_feed_rule_insert; DROP TRIGGER IF EXISTS instance_feed_rule_delete; DROP TRIGGER IF EXISTS instance_feed_rule_update; DROP TRIGGER IF EXISTS instance_feed_user_policy; DROP TRIGGER IF EXISTS instance_feed_block_insert; DROP TRIGGER IF EXISTS instance_feed_block_delete; DROP TRIGGER IF EXISTS instance_feed_block_update; DROP TRIGGER IF EXISTS instance_feed_channel_ban_insert; DROP TRIGGER IF EXISTS instance_feed_channel_ban_delete; " : "") + "DROP TABLE federation_instance_events; DROP TABLE federation_instance_state; DROP TABLE federation_channel_keys; DROP TABLE federation_channel_epochs; DROP TABLE federation_instance_incoming; DROP TABLE federation_instance_cursors; DROP TABLE federation_received_keys; DROP INDEX federation_legacy_followers; ALTER TABLE federation_follows DROP COLUMN key_epoch; ALTER TABLE federation_follows DROP COLUMN instance_start; ALTER TABLE federation_subscriptions DROP COLUMN instance_start; DROP TABLE federation_channel_events; DROP TABLE federation_channel_state; DROP TABLE federation_channel_cursors; DROP TABLE federation_channel_peers; ALTER TABLE federation_follows DROP COLUMN stream_start; ALTER TABLE federation_follows DROP COLUMN stream_capable; ALTER TABLE federation_subscriptions DROP COLUMN stream_start; ALTER TABLE attachments DROP COLUMN published; ALTER TABLE channel_roles DROP COLUMN allow_access; ALTER TABLE channel_held_roles DROP COLUMN allow_access; PRAGMA user_version=24");
   f.store.db.migrate();
   assert.equal(f.store.db.version(), 31);
   assert.equal((await bob.request(path)).status, 403);
@@ -1451,12 +1451,13 @@ async function events(t: TestContext, origin: string, who: ReturnType<typeof bro
   };
 }
 
-test("shared browser deltas preserve handle privacy, blocks, revocation and bounded roster pages",async t=>{
-  const f=await application(t),alice=browser(f.origin),bob=browser(f.origin),charlie=browser(f.origin);
+for (const writers of [0, 1]) test(`shared browser deltas preserve handle privacy, blocks, revocation and bounded roster pages${writers ? " through a writing process" : ""}`,async t=>{
+  const f=await application(t,{eventWorkers:writers,eventWorkerThreshold:0}),alice=browser(f.origin),bob=browser(f.origin),charlie=browser(f.origin);
   const owner=await alice.login("alice"),reader=await bob.login("bob"),outsider=await charlie.login("charlie");
   const a=f.store.user(owner.id),b=f.store.user(reader.id);
   const channel=f.store.createChannel(a,{name:"delta-private",mode:"timeline",visibility:"members",admission:"open",hide_handles:true});
   f.store.join(b,channel.id);await new Promise(done=>setTimeout(done,100));
+  t.after(()=>f.app.locals.events.close());
   const member=await events(t,f.origin,bob,`?deltas=1&watch=${channel.id}`),other=await events(t,f.origin,charlie,`?deltas=1&watch=${channel.id}`);
   const first=f.store.post(a,channel.id,{body:"Shared without handles"});
   const notices=await member.take(),delta=notices.find((n:any)=>n.delta)?.delta as any;
@@ -1474,6 +1475,11 @@ test("shared browser deltas preserve handle privacy, blocks, revocation and boun
   assert.equal(hidden.messages.at(-1).body,"This message is hidden because you blocked this user.");assert.deepEqual(hidden.added,[]);
   f.store.setMember(a,channel.id,reader.id,{rule:"block"});await member.take();
   f.store.post(a,channel.id,{body:"After revocation"});assert.deepEqual(await member.take(),[]);
+  // Signing out ends the stream wherever its socket is written.
+  assert.equal((await charlie.request("/api/logout","POST",{})).status,200);await other.take();
+  assert.equal(other.state.ended,true);
+  // As the server does on shutdown, streams end before the HTTP server closes.
+  f.app.locals.events.close();
 });
 
 test("open browsers are told what changed for them: their channels, their own messages, and nothing kept from them", async (t) => {
@@ -1534,9 +1540,10 @@ test("open browsers are told what changed for them: their channels, their own me
   assert.deepEqual(await member.take(), [{ sending: true }]);
   assert.deepEqual(await admin.take(), [{ admin: true }]);
   assert.deepEqual(await outsider.take(), []);
-  // What changes the instance for everyone asks everyone to look again.
+  // Someone joining is news to them and to the channel's viewers, not a reason for everyone to reload.
   assert.equal((await charlie.request(`/api/channels/${open}/join`, "POST", {})).status, 200);
-  for (const stream of [member, admin, outsider]) assert.deepEqual(await stream.take(), [{ all: true }]);
+  for (const stream of [member, admin]) assert.deepEqual(await stream.take(), [{ channels: [open] }]);
+  assert.deepEqual(await outsider.take(), [{ me: true, read: true, channels: [open] }]);
   // A stream lasts as long as its session.
   assert.equal((await charlie.request("/api/logout", "POST", {})).status, 200);
   await outsider.take();

@@ -90,9 +90,11 @@ Each enabled front end uses one additional async PostgreSQL LISTEN connection.
 Notifications carry identifiers and are scoped by a hash of the current schema.
 Migration 29 adds a durable `native_changes` queue. Mutations append notices in the
 same transaction as their writes; a supervisor relay publishes committed batches
-every 80 ms, deduplicates repeated notices, and splits payloads below PostgreSQL's
-8 KiB limit. The publication transaction deletes only the rows it successfully
-notifies. Restart, network failure and rollback cannot silently discard pending
+as soon as the gateway has forwarded a mutation (and at least once a second for
+any other writer), deduplicates repeated notices, and splits payloads below
+PostgreSQL's 8 KiB limit. The publication transaction deletes only the rows it
+successfully notifies. It commits without waiting for its WAL flush: a crash can
+only make it publish those notices again, which listeners treat as a repeat. Restart, network failure and rollback cannot silently discard pending
 notices. Rollbacks and duplicate replays emit no notice. Reconnected listeners request
 reconciliation because NOTIFY does not retain messages for disconnected listeners.
 The API continues to decide what each reader may see. These shared notifications

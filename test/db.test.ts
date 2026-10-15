@@ -89,7 +89,7 @@ test("changes are reported once committed, with the rows of watched tables, and 
   const told: { table: string; rows: Record<string, unknown>[] }[][] = [];
   db.onChange = (changes) => told.push(changes);
   db.prepare("INSERT INTO users(id,username,display_name,created_at) VALUES('u','someone','Someone','now')").run();
-  assert.deepEqual(told.splice(0), [[{ table: "users", rows: [] }]]);
+  assert.deepEqual(told.splice(0).map(c => c.map(({ table, rows }) => ({ table, rows: rows.map(r => ({ ...r })) }))), [[{ table: "users", rows: [{ id: "u" }] }]]);
   db.transaction(() => {
     db.prepare("INSERT INTO read_marks VALUES('u','a',1)").run();
     db.prepare("INSERT INTO read_marks VALUES('u','b',1)").run();

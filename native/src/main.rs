@@ -226,14 +226,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         let workers = pool::Workers::start(config.clone()).await?;
         let protocol = outbox::State::new(chat::State::connect(config.clone(), false).await?);
+        let changed = Arc::new(tokio::sync::Notify::new());
         let change_relay = changes::start(
             protocol.chat.database.clone(),
             protocol.chat.notification_channel.clone(),
+            changed.clone(),
         );
         let state = Arc::new(Gateway {
             config: config.clone(),
             workers,
             protocol,
+            changed,
             admission: tokio::sync::Semaphore::new(config.workers * 128),
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(20))
@@ -274,6 +277,8 @@ struct Gateway {
     client: reqwest::Client,
     admission: tokio::sync::Semaphore,
     protocol: Arc<outbox::State>,
+    /// Wakes the change relay once a forwarded mutation has committed.
+    changed: Arc<tokio::sync::Notify>,
 }
 async fn account_request(
     State(state): State<Arc<Gateway>>,
@@ -281,7 +286,9 @@ async fn account_request(
     Json(request): Json<account::Request>,
 ) -> Result<Json<Value>, Failure> {
     authorize(&headers, &state.config.secret)?;
-    Ok(Json(state.protocol.account(request).await?))
+    let result = state.protocol.account(request).await;
+    state.changed.notify_one();
+    Ok(Json(result?))
 }
 async fn actor_request(
     State(state): State<Arc<Gateway>>,
@@ -351,7 +358,9 @@ async fn federation_tick(
     Json(input): Json<outbox::Tick>,
 ) -> Result<Json<Value>, Failure> {
     authorize(&headers, &state.config.secret)?;
-    Ok(Json(state.protocol.tick(input).await?))
+    let result = state.protocol.tick(input).await;
+    state.changed.notify_one();
+    Ok(Json(result?))
 }
 async fn federation_authenticate(
     State(state): State<Arc<Gateway>>,
@@ -399,7 +408,9 @@ async fn federation_receive(
             .await?
             .unwrap_or_else(|| actor.to_owned())
     };
-    forward(&state, "/v1/federation/receive", &key, &input).await
+    let response = forward(&state, "/v1/federation/receive", &key, &input).await;
+    state.changed.notify_one();
+    response
 }
 async fn health(
     State(state): State<Arc<Gateway>>,
@@ -455,7 +466,12 @@ async fn dispatch(
             .await?
             .ok_or(Failure(StatusCode::NOT_FOUND, "Message not found."))?;
     }
-    forward(&state, "/v1/chat", &job.channel, &job).await
+    let writes = !matches!(job.op.as_str(), "session" | "auth" | "messages" | "overview");
+    let response = forward(&state, "/v1/chat", &job.channel, &job).await;
+    if writes {
+        state.changed.notify_one();
+    }
+    response
 }
 async fn dispatch_read(
     State(state): State<Arc<Gateway>>,

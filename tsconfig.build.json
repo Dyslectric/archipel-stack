@@ -6,5 +6,5 @@
     "rootDir": ".",
     "sourceMap": true
   },
-  "include": ["src/**/*.ts", "scripts/identities.ts", "scripts/migrate-postgres.ts", "scripts/benchmark-five-server.ts", "scripts/benchmark-fwdxp-server.ts"]
+  "include": ["src/**/*.ts", "scripts/identities.ts", "scripts/migrate-postgres.ts", "scripts/benchmark-five-server.ts", "scripts/benchmark-fwdxp-server.ts", "scripts/parity-archipel-seed.ts"]
 }

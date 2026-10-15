@@ -46,6 +46,12 @@ export const watched: Record<string, string[]> = {
   federation_outgoing: ["user_id"],
   federation_deliveries: ["activity_id"],
   instance_settings: ["key"],
+  // Who was changed, so open streams reroute only those members.
+  users: ["id"],
+  user_roles: ["user_id"],
+  memberships: ["channel_id","user_id"],
+  channel_rules: ["channel_id","user_id"],
+  federation_follows: ["channel_id"],
 };
 const writes =
   /^\s*(?:INSERT\s+(?:OR\s+\w+\s+)?INTO|UPDATE|DELETE\s+FROM)\s+"?(\w+)"?/i;

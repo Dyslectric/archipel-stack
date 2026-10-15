@@ -309,13 +309,17 @@ export class Store {
       if (binding) {
         this.db
           .prepare(
-            "UPDATE users SET verified_socials=?, admin=?, admission_status=CASE WHEN ?=1 THEN 'approved' ELSE admission_status END WHERE id=?",
+            // An unchanged sign-in writes nothing, so open browsers are not told of it.
+            "UPDATE users SET verified_socials=?, admin=?, admission_status=CASE WHEN ?=1 THEN 'approved' ELSE admission_status END WHERE id=? AND (verified_socials!=? OR admin!=? OR (?=1 AND admission_status!='approved'))",
           )
           .run(
             JSON.stringify(socials),
             Number(admin),
             Number(admin),
             binding.user_id,
+            JSON.stringify(socials),
+            Number(admin),
+            Number(admin),
           );
         return this.authenticated(binding.user_id);
       }
