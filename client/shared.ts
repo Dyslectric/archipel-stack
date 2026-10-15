@@ -351,18 +351,28 @@ export const channelCan = (c: Channel, permission: ChannelPermission) =>
 const dayKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 export const sameDay = (a: string, b: string) =>
   dayKey(new Date(a)) === dayKey(new Date(b));
+// Making a formatter costs far more than using one, and a page of messages formats hundreds of times.
+const formatters = new Map<string, Intl.DateTimeFormat>();
+const format = (d: Date, options: Intl.DateTimeFormatOptions) => {
+  const key = JSON.stringify(options);
+  let f = formatters.get(key);
+  if (!f) formatters.set(key, (f = new Intl.DateTimeFormat([], options)));
+  return f.format(d);
+};
 export const clock = (ts: string) =>
-  new Date(ts).toLocaleTimeString([], hour12()
+  format(new Date(ts), hour12()
     ? { hour: "numeric", minute: "2-digit", hour12: true }
     : { hour: isFusion() ? "2-digit" : "numeric", minute: "2-digit", hourCycle: "h23" });
-export const full = (ts: string) => new Date(ts).toLocaleString([], { hour12: hour12() });
+// As toLocaleString gives it: the date and the time.
+export const full = (ts: string) =>
+  format(new Date(ts), { year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: hour12() });
 export function dayLabel(ts: string) {
   const d = new Date(ts),
     now = new Date(),
     yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
   if (dayKey(d) === dayKey(now)) return "Today";
   if (dayKey(d) === dayKey(yesterday)) return "Yesterday";
-  return d.toLocaleDateString([], {
+  return format(d, {
     weekday: "short",
     month: "short",
     day: "numeric",
@@ -375,7 +385,7 @@ function ago(ts: string) {
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
   if (s < 86400 * 7) return `${Math.floor(s / 86400)}d ago`;
-  return new Date(ts).toLocaleDateString([], {
+  return format(new Date(ts), {
     month: "short",
     day: "numeric",
     year: "numeric",
@@ -384,6 +394,63 @@ function ago(ts: string) {
 // Relative times are filled in afterwards (refreshTimes), so the markup stays the same as they age.
 export const when = (ts: string) =>
   `<time datetime="${esc(ts)}" title="${esc(full(ts))}" data-ago></time>`;
+// Brings what is inside an element to the given markup by changing only what differs. Elements
+// that stay are the same elements, so a list being scrolled, hovered or focused is undisturbed.
+// Children are matched by their key attribute where they have one, otherwise by place.
+const keyOf = (n: Node) =>
+  n instanceof Element
+    ? n.getAttribute("data-key") ?? n.getAttribute("data-item") ?? n.getAttribute("data-section") ?? n.getAttribute("data-group") ?? (n.id || null)
+    : null;
+const alike = (a: Node, b: Node) =>
+  a.nodeType === b.nodeType && (!(a instanceof Element) || a.tagName === (b as Element).tagName);
+function patchNode(from: Node, to: Node) {
+  if (!(from instanceof Element)) {
+    if (from.nodeValue !== to.nodeValue) from.nodeValue = to.nodeValue;
+    return;
+  }
+  const next = to as Element;
+  for (const { name } of [...from.attributes])
+    // A fold the reader opened stays open.
+    if (!next.hasAttribute(name) && !(name === "open" && from.tagName === "DETAILS")) from.removeAttribute(name);
+  for (const { name, value } of [...next.attributes])
+    if (from.getAttribute(name) !== value) from.setAttribute(name, value);
+  patchChildren(from, next);
+}
+function patchChildren(from: Node, to: Node) {
+  const keyed = new Map<string, Node>();
+  for (const child of from.childNodes) {
+    const key = keyOf(child);
+    if (key !== null) keyed.set(key, child);
+  }
+  let at = from.firstChild;
+  for (const next of [...to.childNodes]) {
+    const key = keyOf(next);
+    let match: Node | null = null;
+    if (key !== null) {
+      const found = keyed.get(key);
+      if (found && alike(found, next)) {
+        match = found;
+        keyed.delete(key);
+      }
+    } else if (at && keyOf(at) === null && alike(at, next)) match = at;
+    if (!match) from.insertBefore(next, at);
+    else {
+      if (match === at) at = at.nextSibling;
+      else from.insertBefore(match, at);
+      patchNode(match, next);
+    }
+  }
+  while (at) {
+    const gone = at;
+    at = at.nextSibling;
+    gone.remove();
+  }
+}
+export function patchHtml(el: Element, html: string) {
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  patchChildren(el, template.content);
+}
 export function refreshTimes(root: ParentNode = document) {
   for (const t of $$<HTMLTimeElement>("time[data-ago]", root)) {
     const text = ago(t.dateTime);

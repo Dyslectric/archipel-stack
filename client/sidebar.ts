@@ -9,6 +9,7 @@ import {
   go,
   icon,
   modeLabel,
+  patchHtml,
   popup,
   promptDialog,
   state,
@@ -387,7 +388,8 @@ export function renderSidebar() {
   let next = sections().map(sectionHtml).join("");
   if (left < 0) next += '<p class="muted small side-empty" data-side-more>Loading more…</p>';
   if (next === html && list.childElementCount) return;
-  list.innerHTML = html = next;
+  // Changed in place, so a list being scrolled, or a row being hovered, is undisturbed.
+  patchHtml(list, (html = next));
 }
 
 // ---- menus ----

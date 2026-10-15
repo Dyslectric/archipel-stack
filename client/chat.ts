@@ -25,6 +25,7 @@ import {
   nameButton,
   popup,
   promptDialog,
+  patchHtml,
   refreshTimes,
   richHtml,
   emojiOnly,
@@ -303,15 +304,31 @@ async function loadNewer() {
         refreshCursor = page.refresh_cursor; refreshStamp = page.refresh_stamp;
         markSeen();
       }
-      trim(false);
       lastSignature = signature();
       render({ anchor: true });
+      shedOlder(token);
       break;
     }
   } finally {
     paging = false;
   }
   requestAnimationFrame(() => atEdge(false));
+}
+// Letting go of the top costs a whole layout however few messages go, so it waits until the
+// reader stops scrolling. Scrolling on and on, the window lets go anyway once it is much too long.
+let lastScroll = 0;
+const idle = (fn: () => void) =>
+  "requestIdleCallback" in window ? requestIdleCallback(fn, { timeout: 2000 }) : setTimeout(fn, 300);
+function shedOlder(token: number) {
+  idle(() => {
+    if (token !== generation || paging) return;
+    const held = messages.filter(inWindow);
+    if (held.length <= WINDOW) return;
+    if (performance.now() - lastScroll < 300 && held.length < WINDOW + 2 * PAGE) return shedOlder(token);
+    trim(); // from whichever end the reader has since moved away from
+    lastSignature = signature();
+    render({ anchor: true });
+  });
 }
 // Back to the newest messages, from wherever the reader is.
 async function jumpToLatest() {
@@ -334,7 +351,8 @@ async function jumpToLatest() {
 function atEdge(scrolled: boolean) {
   const list = document.querySelector<HTMLElement>("#message-list");
   if (!list || paging || !current) return;
-  const room = list.clientHeight * 1.5;
+  // Far enough ahead that a fast scroll doesn't reach the end before the page arrives.
+  const room = Math.max(list.clientHeight * 3, 2400);
   if (list.scrollTop < room && olderCursor && (scrolled || messages.filter(inWindow).length < WINDOW))
     action(loadOlder);
   else if (!live() && list.scrollHeight - list.scrollTop - list.clientHeight < room) action(loadNewer);
@@ -680,20 +698,25 @@ function renderMembers() {
     <div class="panel-body">${memberSections(members)
       .map(({ label, list, counted }) => {
         return list.length
-          ? `<h3 class="side-label">${esc(label)}${counted ? ` · ${list.length}` : ""}</h3><ul class="plain member-rows">${list.map((u) => `<li>${avatar(u, "small")}${nameButton(u, u.actor_url, "member-name")}${ban(u)}${u.actor_url?.startsWith("xmpp:") ? `<span class="mode-tag" title="XMPP" aria-label="XMPP">${icon("xmpp")}</span>` : u.actor_url && !u.actor_url.startsWith(location.origin) ? `<span class="mode-tag" title="On another instance">${icon("globe")}</span>` : ""}</li>`).join("")}</ul>`
+          ? `<h3 class="side-label" data-key="h-${esc(label)}">${esc(label)}${counted ? ` · ${list.length}` : ""}</h3><ul class="plain member-rows" data-key="l-${esc(label)}">${list.map((u) => `<li data-key="${esc(u.id)}">${avatar(u, "small")}${nameButton(u, u.actor_url, "member-name")}${ban(u)}${u.actor_url?.startsWith("xmpp:") ? `<span class="mode-tag" title="XMPP" aria-label="XMPP">${icon("xmpp")}</span>` : u.actor_url && !u.actor_url.startsWith(location.origin) ? `<span class="mode-tag" title="On another instance">${icon("globe")}</span>` : ""}</li>`).join("")}</ul>`
           : "";
       })
       .join("")}${c.members_cursor!=null?`<button type="button" data-more-members ${rosterLoading?"disabled":""}>${rosterLoading?"Loading…":"Load more members"}</button>`:""}</div>`;
-  if (panel.dataset.html !== html) {
-    const top = panel.querySelector(".panel-body")?.scrollTop ?? 0;
-    panel.innerHTML = panel.dataset.html = html;
-    const body = $(".panel-body", panel);
-    body.scrollTop = top;
+  // Changed in place: the list being scrolled stays the same list, so a scroll under way carries on.
+  if (panel.dataset.html !== html) patchHtml(panel, (panel.dataset.html = html));
+  const body = $(".panel-body", panel);
+  if (!wired.has(body)) {
+    wired.add(body);
     body.addEventListener("scroll", moreMembers, { passive: true });
+    body.addEventListener("click", (e) => {
+      if (!(e.target as Element).closest("[data-more-members]")) return;
+      rosterFailed = false;
+      void loadMemberPage();
+    });
   }
-  panel.querySelector("[data-more-members]")?.addEventListener("click",()=>{rosterFailed=false;void loadMemberPage();},{once:true});
   requestAnimationFrame(moreMembers);
 }
+const wired = new WeakSet<Element>();
 // The next page of members comes as the reader nears the end of those loaded, or while they don't fill the panel.
 function moreMembers() {
   const body = document.querySelector<HTMLElement>("#member-list .panel-body");
@@ -1122,9 +1145,27 @@ function sync(parent: Element, nodes: Node[], animate: boolean) {
   for (const el of [...parent.children] as HTMLElement[])
     if (el.dataset.key) old.set(el.dataset.key, el);
   let ref = parent.firstElementChild;
+  // A group named after its first message is renamed when older ones join it. It is still the
+  // group whose messages it holds, so it keeps them rather than being built again.
+  let holders: Map<string, HTMLElement> | null = null;
+  const holder = (node: Node) => {
+    if (!holders) {
+      holders = new Map();
+      for (const el of old.values())
+        for (const kid of slot(el)?.children || [])
+          holders.set((kid as HTMLElement).dataset.key!, el);
+    }
+    for (const kid of node.kids!) {
+      const el = holders.get(kid.key);
+      if (el && old.get(el.dataset.key!) === el) return el;
+    }
+  };
   for (const node of nodes) {
-    let el = old.get(node.key);
-    old.delete(node.key);
+    let el = old.get(node.key) || (node.kids?.length ? holder(node) : undefined);
+    if (el) {
+      old.delete(el.dataset.key!);
+      el.dataset.key = node.key;
+    }
     if (!el || (sources.get(el) !== node.html && !busy(el))) {
       const template = document.createElement("template");
       template.innerHTML = node.html.trim();
@@ -1162,7 +1203,8 @@ function render(
     if (d.open) collapsed.delete(d.dataset.key!);
     else collapsed.add(d.dataset.key!);
   }
-  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 80,
+  // Midway through gliding down to a new message is still at the bottom: the next one carries on.
+  const atBottom = following || list.scrollHeight - list.scrollTop - list.clientHeight < 80,
     oldHeight = list.scrollHeight,
     oldTop = list.scrollTop;
   // The first message in view stays put while pages come and go around it.
@@ -1226,15 +1268,18 @@ function render(
   if (opts.bottom) list.scrollTop = list.scrollHeight;
   else if (opts.anchor) {
     const el = anchor && document.getElementById(anchor);
-    if (el) list.scrollTop += el.getBoundingClientRect().top - anchorTop;
-    else list.scrollTop = oldTop + Math.max(0, list.scrollHeight - oldHeight);
+    // The browser's own scroll anchoring usually holds it already. Setting the position anyway
+    // would cut short a smooth or momentum scroll under way, so it is only corrected when it moved.
+    const moved = el ? el.getBoundingClientRect().top - anchorTop : list.scrollHeight - oldHeight - (list.scrollTop - oldTop);
+    if (Math.abs(moved) >= 1) list.scrollTop += moved;
   }
-  else if (!threaded() && atBottom)
+  else if (!threaded() && atBottom) {
+    if (opts.animate) follow(true);
     list.scrollTo({
       top: list.scrollHeight,
       behavior: opts.animate ? "smooth" : "auto",
     });
-  else unseen.push(...arrived);
+  } else unseen.push(...arrived);
   updatePill();
 }
 // What folds in a threaded channel: one reply with those under it, or all of a thread's replies.
@@ -1308,10 +1353,22 @@ function merge(message: Message) {
     (a, b) => a.seq - b.seq,
   );
 }
+// Set while the list glides down to what just arrived; the reader taking over ends it.
+let following = false,
+  followTimer = 0;
+function follow(on: boolean) {
+  following = on;
+  clearTimeout(followTimer);
+  if (on) followTimer = window.setTimeout(() => (following = false), 1500);
+}
 function wireFeed() {
   const list = $("#message-list");
+  list.addEventListener("scrollend", () => follow(false));
+  for (const type of ["wheel", "touchstart", "keydown", "pointerdown"])
+    list.addEventListener(type, () => follow(false), { passive: true });
   let ticking = false;
   list.addEventListener("scroll", () => {
+    lastScroll = performance.now();
     if (!paging) atEdge(true);
     if (ticking || !unseen.length) return;
     ticking = true;

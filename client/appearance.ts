@@ -44,8 +44,11 @@ const savedHours = () => {
     return value === "12" || value === "24" ? value : null;
   } catch { return null; }
 };
+// The device's own choice is asked once: every message's time is formatted with it.
+let deviceHour12: boolean | undefined;
+const deviceHours = () => (deviceHour12 ??= !!new Intl.DateTimeFormat([], { hour: "numeric" }).resolvedOptions().hour12);
 export const hour12 = () =>
-  (savedHours() || (isFusion() || !new Intl.DateTimeFormat([], { hour: "numeric" }).resolvedOptions().hour12 ? "24" : "12")) === "12";
+  (savedHours() || (isFusion() || !deviceHours() ? "24" : "12")) === "12";
 export function applyHours() {
   const hours = hour12() ? "12" : "24";
   document.documentElement.dataset.hours = hours;
