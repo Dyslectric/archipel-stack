@@ -112,6 +112,20 @@ test("featured directory settings require an administrator, a session and CSRF",
   assert.equal((await admin.request("/api/admin/featured-channels").then(r => r.json())).enabled, true);
   assert.deepEqual(await member.request("/api/featured-channels").then(r => r.json()), []);
 });
+test("an unlisted channel is looked up by name, not listed", async t => {
+  const f = await application(t);
+  const owner = browser(f.origin), member = browser(f.origin);
+  await owner.login("alice"); await member.login("bob");
+  const created = await owner.request("/api/channels", "POST", { name: "backroom", mode: "timeline", visibility: "public", admission: "open", unlisted: true }).then(r => r.json());
+  assert.equal(created.unlisted, 1);
+  assert.equal((await fetch(`${f.origin}/api/channel-names/backroom`)).status, 401);
+  assert.deepEqual(await member.request("/api/channels").then(r => r.json()), []);
+  assert.equal((await member.request("/api/channel-names/backroom").then(r => r.json())).id, created.id);
+  assert.equal((await member.request("/api/channel-names/nowhere")).status, 404);
+  assert.equal((await member.request(`/api/channels/${created.id}/privacy`, "PATCH", { unlisted: false })).status, 403);
+  assert.equal((await owner.request(`/api/channels/${created.id}/privacy`, "PATCH", { unlisted: false }).then(r => r.json())).unlisted, 0);
+  assert.equal((await member.request("/api/channels").then(r => r.json())).length, 1);
+});
 async function application(t: TestContext, override: Partial<Config> = {}) {
   const { server, origin } = await listen(t);
   const config = {
@@ -1270,9 +1284,9 @@ test("media follows current membership and account approval, and removed referen
   // Old databases migrate conservatively: an old URL is never a private draft bypass.
   const sqliteTriggers="DROP TRIGGER instance_feed_append; DROP TRIGGER instance_feed_follow_insert; DROP TRIGGER instance_feed_follow_delete; DROP TRIGGER instance_feed_follow_update; DROP TRIGGER instance_feed_privacy; DROP TRIGGER instance_feed_rule_insert; DROP TRIGGER instance_feed_rule_delete; DROP TRIGGER instance_feed_rule_update; DROP TRIGGER instance_feed_user_policy; DROP TRIGGER instance_feed_block_insert; DROP TRIGGER instance_feed_block_delete; DROP TRIGGER instance_feed_block_update; DROP TRIGGER instance_feed_channel_ban_insert; DROP TRIGGER instance_feed_channel_ban_delete;";
   if(f.store.db.dialect==="sqlite")f.store.db.exec(sqliteTriggers);
-  f.store.db.exec((f.store.db.dialect === "sqlite" ? "DROP TRIGGER IF EXISTS instance_feed_append; DROP TRIGGER IF EXISTS instance_feed_follow_insert; DROP TRIGGER IF EXISTS instance_feed_follow_delete; DROP TRIGGER IF EXISTS instance_feed_follow_update; DROP TRIGGER IF EXISTS instance_feed_privacy; DROP TRIGGER IF EXISTS instance_feed_rule_insert; DROP TRIGGER IF EXISTS instance_feed_rule_delete; DROP TRIGGER IF EXISTS instance_feed_rule_update; DROP TRIGGER IF EXISTS instance_feed_user_policy; DROP TRIGGER IF EXISTS instance_feed_block_insert; DROP TRIGGER IF EXISTS instance_feed_block_delete; DROP TRIGGER IF EXISTS instance_feed_block_update; DROP TRIGGER IF EXISTS instance_feed_channel_ban_insert; DROP TRIGGER IF EXISTS instance_feed_channel_ban_delete; " : "") + "DROP TABLE federation_instance_events; DROP TABLE federation_instance_state; DROP TABLE federation_channel_keys; DROP TABLE federation_channel_epochs; DROP TABLE federation_instance_incoming; DROP TABLE federation_instance_cursors; DROP TABLE federation_received_keys; DROP INDEX federation_legacy_followers; ALTER TABLE federation_follows DROP COLUMN key_epoch; ALTER TABLE federation_follows DROP COLUMN instance_start; ALTER TABLE federation_subscriptions DROP COLUMN instance_start; DROP TABLE federation_channel_events; DROP TABLE federation_channel_state; DROP TABLE federation_channel_cursors; DROP TABLE federation_channel_peers; ALTER TABLE federation_follows DROP COLUMN stream_start; ALTER TABLE federation_follows DROP COLUMN stream_capable; ALTER TABLE federation_subscriptions DROP COLUMN stream_start; ALTER TABLE attachments DROP COLUMN published; ALTER TABLE channel_roles DROP COLUMN allow_access; ALTER TABLE channel_held_roles DROP COLUMN allow_access; PRAGMA user_version=24");
+  f.store.db.exec((f.store.db.dialect === "sqlite" ? "DROP TRIGGER IF EXISTS instance_feed_append; DROP TRIGGER IF EXISTS instance_feed_follow_insert; DROP TRIGGER IF EXISTS instance_feed_follow_delete; DROP TRIGGER IF EXISTS instance_feed_follow_update; DROP TRIGGER IF EXISTS instance_feed_privacy; DROP TRIGGER IF EXISTS instance_feed_rule_insert; DROP TRIGGER IF EXISTS instance_feed_rule_delete; DROP TRIGGER IF EXISTS instance_feed_rule_update; DROP TRIGGER IF EXISTS instance_feed_user_policy; DROP TRIGGER IF EXISTS instance_feed_block_insert; DROP TRIGGER IF EXISTS instance_feed_block_delete; DROP TRIGGER IF EXISTS instance_feed_block_update; DROP TRIGGER IF EXISTS instance_feed_channel_ban_insert; DROP TRIGGER IF EXISTS instance_feed_channel_ban_delete; " : "") + "ALTER TABLE channels DROP COLUMN unlisted; DROP TABLE federation_instance_events; DROP TABLE federation_instance_state; DROP TABLE federation_channel_keys; DROP TABLE federation_channel_epochs; DROP TABLE federation_instance_incoming; DROP TABLE federation_instance_cursors; DROP TABLE federation_received_keys; DROP INDEX federation_legacy_followers; ALTER TABLE federation_follows DROP COLUMN key_epoch; ALTER TABLE federation_follows DROP COLUMN instance_start; ALTER TABLE federation_subscriptions DROP COLUMN instance_start; DROP TABLE federation_channel_events; DROP TABLE federation_channel_state; DROP TABLE federation_channel_cursors; DROP TABLE federation_channel_peers; ALTER TABLE federation_follows DROP COLUMN stream_start; ALTER TABLE federation_follows DROP COLUMN stream_capable; ALTER TABLE federation_subscriptions DROP COLUMN stream_start; ALTER TABLE attachments DROP COLUMN published; ALTER TABLE channel_roles DROP COLUMN allow_access; ALTER TABLE channel_held_roles DROP COLUMN allow_access; PRAGMA user_version=24");
   f.store.db.migrate();
-  assert.equal(f.store.db.version(), 31);
+  assert.equal(f.store.db.version(), 32);
   assert.equal((await bob.request(path)).status, 403);
   const dmFile = f.store.addAttachment(f.store.user(author.id), bytes, "direct.png");
   f.store.sendDirect(f.store.user(author.id), (await alice.session()).user.id, `![direct](${dmFile.url})`);

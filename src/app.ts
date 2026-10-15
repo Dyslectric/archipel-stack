@@ -852,6 +852,9 @@ export function createApp(config: Config, store: Store) {
   app.get("/api/channels", (_req, res) =>
     res.json(store.listChannels(user(res))),
   );
+  app.get("/api/channel-names/:name", (req, res) =>
+    res.json(store.findChannel(user(res), req.params.name)),
+  );
   app.get("/api/featured-channels", (_req, res) =>
     res.json(federation.enabled() ? store.featuredChannels(user(res)) : []),
   );

@@ -731,7 +731,7 @@ const sections: Section[] = [
       el.innerHTML =
         card(
           `${channelIcon(c)} ${esc(c.name)}`,
-          `<dl class="info"><dt>Address</dt><dd><code>${esc(address)}</code></dd><dt>Description</dt><dd>${esc(c.description || "None")}</dd><dt>Conversation style</dt><dd>${modeLabel(c.mode)}${c.mode === "threaded" ? ` · titles ${c.optional_titles ? "optional" : "required"}` : ""}</dd><dt>Who can read</dt><dd>${c.visibility === "members" ? "Members only" : "Everyone on this instance"}</dd><dt>Who can join</dt><dd>${c.admission === "allowlist" ? "Allowed users only" : "Anyone on this instance"}</dd><dt>Members</dt><dd><a href="#/settings/channel/members/${c.id}">${c.member_count}</a></dd><dt>Your role</dt><dd>${roleLabel(c.role, c.channel_role)}</dd><dt>Shared with</dt><dd>${c.remote_actor ? "Hosted on another server" : c.federation_enabled ? "Members here and on other servers" : "People on this instance"}</dd></dl><p><a class="button secondary" href="#/c/${c.id}">${icon("chat")} Open channel</a></p>`,
+          `<dl class="info"><dt>Address</dt><dd><code>${esc(address)}</code></dd><dt>Description</dt><dd>${esc(c.description || "None")}</dd><dt>Conversation style</dt><dd>${modeLabel(c.mode)}${c.mode === "threaded" ? ` · titles ${c.optional_titles ? "optional" : "required"}` : ""}</dd><dt>Who can read</dt><dd>${c.visibility === "members" ? "Members only" : "Everyone on this instance"}</dd><dt>Who can join</dt><dd>${c.admission === "allowlist" ? "Allowed users only" : "Anyone on this instance"}</dd><dt>Directory</dt><dd>${c.unlisted ? "Unlisted: found by its name" : "Listed"}</dd><dt>Members</dt><dd><a href="#/settings/channel/members/${c.id}">${c.member_count}</a></dd><dt>Your role</dt><dd>${roleLabel(c.role, c.channel_role)}</dd><dt>Shared with</dt><dd>${c.remote_actor ? "Hosted on another server" : c.federation_enabled ? "Members here and on other servers" : "People on this instance"}</dd></dl><p><a class="button secondary" href="#/c/${c.id}">${icon("chat")} Open channel</a></p>`,
         ) +
         (c.role && c.role !== "owner"
           ? card(
@@ -904,6 +904,10 @@ const sections: Section[] = [
             "What members see of each other",
             `<form class="stack narrow-form" id="channel-privacy"><label class="check"><input type="checkbox" name="show_members" ${c.show_members ? "checked" : ""}> Show the list of who is in this channel</label><label class="check"><input type="checkbox" name="hide_handles" ${c.hide_handles ? "checked" : ""}> Hide handles, leaving only display names</label>${error}<button>Save</button></form>`,
             `The owner and moderators always see both. Other members can be allowed one at a time, below.${c.federation_enabled ? " Instances following this channel are told to do the same for their own members." : ""}`,
+          ) + card(
+            "Directory",
+            `<form class="stack narrow-form" id="channel-listing"><label class="check"><input type="checkbox" name="unlisted" ${c.unlisted ? "checked" : ""}> Keep this channel out of the channel list</label><button>Save</button></form>`,
+            `An unlisted channel is not shown to people who have not joined it. Anyone who knows its name, <code>#${esc(c.name)}</code>, can still find it, and read or join it as its access allows.`,
           )
         : "") + card(
         `${c.member_count} member${c.member_count === 1 ? "" : "s"}`,
@@ -953,6 +957,13 @@ const sections: Section[] = [
           });
           state.channels = await api<Channel[]>("/channels");
           if (chatChannel()?.id === c.id) resetChat();
+          toast("Channel updated.");
+          ctx.refresh();
+        });
+      if (owning)
+        onSubmit($("#channel-listing", el), async (data) => {
+          await api(`/channels/${c.id}/privacy`, "PATCH", { unlisted: data.get("unlisted") === "on" });
+          state.channels = await api<Channel[]>("/channels");
           toast("Channel updated.");
           ctx.refresh();
         });

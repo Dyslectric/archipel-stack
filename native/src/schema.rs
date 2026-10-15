@@ -44,8 +44,8 @@ pub async fn initialize(pool: &PgPool, config: &Config) -> Result<(), Box<dyn st
             .fetch_one(&mut *tx)
             .await?;
         let version: i64 = row.get("version");
-        if !(26..=31).contains(&version) {
-            return Err("Native startup supports schema 26–31; older databases need their compatibility migrations first".into());
+        if !(26..=32).contains(&version) {
+            return Err("Native startup supports schema 26–32; older databases need their compatibility migrations first".into());
         }
         let upgrades: Vec<Upgrade> =
             serde_json::from_str(include_str!("../data/schema-upgrades.json"))?;

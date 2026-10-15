@@ -340,7 +340,8 @@ export class Events {
     for(const id of wanted) {
       const c=this.routes.get(id);if(!c || !stream.approved)continue;
       if(c.remote_actor && (!this.federationEnabled || !stream.profile.federation_receive || !stream.profile.federation_subscribe || this.federationBlocks.has(c.remote_actor) || this.federationBlocks.has(new URL(c.remote_actor).origin)))continue;
-      if(!stream.admin && (this.blocked.has(`${id}|${stream.user}`) || c.visibility!=="public" && !this.memberships.get(stream.user)?.has(id)))continue;
+      // An unlisted channel reaches only its members, and whoever has it open by name.
+      if(!stream.admin && (this.blocked.has(`${id}|${stream.user}`) || (c.visibility!=="public" || c.unlisted && id!==stream.watch) && !this.memberships.get(stream.user)?.has(id)))continue;
       stream.channels.add(id);if(this.store.sees(stream.profile,c,"handles"))stream.handles.add(id);
       const group=this.byChannel.get(id)||new Set<Stream>();group.add(stream);this.byChannel.set(id,group);
     }

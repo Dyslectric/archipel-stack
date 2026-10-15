@@ -88,3 +88,21 @@ test("closing a stream records how far its watched channel was read; nothing is 
   await open(bob.id,channel.id);hub.close();
   assert.equal(left.length,1);
 });
+test("an unlisted channel reaches only its members and whoever has it open",async t=>{
+  const store=new Store(":memory:");store.initializeRegistration("open");
+  const alice=store.loginIdentity("test","alice","Alice",[]),bob=store.loginIdentity("test","bob","Bob",[]);
+  const hidden=store.createChannel(alice,{name:"backroom",mode:"timeline",visibility:"public",admission:"open",unlisted:true});
+  const listed=store.createChannel(alice,{name:"lobby",mode:"timeline",visibility:"public",admission:"open"});
+  const hub=new Events(store);t.after(()=>{hub.close();store.close();});
+  const open=async(watch="")=>{
+    const frames:string[]=[],response=Object.assign(new EventEmitter(),{writableLength:0,destroyed:false,writeHead(){},write(value:string){frames.push(value);return true;},end(){}});
+    await hub.open({query:{watch},socket:{setTimeout(){},setNoDelay(){}}} as unknown as Request,response as unknown as Response,store.createSession(bob.id).token);
+    await (hub as any).flush();frames.length=0;return frames;
+  };
+  const everything=await open(),watching=await open(hidden.id);
+  store.post(alice,hidden.id,{body:"Quiet"});store.post(alice,listed.id,{body:"Loud"});
+  await (hub as any).flush();
+  assert.ok(everything.some(f=>f.includes(listed.id)));
+  assert.ok(!everything.some(f=>f.includes(hidden.id)));
+  assert.ok(watching.some(f=>f.includes(hidden.id)));
+});

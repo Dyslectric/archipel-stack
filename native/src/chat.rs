@@ -98,8 +98,8 @@ impl State {
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        if version != Some(31) {
-            return Err("Native chat requires the migrated schema version 31".into());
+        if version != Some(32) {
+            return Err("Native chat requires the migrated schema version 32".into());
         }
         crate::queue_heads::initialize(&database).await?;
         if config.connections < 2 {

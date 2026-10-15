@@ -24,7 +24,7 @@ import { sidebarFrame } from "./sidebar.js";
 import { isFusion } from "./appearance.js";
 import { updateFusionToolbar } from "./chat.js";
 import { windowHtml } from "./windows.js";
-import { channelWindow, federatedWindow, xmppWindow, subscribeRemote } from "./join.js";
+import { channelWindow, federatedWindow, xmppWindow, subscribeRemote, channelNameQuery, findByNameHtml, openChannelByName } from "./join.js";
 
 interface FeaturedChannel { id: string; name: string; description: string; mode: string; address: string; joined: boolean; }
 
@@ -120,6 +120,7 @@ export function showChannels(view: HTMLElement, create: boolean) {
       <label>Who can join?<select name="admission"><option value="open">Anyone on this instance</option><option value="allowlist">Allowed users only</option></select></label>
       <label class="check"><input type="checkbox" name="show_members" checked> Show the member list</label>
       <label class="check"><input type="checkbox" name="hide_handles"> Hide handles, leaving only display names</label>
+      <label class="check"><input type="checkbox" name="unlisted"> Unlisted: only people who know its name can find it</label>
       ${federate("check")}
       </div></details><p class="form-error" role="alert"></p><button>Create channel</button></form></section></aside></div></div></div>`);
   const list = $("#browse-list"),
@@ -137,7 +138,7 @@ export function showChannels(view: HTMLElement, create: boolean) {
   const row = (id: string, cells: string, status: string, joined: boolean, control: string) =>
     `<tr class="directory-row${picked === id ? " selected-row" : ""}" data-directory-row="${esc(id)}">${cells}<td class="${joined ? "" : "muted"}">${status}</td><td class="directory-action">${control}</td></tr>`;
   function draw() {
-    const query = search.value.trim().toLowerCase();
+    const query = search.value.trim().toLowerCase(), named = channelNameQuery(query);
     const visible = state.channels.filter(
       (c) =>
         c.name.toLowerCase().includes(query) ||
@@ -147,12 +148,13 @@ export function showChannels(view: HTMLElement, create: boolean) {
       ? visible
           .map(
             (c) =>
-              `<li class="browse-channel"><a href="#/c/${c.id}" data-id="${c.id}" class="browse-name">${channelIcon(c)}<strong>${esc(c.name)}</strong></a><span class="pill">${modeLabel(c.mode)}</span>${c.visibility === "members" ? '<span class="pill">Members only</span>' : ""}${c.remote_actor ? '<span class="pill new">Remote</span>' : ""}${c.role ? '<span class="pill good">Joined</span>' : !c.readable ? '<span class="pill warn">Allowed</span>' : ""}
+              `<li class="browse-channel"><a href="#/c/${c.id}" data-id="${c.id}" class="browse-name">${channelIcon(c)}<strong>${esc(c.name)}</strong></a><span class="pill">${modeLabel(c.mode)}</span>${c.visibility === "members" ? '<span class="pill">Members only</span>' : ""}${c.unlisted ? '<span class="pill">Unlisted</span>' : ""}${c.remote_actor ? '<span class="pill new">Remote</span>' : ""}${c.role ? '<span class="pill good">Joined</span>' : !c.readable ? '<span class="pill warn">Allowed</span>' : ""}
               <p class="muted">${esc(c.description || "No description.")}</p><span class="muted small">${c.member_count} member${c.member_count === 1 ? "" : "s"}</span></li>`,
           )
           .join("")
       : `<li class="muted">${query ? "No channels match." : "No channels yet. Create the first one."}</li>`;
-    if (list.dataset.html !== html) list.innerHTML = list.dataset.html = html;
+    const lookup = named ? `<li class="row"><span class="muted grow">An unlisted channel is found by its exact name.</span>${findByNameHtml(named)}</li>` : "";
+    if (list.dataset.html !== html + lookup) list.innerHTML = list.dataset.html = html + lookup;
     const picks = featured.filter(c => `${c.name} ${c.description} ${c.address}`.toLowerCase().includes(query));
     const mayFollow = state.session.federation_enabled && state.session.user?.federation_subscribe && state.session.user?.federation_receive;
     const featuredRows = picks.map(c => row(`featured:${c.id}`, `<td><span class="directory-name">${icon("globe")}<strong>${esc(c.name)}</strong><span class="muted">@${esc(new URL(c.address).host)}</span></span></td><td class="channel-description">${esc(c.description)}</td><td>${esc(modeLabel(c.mode))}</td><td class="muted">n/a</td>`, c.joined ? "Joined" : "Not joined", c.joined,
@@ -164,7 +166,7 @@ export function showChannels(view: HTMLElement, create: boolean) {
       c.role ? "Joined" : c.can_join && c.admission === "allowlist" ? "Allowed" : c.can_join || c.readable ? "Not joined" : "Access required", !!c.role || (c.can_join && c.admission === "allowlist"),
       c.role ? `<a class="button secondary small" href="#/c/${c.id}">Open</a>` : c.can_join ? `<button type="button" class="secondary small" data-directory-join="${c.id}">Join</button>` : c.readable ? `<a class="button secondary small" href="#/c/${c.id}">View</a>` : ""));
     const table = $("#channel-table-body");
-    const tableHtml = `${section("featured", "Featured from other servers", "Chosen by this instance's administrators", featuredRows)}${section("local", "On this instance", "", rows)}${!rows.length && !featuredRows.length ? '<tr><td colspan="6">No channels match.</td></tr>' : ""}`;
+    const tableHtml = `${section("featured", "Featured from other servers", "Chosen by this instance's administrators", featuredRows)}${section("local", "On this instance", "", rows)}${!rows.length && !featuredRows.length ? '<tr><td colspan="6">No channels match.</td></tr>' : ""}${named ? `<tr><td colspan="5" class="muted">An unlisted channel is found by its exact name.</td><td class="directory-action">${findByNameHtml(named)}</td></tr>` : ""}`;
     table.dataset.summary = `${plural(rows.length)} here${featuredRows.length ? `, ${featuredRows.length} featured` : ""}`;
     updateFusionToolbar();
     if (table.dataset.html !== tableHtml) table.innerHTML = table.dataset.html = tableHtml;
@@ -186,6 +188,8 @@ export function showChannels(view: HTMLElement, create: boolean) {
       picked = chosen.dataset.directoryRow!;
       for (const el of $$("[data-directory-row]", $("#channel-table-body"))) el.classList.toggle("selected-row", el === chosen);
     }
+    const named = target.closest<HTMLElement>("[data-find-channel]")?.dataset.findChannel;
+    if (named) return action(async () => { await openChannelByName(named); });
     const join = target.closest<HTMLElement>("[data-directory-join]");
     const external = target.closest<HTMLElement>("[data-featured-join]");
     if (join) action(async () => {
@@ -236,7 +240,7 @@ export function showChannels(view: HTMLElement, create: boolean) {
   // The card and the Fusion window ask the same things, each in its own form.
   const summary = (data: FormData) => {
     const style = data.get("mode") === "threaded" ? "Posts with nested replies" : data.get("mode") === "topical" ? "Messages grouped by topic" : "A running conversation";
-    return `${style}. ${data.get("visibility") === "members" ? "Members can read" : "Anyone on this instance can read"}; ${data.get("admission") === "allowlist" ? "joining requires allowed access" : "anyone here can join"}.${data.get("federate") === "on" ? " Other instances can follow it." : ""}`;
+    return `${style}. ${data.get("visibility") === "members" ? "Members can read" : "Anyone on this instance can read"}; ${data.get("admission") === "allowlist" ? "joining requires allowed access" : "anyone here can join"}.${data.get("unlisted") === "on" ? " It is not listed: people find it by its name." : ""}${data.get("federate") === "on" ? " Other instances can follow it." : ""}`;
   };
   form.addEventListener("change", () => {
     const data = new FormData(form);
@@ -253,6 +257,7 @@ export function showChannels(view: HTMLElement, create: boolean) {
         ...Object.fromEntries(data),
         show_members: data.get("show_members") === "on",
         hide_handles: data.get("hide_handles") === "on",
+        unlisted: data.get("unlisted") === "on",
         optional_titles: data.get("mode") === "threaded" && data.get("optional_titles") === "on",
       },
     );
@@ -281,7 +286,8 @@ export function showChannels(view: HTMLElement, create: boolean) {
       <fieldset><legend>Conversation style</legend>${[["timeline", "Timeline", "hash", "one running conversation"], ["topical", "Topics", "folder", "messages grouped by subject"], ["threaded", "Threads", "needle-thread", "posts with nested replies"]].map(([value, label, ico, about]) => `<label class="choice"><input type="radio" name="mode" value="${value}" ${value === "timeline" ? "checked" : ""}>${icon(ico)}<span><strong>${label}</strong> <span class="muted">${about}</span></span></label>`).join("")}
         <label class="choice sub"><input type="checkbox" name="optional_titles" disabled>Let threads start without a title</label></fieldset>
       <fieldset><legend>Access</legend><div class="field-grid"><label for="cc-read">Who can read</label><select id="cc-read" name="visibility"><option value="public">Everyone on this instance</option><option value="members">Members only</option></select>
-        <label for="cc-join">Who can join</label><select id="cc-join" name="admission"><option value="open">Anyone on this instance</option><option value="allowlist">Allowed users only</option></select></div></fieldset>
+        <label for="cc-join">Who can join</label><select id="cc-join" name="admission"><option value="open">Anyone on this instance</option><option value="allowlist">Allowed users only</option></select></div>
+        <label class="choice"><input type="checkbox" name="unlisted">Unlisted: only people who know its name can find it</label></fieldset>
       <fieldset><legend>Members</legend><label class="choice"><input type="checkbox" name="show_members" checked>Show the member list</label>
         <label class="choice"><input type="checkbox" name="hide_handles">Hide handles, leaving only display names</label></fieldset>
       ${state.session.federation_enabled ? `<fieldset><legend>Federation</legend>${federate("choice")}</fieldset>` : ""}

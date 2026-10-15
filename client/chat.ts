@@ -197,6 +197,7 @@ const dmChannel = (c: Conversation): Channel => ({
   federation_enabled: 0,
   show_members: 0,
   hide_handles: 0,
+  unlisted: 0,
   reactions: 0,
   reaction_bans: [],
   optional_titles: 0,
@@ -1227,7 +1228,7 @@ function render(
       ? '<button type="button" id="older-messages" class="secondary small older-button">Load earlier messages</button>'
       : c.dm
         ? `<div class="channel-intro"><h2>${avatar(c.dm)}${esc(c.name)}</h2><p class="muted">The start of your direct messages with ${esc(c.name)}. Only the two of you can read them.</p><p class="muted small"><code>@${esc(c.dm.username)}</code>${c.dm.remote ? " · on another instance" : ""}</p></div>`
-        : `<div class="channel-intro"><h2>${channelIcon(c)}${esc(c.name)}</h2><p class="muted">${esc(c.description || "The start of this channel.")}</p><p class="muted small">${c.visibility === "members" ? "Members only" : "Public"} · ${modeLabel(c.mode)} · <code>#${esc(c.name)}@${esc(c.remote_actor ? new URL(c.remote_actor).host : state.session.instance)}</code></p></div>`
+        : `<div class="channel-intro"><h2>${channelIcon(c)}${esc(c.name)}</h2><p class="muted">${esc(c.description || "The start of this channel.")}</p><p class="muted small">${c.visibility === "members" ? "Members only" : "Public"}${c.unlisted ? " · Unlisted" : ""} · ${modeLabel(c.mode)} · <code>#${esc(c.name)}@${esc(c.remote_actor ? new URL(c.remote_actor).host : state.session.instance)}</code></p></div>`
   }${c.mode === "threaded" && (hiddenCount || shown.some((m) => m.parent_id)) ? `<div class="toolbar">${shown.some((m) => m.parent_id) ? '<button type="button" class="small secondary" data-fold="open">Expand all</button><button type="button" class="small secondary" data-fold="closed">Collapse all</button>' : ""}${hiddenCount ? `<button type="button" class="small secondary" data-show-hidden aria-pressed="${showHidden}">${icon(showHidden ? "eye-off" : "eye")} ${showHidden ? "Put away" : "Show"} ${hiddenCount} hidden thread${hiddenCount === 1 ? "" : "s"}</button>` : ""}</div>` : ""}`;
   if ($("#feed-top").innerHTML !== top) $("#feed-top").innerHTML = top;
   popped = [];

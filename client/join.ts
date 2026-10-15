@@ -29,6 +29,25 @@ export async function joinXmppRoom(jid: string | undefined, room: string, nick: 
   return joined;
 }
 
+// An unlisted channel is in no list, so its name is asked for; opening one that must be
+// joined first asks to join.
+export const channelNameQuery = (query: string) => {
+  const name = query.trim().replace(/^#/, "").toLowerCase();
+  return /^[a-z0-9][a-z0-9_-]{1,39}$/.test(name) && !state.channels.some((c) => !c.remote_actor && c.name === name) ? name : "";
+};
+export const findByNameHtml = (name: string, cls = "") =>
+  name ? `<button type="button" class="secondary small ${cls}" data-find-channel="${esc(name)}">${icon("search")} Look up #${esc(name)}</button>` : "";
+export async function openChannelByName(name: string) {
+  const c = await api<Channel>(`/channel-names/${encodeURIComponent(name)}`);
+  if (!c.role && !c.readable) {
+    if (!(await shareDialog(`Join #${c.name}?`, channelShares(c), "Join channel"))) return false;
+    await api(`/channels/${c.id}/join`, "POST", {});
+  }
+  state.channels = await api<Channel[]>("/channels");
+  go(`#/c/${c.id}`);
+  return true;
+}
+
 const cancel = '<button type="button" class="secondary" data-close-window>Cancel</button>';
 const close = '<button type="button" class="secondary" data-close-window>Close</button>';
 // The Fusion directory's windows for both.
@@ -41,17 +60,20 @@ export function channelWindow() {
     `<a href="#/channels" data-close-window>All channels</a><span class="grow"></span>${state.session.federation_enabled ? '<button type="button" class="secondary" data-close-window data-open-window="federated">On another server…</button>' : ""}${state.xmppEnabled ? '<button type="button" class="secondary" data-close-window data-open-window="xmpp">XMPP room…</button>' : ""}${close}`);
   const list = $("#join-list", dialog), search = $<HTMLInputElement>("#join-search", dialog);
   const draw = () => {
-    const query = search.value.trim().toLowerCase();
-    list.innerHTML = state.channels
+    const query = search.value.trim().toLowerCase(), named = channelNameQuery(query);
+    list.innerHTML = (state.channels
       .filter((c) => !c.role && (c.can_join || c.readable) && `${c.name} ${c.description}`.toLowerCase().includes(query))
       .map((c) => `<li>${channelIcon(c, false)}<div class="grow"><strong>${esc(c.name)}</strong><span class="muted small">${esc(c.description || "No description.")}</span></div><span class="muted small">${c.member_count} member${c.member_count === 1 ? "" : "s"}</span>${c.can_join ? `<button type="button" class="secondary small" data-join="${c.id}">Join</button>` : `<a class="button secondary small" href="#/c/${c.id}" data-close-window>View</a>`}</li>`)
-      .join("") || `<li class="muted">${query ? "No channels match." : "There is no channel here you have not joined."}</li>`;
+      .join("") || `<li class="muted">${query ? "No channels match." : "There is no channel here you have not joined."}</li>`) +
+      (named ? `<li><span class="muted small grow">An unlisted channel is found by its exact name.</span>${findByNameHtml(named)}</li>` : "");
   };
   draw();
   search.addEventListener("input", draw);
   // Enter in the search is not an answer to the window.
   $("form", dialog).addEventListener("submit", (e) => e.preventDefault());
   list.addEventListener("click", (e) => {
+    const named = (e.target as Element).closest<HTMLElement>("[data-find-channel]")?.dataset.findChannel;
+    if (named) action(async () => { if (await openChannelByName(named)) dialog.close(); });
     const id = (e.target as Element).closest<HTMLElement>("[data-join]")?.dataset.join,
       c = state.channels.find((c) => c.id === id);
     if (c) action(async () => {

@@ -1,4 +1,4 @@
--- Generated from migrations; source SHA256 6cbe7dc39055c4c85a106dc88758b5ce8f26ef62e69082e83a6d020e1bfa37ce
+-- Generated from migrations; source SHA256 cfc4ba58007b00ddc36556c787929b7f4dcc14c13ca5ba81b644667f68fdbe0f
 CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA public;
 CREATE TABLE archipel_schema (version BIGINT NOT NULL);
 CREATE TABLE users (
@@ -39,7 +39,7 @@ CREATE TABLE channels (
   admission TEXT COLLATE "C" NOT NULL CHECK(admission IN ('open','allowlist')),
   owner_id TEXT COLLATE "C" NOT NULL REFERENCES users(id) DEFERRABLE,
   created_at TEXT COLLATE "C" NOT NULL
-, remote_actor TEXT COLLATE "C", federation_enabled BIGINT NOT NULL DEFAULT 0, show_members BIGINT NOT NULL DEFAULT 1, hide_handles BIGINT NOT NULL DEFAULT 0, reactions BIGINT NOT NULL DEFAULT 1, optional_titles BIGINT NOT NULL DEFAULT 0, reaction_bans TEXT COLLATE "C" NOT NULL DEFAULT '[]');
+, remote_actor TEXT COLLATE "C", federation_enabled BIGINT NOT NULL DEFAULT 0, show_members BIGINT NOT NULL DEFAULT 1, hide_handles BIGINT NOT NULL DEFAULT 0, reactions BIGINT NOT NULL DEFAULT 1, optional_titles BIGINT NOT NULL DEFAULT 0, reaction_bans TEXT COLLATE "C" NOT NULL DEFAULT '[]', unlisted BIGINT NOT NULL DEFAULT 0);
 CREATE TABLE memberships (
   channel_id TEXT COLLATE "C" NOT NULL REFERENCES channels(id) DEFERRABLE,
   user_id TEXT COLLATE "C" NOT NULL REFERENCES users(id) DEFERRABLE,
@@ -445,4 +445,4 @@ CREATE INDEX federation_instance_events_age ON federation_instance_events(create
 CREATE INDEX federation_instance_pending ON federation_instance_incoming(state,retry_at,origin,seq);
 CREATE INDEX federation_instance_channel_pending ON federation_instance_incoming(channel_actor,state,channel_seq);
 SELECT setval('"xmpp_events_seq_seq"'::regclass,1,'false');
-INSERT INTO archipel_schema VALUES(31);
+INSERT INTO archipel_schema VALUES(32);

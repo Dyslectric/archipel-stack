@@ -65,6 +65,7 @@ export interface Channel {
   // What the channel shows its members of one another, and whether this reader sees it anyway.
   show_members: number;
   hide_handles: number;
+  unlisted: number; // kept out of the directory; whoever knows the name can still find it
   reactions: number; // members may react to messages with emoji
   optional_titles: number; // threads may start without a title
   reaction_bans: string[]; // emoji its moderators keep out of its messages and reactions

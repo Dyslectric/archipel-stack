@@ -40,6 +40,7 @@ export interface Channel {
   federation_enabled: number;
   show_members: number; // members see who else is in the channel
   hide_handles: number; // members see names without the handles behind them
+  unlisted: number; // kept out of the directory; whoever knows the name can still find it
   reactions: number; // members may react to messages with emoji
   optional_titles: number; // threads may start without a title
   reaction_bans: string; // JSON: the emoji names moderators keep out of its messages and reactions
@@ -1327,10 +1328,22 @@ export class Store {
         LEFT JOIN channel_rules r ON r.channel_id=c.id AND r.user_id=?
         WHERE (COALESCE(c.remote_actor,'')='' OR m.user_id IS NOT NULL)
           AND (?=1 OR (COALESCE(r.rule,'')!='block'
-            AND (c.visibility='public' OR m.user_id IS NOT NULL OR r.rule='allow')))
+            AND ((c.visibility='public' AND c.unlisted=0) OR m.user_id IS NOT NULL OR r.rule='allow')))
         ORDER BY c.name`)
       .all(user.id,user.id,Number(!!user.admin)) as unknown as Channel[];
     return channels.map(c=>this.channelInfo(user,c));
+  }
+  // An unlisted channel is found by its name alone, by whoever could read or join it.
+  findChannel(user: User, value: unknown) {
+    this.active(user.id);
+    const name = typeof value === "string" ? value.trim().replace(/^#/, "").toLowerCase() : "";
+    const channel = this.db
+      .prepare("SELECT * FROM channels WHERE name=? AND COALESCE(remote_actor,'')=''")
+      .get(name) as unknown as Channel | undefined;
+    const info = channel && this.channelInfo(user, channel);
+    if (!info || (!user.admin && (this.rule(info.id, user.id) === "block" || (!info.role && !info.readable && !info.can_join))))
+      throw new Problem(404, "There is no channel here by that name.");
+    return info;
   }
   private channelName(value: unknown) {
     const name = text(value, "Channel name", 40).toLowerCase();
@@ -1364,11 +1377,12 @@ export class Store {
       "admission",
     );
     // What members see of each other; the owner can change either later.
-    for (const key of ["show_members", "hide_handles"] as const)
+    for (const key of ["show_members", "hide_handles", "unlisted"] as const)
       if (input[key] !== undefined && typeof input[key] !== "boolean")
         throw new Problem(400, "Choose what the channel shows its members.");
     const showMembers = input.show_members !== false,
-      hideHandles = input.hide_handles === true;
+      hideHandles = input.hide_handles === true,
+      unlisted = input.unlisted === true;
     // Whether threads need titles; moderators can change it later.
     if (input.optional_titles !== undefined && typeof input.optional_titles !== "boolean")
       throw new Problem(400, "Choose whether thread titles are optional.");
@@ -1379,7 +1393,7 @@ export class Store {
       const id = randomUUID();
       this.db
         .prepare(
-          "INSERT INTO channels(id,name,description,mode,visibility,admission,owner_id,created_at,show_members,hide_handles,optional_titles) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+          "INSERT INTO channels(id,name,description,mode,visibility,admission,owner_id,created_at,show_members,hide_handles,optional_titles,unlisted) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .run(
           id,
@@ -1393,6 +1407,7 @@ export class Store {
           Number(showMembers),
           Number(hideHandles),
           Number(optionalTitles),
+          Number(unlisted),
         );
       this.db
         .prepare("INSERT INTO memberships VALUES(?,?,?)")
@@ -1557,20 +1572,21 @@ export class Store {
   setPrivacy(user: User, id: string, input: Record<string, unknown>) {
     const channel = this.channel(id);
     this.requireOwner(user, channel);
-    for (const key of ["show_members", "hide_handles"] as const)
+    for (const key of ["show_members", "hide_handles", "unlisted"] as const)
       if (input[key] !== undefined && typeof input[key] !== "boolean")
         throw new Problem(400, "Choose what the channel shows its members.");
     const show = input.show_members ?? !!channel.show_members,
-      hide = input.hide_handles ?? !!channel.hide_handles;
+      hide = input.hide_handles ?? !!channel.hide_handles,
+      unlisted = input.unlisted ?? !!channel.unlisted;
     return this.transaction(() => {
       this.db
-        .prepare("UPDATE channels SET show_members=?,hide_handles=? WHERE id=?")
-        .run(Number(show), Number(hide), id);
+        .prepare("UPDATE channels SET show_members=?,hide_handles=?,unlisted=? WHERE id=?")
+        .run(Number(show), Number(hide), Number(unlisted), id);
       this.federationHooks?.channel(this.channel(id), "privacy");
       this.audit(
         user.id,
         "channel.privacy",
-        JSON.stringify({ channel: id, show_members: show, hide_handles: hide }),
+        JSON.stringify({ channel: id, show_members: show, hide_handles: hide, unlisted }),
       );
       return this.channelInfo(user, this.channel(id));
     });
