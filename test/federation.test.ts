@@ -188,7 +188,7 @@ test("instance feed pages share one policy check per event across peers until po
   assert.deepEqual(withheld.events.map(e=>e.seq),first.events.map(e=>e.seq),"cursors still advance past withheld events");
 });
 
-test("instance stream yields to other work between pages while a peer catches up", async t => {
+test("instance stream yields to other work while it builds pages for a peer catching up", async t => {
   const env={FEDERATION_CHANNEL_TRANSPORT:"stream",FEDERATION_PEER_SEND_RATE:"0"};
   const a=await instance(t,env),b=await instance(t,env),home=channel(a);
   await b.fed.subscribe(b.bob,a.fed.channelActor(home));await drain(a,b);
@@ -198,7 +198,37 @@ test("instance stream yields to other work between pages while a peer catches up
     write(chunk:string){if(chunk.startsWith("id:"))order.push("page");if(order.filter(o=>o==="page").length===3)queueMicrotask(()=>res.emit("close"));return true;}});
   setImmediate(()=>order.push("other work"));
   await a.fed.channelFeed.instance.open({} as never,res as never,start);
-  assert.deepEqual(order.slice(0,3),["page","other work","page"]);
+  // Building yields between events, so other work runs before a second page is sent.
+  const second=order.indexOf("page",order.indexOf("page")+1);
+  assert.ok(second>0 && order.indexOf("other work")>=0 && order.indexOf("other work")<second,order.join(", "));
+});
+
+test("pages built at once for different cursors build and store each event once", async t => {
+  const env={FEDERATION_CHANNEL_TRANSPORT:"stream",FEDERATION_PEER_SEND_RATE:"0"};
+  const a=await instance(t,env),b=await instance(t,env),home=channel(a);
+  await b.fed.subscribe(b.bob,a.fed.channelActor(home));await drain(a,b);
+  const start=Number(a.store.db.prepare("SELECT tail FROM federation_instance_state").get()!.tail);
+  for(let n=0;n<20;n++)a.store.post(a.alice,home.id,{body:`Overlap ${n}`});
+  const prepare=a.store.db.prepare.bind(a.store.db),seen:string[]=[];
+  t.mock.method(a.store.db,"prepare",(sql:string,options?:{notify?:boolean})=>{seen.push(sql);return prepare(sql,options);});
+  const feed=a.fed.channelFeed.instance,[one,two]=await Promise.all([feed.pageSoon(start),feed.pageSoon(start+1)]);
+  assert.deepEqual(two.events,one.events.slice(1),"both readers see the same frames");
+  assert.equal(seen.filter(sql=>sql.startsWith("UPDATE federation_instance_events SET frame")).length,one.events.length);
+});
+
+test("a peer leaves unchanged stream actors alone and marks a page's events done together", async t => {
+  const env={FEDERATION_CHANNEL_TRANSPORT:"stream",FEDERATION_PEER_SEND_RATE:"0"};
+  const a=await instance(t,env),b=await instance(t,env),home=channel(a);
+  const sub=await b.fed.subscribe(b.bob,a.fed.channelActor(home));await drain(a,b);
+  a.store.post(a.alice,home.id,{body:"Warm"});
+  await waitUntil(()=>b.store.messages(b.bob,sub.channel.id).some(m=>m.body==="Warm"));
+  const prepare=b.store.db.prepare.bind(b.store.db),seen:string[]=[];
+  t.mock.method(b.store.db,"prepare",(sql:string,options?:{notify?:boolean})=>{seen.push(sql);return prepare(sql,options);});
+  for(let n=0;n<5;n++)a.store.post(a.alice,home.id,{body:`Steady ${n}`});
+  await waitUntil(()=>b.store.messages(b.bob,sub.channel.id).some(m=>m.body==="Steady 4"));
+  assert.equal(seen.filter(sql=>sql.startsWith("INSERT INTO federation_actors")).length,0,"the channel and author documents are unchanged");
+  const done=seen.filter(sql=>sql.includes("SET state='done'")).length;
+  assert.ok(done>=1 && done<5,`events marked done in ${done} statements`);
 });
 
 test("durable instance intake continues while one channel's materializer is stalled", async t=>{

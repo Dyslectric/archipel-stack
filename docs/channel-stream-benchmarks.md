@@ -843,7 +843,7 @@ So, on the questions asked:
 - **SSE fan-out:** real CPU (about 12% of busy time, plus 6.1% self time in
   `writeBuffer`), but not the stall.
 
-Ranked fixes (not applied):
+Ranked fixes (since applied; see [Applying the ranked fixes](#applying-the-ranked-fixes)):
 
 1. **Stop the synchronous frame write-back.** Keep built frames in the shared
    in-memory cache, or write them per page in one transaction. Better still,
@@ -908,7 +908,7 @@ measured. The limit is serialized synchronous writes at about 7.6 ms each,
 three per event, not CPU and not network fetches. The key fetch path
 (`peerJson`) did not appear.
 
-Ranked fixes (not applied):
+Ranked fixes (since applied; see [Applying the ranked fixes](#applying-the-ranked-fixes)):
 
 1. **Stop rewriting unchanged actor documents.** `cacheActor` upserts both
    actors on every event; skip the upsert when the document matches what is
@@ -927,6 +927,107 @@ With fixes 1–2 alone, per-event blocking would fall from about 41 ms to about
 10 ms. That should be enough to keep up with about 30 events/s from a single
 channel; the source's write-back fix similarly frees about half of its
 main-thread time.
+
+## Applying the ranked fixes
+
+All eight fixes above are now in the code. Three runs measure them below, in
+[Results with the ranked fixes](#results-with-the-ranked-fixes).
+
+Source:
+
+1. **Frame write-back.** Frames built for a page are now written in one
+   transaction after the page is built, and the stored winners are read
+   back with one range query. Before, each event had its own autocommit
+   `UPDATE` and its own re-`SELECT`. Frames are still stored durably, so
+   every front end serves the same ciphertext. Sealing frames when the
+   outgoing event is created was not done.
+2. **Per-page memoization.** `publicationLookups()` now remembers, for one
+   page, the users, channels, admitted accounts, block checks and published
+   actor documents, and checks `federation_enabled` once.
+   `publicActor` reads `user_avatars` once (revision and type), where it
+   could take three reads, one of them the image itself. The instance signing
+   key (`federation_keys`) and each channel's secret per epoch are written
+   once and never change, so they are cached for the life of the process.
+3. **Bounded stalls.** The stream and batch endpoints build pages with
+   `pageSoon()`, which yields to other work between the events it has to
+   build. Concurrent readers of the same cursor share one build. The
+   synchronous `page()` remains for tests.
+4. **Overview query.** The native overview reads the reader's blocks and
+   hidden topics once. When a reader has none (most readers), each unread
+   message skips the per-row checks against them. No index was added; unread
+   counts are unchanged and the native parity test still matches.
+
+Peer:
+
+1. **Unchanged actors.** `Federation.cacheFeedActors()` compares each
+   actor document with the remembered digest, or with the stored document,
+   and writes only those that changed. Unchanged ones are only marked fresh,
+   as a network revalidation would be. Avatar syncs are queued only for
+   changed documents.
+2. **Fewer commits.** `materialize()` opens and checks a page's events before
+   applying any. It stores their changed actors in one transaction, then marks
+   the applied events done in one statement at the end. Each event's receipt
+   still commits its own checkpoint in the native worker. So an event that was
+   applied but not yet marked done is skipped as already applied when it is
+   read again.
+3. **Per-page policy reads.** Block checks through `channelPeerUrl` are
+   remembered per page in `stage()` and `materialize()`. The channel actor is
+   looked up once per page. Received keys are remembered per epoch. The mirror
+   update runs once per page instead of after every receipt.
+4. **Serialized receipt.** Decryption, validation and actor storage now happen
+   before the receipts, so only the native `receive` calls are serialized.
+   Handing native a page of events per call was not done.
+
+## Results with the ranked fixes
+
+The same command as the 20:16 run was repeated three times: once without
+profiling (22:21), once profiled like the 20:36 run (22:32), and once more
+without profiling (22:55). That last run followed one further fix, described
+below. The 22:32 and 22:55 runs **meet the target**: every check passes.
+
+| Metric | 20:16 | 22:21 | 22:32 (profiled) | 22:55 |
+|---|---:|---:|---:|---:|
+| HTTP accepted / failed / generator drops | 4,332 / 207 / 261 | 4,796 / 4 / 0 | 4,799 / 1 / 0 | 4,799 / 1 / 0 |
+| Recipient observations | 93.19% | 99.92% | 99.98% | 99.98% |
+| Posting p50 / p95 | 1.92 s / 9.63 s | 403 ms / 1.74 s | 235 ms / 444 ms | 235 ms / 365 ms |
+| Visibility p50 / p95 / p99 | 2.02 s / 2.84 s / 86.5 s | 567 ms / 1.83 s / 2.02 s | 365 ms / 596 ms / 724 ms | 365 ms / 540 ms / 626 ms |
+| Overview / page GET p50 | 1.83 / 2.02 s | 167 / 384 ms | 151 / 235 ms | 159 / 224 ms |
+| Overview / page GET p95 | 2.23 / 2.46 s | 272 ms / 1.66 s | 247 / 444 ms | 286 / 348 ms |
+| Source event-loop p95, median / p90 / max sample | 670 / 772 / 822 ms | 96 / 128 / 140 ms | 89 / 108 / 154 ms | 89 / 118 / 145 ms |
+| Source main process CPU, mean cores | 0.55 | 0.75 | 0.81 | 0.65 |
+| Copies per instance, min / max | 3,520 / 4,473 | 4,796 / 4,796 | 4,799 / 4,799 | 4,799 / 4,799 |
+| Peer staged minus materialized, worst peer at window end | 2,236 | 110 | 0 | 0 |
+| Source native chat errors | 273 | 20 | 0 | 0 |
+| Failed checks | 9 | 2 | none | none |
+
+The 22:21 run failed two checks: posting p95 under 1 s, and native chat
+errors. Its 20 errors were 503 "Native chat worker unavailable" responses (4
+posts, 6 overviews, the rest pages). Neither failure recurred in the later
+runs, so one run is not enough to tell a regression from noise.
+
+**Shared builds.** The 22:32 profile showed the source making 12,587 frame
+`UPDATE`s, and as many author and avatar reads, for about 4,800 events. Each
+event was being built about 2.6 times. Twelve peers read the feed at slightly
+different cursors. Once building yielded between events, their builds
+overlapped, and a page checked the shared cache before yielding, not after.
+A built event is now shared as soon as it is built, and a page looks in the
+cache again after each yield. A frame that fails to store is dropped from the
+cache. A test pages two cursors at once and checks that each frame is stored
+once (it stored 39 for 20 events before). The 22:55 run includes this fix.
+
+In the 22:32 profile, the source's main thread blocked on synchronous SQL for
+52 s of the 120 s window (49,023 round trips). That was before the fix above,
+and most of it was the repeated builds. The peer blocked for 31.5 s (26,845
+round trips). Its remaining per-event statements are the author actor upsert
+and the `remote_avatars` delete (about one each per event, because nearly every
+author in this workload is new), the author's `users` row and one block check.
+Committing a page's actor writes together costs about 11 ms.
+
+[22:21 report](../test-results/fwdxp/2026-10-15T22-21-00-808Z/report.md),
+[22:32 report](../test-results/fwdxp/2026-10-15T22-32-34-760Z/report.md)
+([source profile](../test-results/fwdxp/2026-10-15T22-32-34-760Z/cpu-0.cpuprofile),
+[peer profile](../test-results/fwdxp/2026-10-15T22-32-34-760Z/cpu-1.cpuprofile)),
+[22:55 report](../test-results/fwdxp/2026-10-15T22-55-18-806Z/report.md).
 
 ## Correctness checks
 

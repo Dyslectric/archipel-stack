@@ -46,6 +46,10 @@ export class InstanceFeed {
   // page until one of them changes. Policy written by another front end does not
   // move the stamp, so a decision is also kept for at most POLICY_AGE.
   private events = new Map<number, { stamp: string; at: number; event: InstanceEvent; size: number }>();
+  // Pages being built for a stream, so concurrent readers of one cursor share the work.
+  private building = new Map<number, Promise<Page>>();
+  // A channel key is written once per epoch and never changes.
+  private secrets = new Map<string, string>();
   private closed = false;
   private prunedAt = 0;
   private assetQueue = new Map<string, Record<string, any>>();
@@ -53,6 +57,16 @@ export class InstanceFeed {
   private assetJobs = new Set<Promise<void>>();
   readonly stats = { connections: 0, staged: 0, materialized: 0, retries: 0 };
   constructor(private fed: Federation, private channelStats: { connections: number; batches: number; events: number; skipped: number; retries: number; gaps: number }) {}
+  // Peer URL checks (which read the block list) remembered for one page. A refused
+  // URL is not remembered, so it is refused again each time.
+  private peerUrls() {
+    const seen = new Map<string, URL>();
+    return (value: string) => {
+      let url = seen.get(value);
+      if (!url) { url = this.fed.channelPeerUrl(value); seen.set(value, url); }
+      return url;
+    };
+  }
   private stamp() {
     const db = this.fed.store.db;
     return ["channels", "users", "roles", "user_roles", "channel_rules", "federation_blocks", "instance_settings"].map(t => db.revision(t)).join("|");
@@ -68,11 +82,37 @@ export class InstanceFeed {
     return { channel: this.fed.channelActor(channel), epoch, secret: this.secret(id, epoch) };
   }
   private secret(id: string, epoch: number) {
+    const known = this.secrets.get(`${id} ${epoch}`);
+    if (known) return known;
     const db = this.fed.store.db;
     db.prepare("INSERT OR IGNORE INTO federation_channel_keys(channel_id,epoch,secret) VALUES(?,?,?)", { notify: false }).run(id, epoch, randomBytes(32).toString("base64"));
-    return String(db.prepare("SELECT secret FROM federation_channel_keys WHERE channel_id=? AND epoch=?").get(id, epoch)!.secret);
+    const secret = String(db.prepare("SELECT secret FROM federation_channel_keys WHERE channel_id=? AND epoch=?").get(id, epoch)!.secret);
+    if (this.secrets.size >= 4096) this.secrets.delete(this.secrets.keys().next().value!);
+    this.secrets.set(`${id} ${epoch}`, secret);
+    return secret;
   }
+  /** The page after a cursor, built in one run. */
   page(after: number): Page {
+    const steps = this.pageSteps(after);
+    for (;;) { const step = steps.next(); if (step.done) return step.value; }
+  }
+  /** The same page, yielding to other work between events it has to build, so a
+   *  page of new events never holds the server for its whole length. */
+  pageSoon(after: number): Promise<Page> {
+    let job = this.building.get(after);
+    if (job) return job;
+    const steps = this.pageSteps(after);
+    job = (async () => {
+      for (;;) {
+        const step = steps.next();
+        if (step.done) return step.value;
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
+    })().finally(() => { if (this.building.get(after) === job) this.building.delete(after); });
+    this.building.set(after, job);
+    return job;
+  }
+  private *pageSteps(after: number): Generator<void, Page> {
     this.fed.ensureEnabled();
     if (!Number.isSafeInteger(after) || after < 0) throw new Problem(400, "Invalid instance event cursor.");
     const db = this.fed.store.db, state = db.prepare("SELECT tail,floor FROM federation_instance_state WHERE id=1").get()!;
@@ -82,17 +122,58 @@ export class InstanceFeed {
     if (cached?.stamp === stamp && Date.now() - cached.at < POLICY_AGE && (cached.page.events.length === COUNT || cached.page.cursor === Number(state.tail))) return cached.page;
     const page: Page = { type: "InstanceEvents", origin: this.fed.config.baseUrl, after, cursor: after, events: [] };
     const rows = db.prepare("SELECT e.*,o.activity,o.purpose,o.user_id FROM federation_instance_events e JOIN federation_outgoing o ON o.id=e.activity_id WHERE e.seq>? ORDER BY e.seq LIMIT ?").all(after, COUNT);
-    let bytes = 0, lookups: PublicationLookups | undefined;
-    const now = Date.now();
-    let oldest = now;
+    let lookups: PublicationLookups | undefined;
+    const now = Date.now(), chosen: { stamp: string; at: number; event: InstanceEvent; size: number }[] = [];
+    // Frames built here are stored together after the loop, in one transaction.
+    const fills = new Map<number, string>();
+    const cachedEvent = (seq: number) => {
+      const built = this.events.get(seq);
+      return built?.stamp === stamp && now - built.at < POLICY_AGE ? built : undefined;
+    };
     for (const row of rows) {
-      let built = this.events.get(Number(row.seq));
-      if (built?.stamp !== stamp || now - built.at >= POLICY_AGE) {
-        const event = this.build(row, lookups ??= this.fed.publicationLookups());
-        built = { stamp, at: now, event, size: Buffer.byteLength(JSON.stringify(event)) };
-        this.events.delete(Number(row.seq));
+      let built = cachedEvent(Number(row.seq));
+      // Another page may build this event while this one yields, so look again after.
+      if (!built && lookups) { yield; built = cachedEvent(Number(row.seq)); }
+      if (!built) {
+        const made = this.build(row, lookups ??= this.fed.publicationLookups());
+        const frame = JSON.stringify(made.event);
+        if (made.fill) fills.set(made.event.seq, frame);
+        built = { stamp, at: now, event: made.event, size: Buffer.byteLength(frame) };
+        // Shared at once: pages for other cursors built meanwhile use this event
+        // rather than building and storing it again.
+        this.events.delete(built.event.seq);
         if (this.events.size >= 4096) this.events.delete(this.events.keys().next().value!);
-        this.events.set(Number(row.seq), built);
+        this.events.set(built.event.seq, built);
+      }
+      chosen.push(built);
+    }
+    if (fills.size) {
+      const seqs = [...fills.keys()];
+      try {
+        this.fed.store.transaction(() => {
+          for (const [seq, frame] of fills)
+            db.prepare("UPDATE federation_instance_events SET frame=? WHERE seq=? AND frame IS NULL", { notify: false }).run(frame, seq);
+        });
+      } catch (error) {
+        // Unstored frames are not served from memory either.
+        for (const seq of seqs) this.events.delete(seq);
+        throw error;
+      }
+      // Another front end may have won the cache fill. Every reader uses
+      // the durable winner, including its nonce and authentication tag.
+      const stored = new Map(db.prepare("SELECT seq,frame FROM federation_instance_events WHERE seq>=? AND seq<=? AND frame IS NOT NULL")
+        .all(Math.min(...seqs), Math.max(...seqs)).map(row => [Number(row.seq), String(row.frame)]));
+      for (const built of chosen) {
+        const frame = fills.has(built.event.seq) && stored.get(built.event.seq);
+        if (frame) { built.event = JSON.parse(frame); built.size = Buffer.byteLength(frame); }
+      }
+    }
+    let bytes = 0, oldest = now;
+    for (const built of chosen) {
+      if (this.events.get(built.event.seq) !== built) {
+        this.events.delete(built.event.seq);
+        if (this.events.size >= 4096) this.events.delete(this.events.keys().next().value!);
+        this.events.set(built.event.seq, built);
       }
       if (built.size > BYTES) throw new Problem(413, "Instance event exceeds its frame limit.");
       if (bytes + built.size > BYTES) break;
@@ -102,33 +183,29 @@ export class InstanceFeed {
     this.pages.set(after, { stamp, at: oldest, page }); return page;
   }
   // One event as peers receive it: its stored frame when policy allows it, otherwise
-  // a placeholder that advances cursors without the content.
-  private build(row: Record<string, any>, lookups: PublicationLookups): InstanceEvent {
-    const db = this.fed.store.db;
+  // a placeholder that advances cursors without the content. A newly built allowed
+  // frame is to be stored (fill), so every front end serves the same one.
+  private build(row: Record<string, any>, lookups: PublicationLookups): { event: InstanceEvent; fill: boolean } {
     let allowed = true;
     try { this.fed.channelPublicationAllowed(row as any, lookups); } catch { allowed = false; }
-    if (row.frame && allowed) return JSON.parse(row.frame);
+    if (row.frame && allowed) return { event: JSON.parse(row.frame), fill: false };
     const base: InstanceEvent = { seq: Number(row.seq), channel: `${this.fed.config.baseUrl}/actors/channels/${row.channel_id}`, channelSeq: Number(row.channel_seq), epoch: Number(row.epoch) };
     const actors: Record<string, any>[] = [];
     if (allowed) {
-      actors.push(this.fed.publicActor("channels", row.channel_id));
+      actors.push(lookups.publicActor("channels", row.channel_id));
       if (row.user_id) {
-        const user = this.fed.store.user(row.user_id);
+        const user = lookups.user(row.user_id);
         // Only an actor's own origin can supply its signing identity.
-        if (!user.remote_actor) actors.push(this.fed.publicActor("users", user.id));
+        if (!user.remote_actor) actors.push(lookups.publicActor("users", user.id));
       }
     }
     const payload: Payload = { activity: allowed ? row.activity : null, actors };
     const event = row.public ? { ...base, payload } : sealEvent(this.fed.config.baseUrl, base, payload, this.secret(row.channel_id, base.epoch));
-    if (!allowed) return event;
-    db.prepare("UPDATE federation_instance_events SET frame=? WHERE seq=? AND frame IS NULL", { notify: false }).run(JSON.stringify(event), row.seq);
-    // Another front end may have won the cache fill. Every reader uses
-    // the durable winner, including its nonce and authentication tag.
-    return JSON.parse(db.prepare("SELECT frame FROM federation_instance_events WHERE seq=?").get(row.seq)!.frame);
+    return { event, fill: allowed };
   }
   async open(_req: Request, res: Response, after: number) {
     if (this.closed || this.responses.size >= 128) throw new Problem(503, "Instance stream capacity is busy.");
-    let page = this.page(after);
+    let page = await this.pageSoon(after);
     res.set({ "Content-Type": "text/event-stream", "Cache-Control": "no-store", "X-Accel-Buffering": "no" }); res.flushHeaders();
     this.responses.add(res); let stopped = false; res.once("close", () => { stopped = true; this.responses.delete(res); });
     try {
@@ -150,7 +227,7 @@ export class InstanceFeed {
         } else {
           res.write(": heartbeat\n\n"); await new Promise<void>(resolve => { const timer = setTimeout(resolve, 250); timer.unref(); });
         }
-        if (!stopped) page = this.page(after);
+        if (!stopped) page = await this.pageSoon(after);
       }
     } catch { /* Reconnect reports revoked federation or an expired cursor. */ }
     finally { this.responses.delete(res); res.end(); }
@@ -229,8 +306,9 @@ export class InstanceFeed {
     if (page?.type !== "InstanceEvents" || page.origin !== origin || page.after !== previous || !Array.isArray(page.events) || page.events.length > COUNT)
       throw new Problem(400, "Invalid instance event page.");
     // Validate the complete page before committing any of it.
+    const peerUrl = this.peerUrls();
     for (const event of page.events) {
-      const url = this.fed.channelPeerUrl(event.channel);
+      const url = peerUrl(event.channel);
       if (event.seq !== ++previous || !Number.isSafeInteger(event.seq) || !Number.isSafeInteger(event.channelSeq) || event.channelSeq < 1 || !Number.isSafeInteger(event.epoch) || event.epoch < 1 || url.origin !== origin || !/^\/actors\/channels\/[a-f0-9-]+$/.test(url.pathname) || url.search || (!!event.payload === !!event.encrypted) || Buffer.byteLength(JSON.stringify(event)) > BYTES)
         throw new Problem(400, "Invalid instance event sequence or authority.");
     }
@@ -266,45 +344,73 @@ export class InstanceFeed {
   }
   private async materialize(channel: string) {
     const row = this.admissions.get(channel); if (!row || this.closed) return;
-    const db = this.fed.store.db;
+    const db = this.fed.store.db, origin = new URL(channel).origin;
     const pending = db.prepare("SELECT seq,frame FROM federation_instance_incoming WHERE channel_actor=? AND state='pending' ORDER BY channel_seq LIMIT ?").all(channel, COUNT);
-    for (const saved of pending) {
-      if (this.closed || this.admissions.get(channel)?.follow_id !== row.follow_id) return;
-      const event: InstanceEvent = JSON.parse(saved.frame), origin = new URL(channel).origin;
-      const cursor = db.prepare("SELECT cursor FROM federation_channel_cursors WHERE channel_id=?").get(row.channel_id);
-      if (!cursor) return;
-      const previous = Math.max(Number(cursor.cursor), Number(row.stream_start));
-      if (event.channelSeq > previous) {
+    const cursor = db.prepare("SELECT cursor FROM federation_channel_cursors WHERE channel_id=?").get(row.channel_id);
+    if (!pending.length || !cursor) return;
+    // Open and check the page's events before applying any, so its actors are stored
+    // in one transaction and nothing but the receipts waits between events. Applying
+    // stops where preparing stopped: at a gap or an invalid event, which is then reported.
+    let previous = Math.max(Number(cursor.cursor), Number(row.stream_start)), failure: unknown;
+    const work: { seq: number; channelSeq: number; payload?: Payload }[] = [], actors = new Map<string, Record<string, any>>();
+    const secrets = new Map<number, string>(), peerUrl = this.peerUrls();
+    try {
+      for (const saved of pending) {
+        const event: InstanceEvent = JSON.parse(saved.frame);
+        if (event.channelSeq <= previous) { work.push({ seq: event.seq, channelSeq: event.channelSeq }); continue; }
         if (event.channelSeq !== previous + 1) throw new Problem(410, "Channel materialization gap; resubscribe for bounded current history.");
         let payload = event.payload;
         if (!payload) {
-          let secret = db.prepare("SELECT secret FROM federation_received_keys WHERE channel_actor=? AND epoch=?").get(channel, event.epoch)?.secret;
+          let secret = secrets.get(event.epoch) ?? db.prepare("SELECT secret FROM federation_received_keys WHERE channel_actor=? AND epoch=?").get(channel, event.epoch)?.secret;
           if (!secret) {
             const url = this.fed.channelPeerUrl(`${channel}/keys/${event.epoch}`);
             const key = await peerJson(url, this.fed.config, signedHeaders(url, "GET", this.fed.userActor(this.fed.store.user(row.user_id)), this.fed.keys().private_key));
             if (key.channel !== channel || key.epoch !== event.epoch || typeof key.secret !== "string" || Buffer.from(key.secret, "base64").length !== 32) throw new Problem(400, "Invalid channel stream key.");
             secret = key.secret; db.prepare("INSERT OR IGNORE INTO federation_received_keys(channel_actor,epoch,secret) VALUES(?,?,?)", { notify: false }).run(channel, event.epoch, secret);
           }
-          payload = openEvent(origin, event, secret);
+          secrets.set(event.epoch, String(secret));
+          payload = openEvent(origin, event, String(secret));
         }
         if (!payload || !Array.isArray(payload.actors) || payload.actors.length > 2 || (payload.activity !== null && (typeof payload.activity !== "string" || Buffer.byteLength(payload.activity) > 65536))) throw new Problem(400, "Invalid instance event payload.");
-        for (const actor of payload.actors) this.cacheActor(origin, actor);
-        const sender = await this.fed.actor(channel);
-        if (this.closed || this.admissions.get(channel)?.follow_id !== row.follow_id) return;
-        const applied = await this.fed.receiveChannelEvent(sender, payload.activity, { channel, follow: row.follow_id, after: previous, cursor: event.channelSeq });
-        if (!applied) this.channelStats.skipped++;
-        this.channelStats.events++; this.stats.materialized++;
+        for (const actor of payload.actors) { this.checkActor(origin, actor, peerUrl); actors.set(actor.id, actor); }
+        work.push({ seq: event.seq, channelSeq: event.channelSeq, payload });
+        previous = event.channelSeq;
       }
-      db.prepare("UPDATE federation_instance_incoming SET state='done',error=NULL WHERE origin=? AND seq=?", { notify: false }).run(origin, event.seq);
+    } catch (error) { failure = error; }
+    for (const actor of this.fed.cacheFeedActors([...actors.values()])) this.queueAsset(actor);
+    const done: number[] = [];
+    let received = false;
+    try {
+      let sender: Record<string, any> | undefined;
+      for (const item of work) {
+        if (this.closed || this.admissions.get(channel)?.follow_id !== row.follow_id) return;
+        if (item.payload) {
+          sender ??= await this.fed.actor(channel);
+          if (this.closed || this.admissions.get(channel)?.follow_id !== row.follow_id) return;
+          const applied = await this.fed.receiveChannelEvent(sender, item.payload.activity, { channel, follow: row.follow_id, after: item.channelSeq - 1, cursor: item.channelSeq }, true);
+          received = true;
+          if (!applied) this.channelStats.skipped++;
+          this.channelStats.events++; this.stats.materialized++;
+        }
+        done.push(item.seq);
+      }
+    } finally {
+      // Receipt commits each event's checkpoint, so an event applied but not yet marked
+      // done is skipped as already applied when it is read again.
+      if (done.length) db.prepare(`UPDATE federation_instance_incoming SET state='done',error=NULL WHERE origin=? AND seq IN (${done.map(() => "?").join(",")})`, { notify: false }).run(origin, ...done);
+      if (received) this.fed.store.mirrorHooks?.pull();
     }
+    if (failure) throw failure;
     if (pending.length === COUNT) this.queued.add(channel);
   }
-  private cacheActor(origin: string, actor: Record<string, any>) {
-    if (!actor || typeof actor.id !== "string" || new URL(actor.id).origin !== origin || !["Person", "Group"].includes(actor.type) || actor.publicKey?.owner !== actor.id || actor.publicKey?.id !== `${actor.id}#main-key` || typeof actor.publicKey?.publicKeyPem !== "string" || actor.publicKey.publicKeyPem.length > 10000 || (actor.fwdxpVersion ?? actor.archipelVersion) !== 1 || this.fed.channelPeerUrl(actor.inbox).origin !== origin)
+  private checkActor(origin: string, actor: Record<string, any>, peerUrl: (value: string) => URL) {
+    if (!actor || typeof actor.id !== "string" || new URL(actor.id).origin !== origin || !["Person", "Group"].includes(actor.type) || actor.publicKey?.owner !== actor.id || actor.publicKey?.id !== `${actor.id}#main-key` || typeof actor.publicKey?.publicKeyPem !== "string" || actor.publicKey.publicKeyPem.length > 10000 || (actor.fwdxpVersion ?? actor.archipelVersion) !== 1 || peerUrl(actor.inbox).origin !== origin)
       throw new Problem(400, "Invalid same-origin stream actor.");
     const key = createPublicKey(actor.publicKey.publicKeyPem);
     if (key.asymmetricKeyType !== "rsa" || (key.asymmetricKeyDetails?.modulusLength || 0) < 2048) throw new Problem(400, "Invalid stream actor signing key.");
-    this.fed.store.db.prepare("INSERT INTO federation_actors(id,document,fetched_at) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET document=excluded.document,fetched_at=excluded.fetched_at", { notify: false }).run(actor.id, JSON.stringify(actor), Date.now());
+  }
+  // A stored actor document that changed may carry a new picture.
+  private queueAsset(actor: Record<string, any>) {
     const icon = JSON.stringify(actor.icon || null);
     if (this.assetVersions.get(actor.id) !== icon) {
       if (this.assetVersions.size >= 1024) this.assetVersions.delete(this.assetVersions.keys().next().value!);

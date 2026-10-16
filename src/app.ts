@@ -176,7 +176,7 @@ export function createApp(config: Config, store: Store) {
       // Public events and opaque private ciphertext share one origin stream.
       const after = Number(req.query.after ?? req.headers["last-event-id"] ?? "invalid");
       if (req.path.endsWith("/stream")) await federation.channelFeed.instance.open(req, res, after);
-      else res.json(federation.channelFeed.instance.page(after));
+      else res.json(await federation.channelFeed.instance.pageSoon(after));
     });
   app.get("/actors/channels/:id/keys/:epoch", async (req, res) => {
     const actor = await federation.authenticate(req);

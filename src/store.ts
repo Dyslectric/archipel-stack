@@ -265,7 +265,11 @@ export class Store {
     return user;
   }
   active(id: string) {
-    const user = this.authenticated(id);
+    return this.admitted(this.user(id));
+  }
+  /** The account row, if it may act here: not suspended and approved. */
+  admitted(user: User) {
+    if (user.banned) throw new Problem(403, "This account has been suspended.");
     if (user.admission_status !== "approved")
       throw new Problem(403, "Instance membership approval is required.");
     return user;

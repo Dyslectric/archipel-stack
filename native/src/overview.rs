@@ -30,7 +30,13 @@ pub async fn read(
           SELECT channel_id,substr(target,8) FROM conversation_prefs
             WHERE user_id=$1 AND hidden=1 AND target>='thread:' AND target<'thread;'
           UNION SELECT h.channel_id,r.id FROM messages r JOIN hid h ON r.parent_id=h.id
-        ), latest AS (SELECT COALESCE(MAX(seq),0) AS seq FROM messages), readable AS (
+        ),
+        -- The reader's blocks and hidden topics, read once. Most readers have none, and
+        -- then each unread message skips the checks against them.
+        blocked AS (SELECT peer FROM user_blocks WHERE user_id=$1),
+        hidden_topics AS (SELECT substr(target,7) AS topic_id FROM conversation_prefs
+          WHERE user_id=$1 AND hidden=1 AND target>='topic:' AND target<'topic;'),
+        latest AS (SELECT COALESCE(MAX(seq),0) AS seq FROM messages), readable AS (
           SELECT c.id,COALESCE(mark.seq,(SELECT seq FROM latest)) AS after
             FROM unnest($2::text[]) AS c(id) LEFT JOIN read_marks mark ON mark.user_id=$1 AND mark.target=c.id
         ), unread AS (
@@ -40,11 +46,11 @@ pub async fn read(
             AND m.author_id!=$1 AND m.deleted_at IS NULL AND m.history_placeholder=0
             AND ($3!=0 OR (m.remote_object IS NULL AND NOT EXISTS(
               SELECT 1 FROM users foreigner WHERE foreigner.id=m.author_id AND foreigner.remote_actor LIKE 'xmpp:%')))
-            AND NOT EXISTS(SELECT 1 FROM user_blocks b JOIN users author ON author.id=m.author_id
-              WHERE b.user_id=$1 AND b.peer=COALESCE(author.remote_actor,$4||'/actors/users/'||author.id))
+            AND (NOT EXISTS(SELECT 1 FROM blocked) OR NOT EXISTS(SELECT 1 FROM blocked b JOIN users author ON author.id=m.author_id
+              WHERE b.peer=COALESCE(author.remote_actor,$4||'/actors/users/'||author.id)))
             AND NOT EXISTS(SELECT 1 FROM hid h WHERE h.channel_id=m.channel_id AND h.id=m.id)
-            AND (m.topic_id IS NULL OR NOT EXISTS(SELECT 1 FROM conversation_prefs p
-              WHERE p.user_id=$1 AND p.target='topic:'||m.topic_id AND p.hidden=1))
+            AND (m.topic_id IS NULL OR NOT EXISTS(SELECT 1 FROM hidden_topics) OR NOT EXISTS(SELECT 1 FROM hidden_topics p
+              WHERE p.topic_id=m.topic_id))
           ) n WHERE n.n>0
         ) SELECT jsonb_build_object(
           'dms','[]'::jsonb,'message_cursor',(SELECT seq FROM latest),'unread',COALESCE((SELECT jsonb_object_agg(channel_id,n) FROM unread),'{}'::jsonb),

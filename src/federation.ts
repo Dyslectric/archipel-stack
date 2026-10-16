@@ -67,7 +67,11 @@ type Outgoing = {
   purpose: string;
 };
 type Delivery = Outgoing & { delivery_id: number; recipient: string; attempts: number };
-export type PublicationLookups = { channel: (id: string) => Channel; active: (id: string) => User };
+/** Reads remembered for one pass over many events (see Federation.publicationLookups). */
+export type PublicationLookups = {
+  channel: (id: string) => Channel; user: (id: string) => User; active: (id: string) => User;
+  allowed: (value: string) => URL; publicActor: (kind: "users" | "channels", id: string) => Doc;
+};
 const time = () => new Date().toISOString();
 
 export class Federation {
@@ -78,6 +82,8 @@ export class Federation {
   private rosterAsked = new Map<string, number>();
   private actorRequests = new Map<string, Promise<Doc>>();
   private actorFreshness = new Map<string, { digest: string; at: number }>();
+  // The instance signing key is written once and never changes.
+  private signingKeys?: { private_key: string; public_key: string };
   private channelBootstraps = new Map<string, { owner: string;
     job: Promise<{ snapshot: { items: Awaited<ReturnType<Federation["prepareNote"]>>[]; topics: Doc[] }; roster: Doc[] | undefined }> }>();
   private async nativeRequest(operation: string, input: Record<string,unknown>): Promise<Doc> {
@@ -225,6 +231,7 @@ export class Federation {
     );
   }
   keys() {
+    if (this.signingKeys) return this.signingKeys;
     let keys = this.store.db
       .prepare("SELECT * FROM federation_keys WHERE id=1")
       .get() as { private_key: string; public_key: string } | undefined;
@@ -241,16 +248,18 @@ export class Federation {
       // Always use the committed winner, never an unpersisted generated key.
       keys = this.store.db.prepare("SELECT * FROM federation_keys WHERE id=1").get() as { private_key: string; public_key: string };
     }
-    return keys;
+    return this.signingKeys = keys;
   }
   async exportedActor(kind: "users" | "channels", id: string): Promise<Doc> {
     return this.config.nativeChatUrl ? this.nativeRequest("actor",{kind,id}) : this.publicActor(kind,id);
   }
-  publicActor(kind: "users" | "channels", id: string): Doc {
-    this.ensureEnabled();
+  /** An actor document as this instance publishes it. A pass over many events passes
+   *  its lookups, having checked once that federation is enabled. */
+  publicActor(kind: "users" | "channels", id: string, lookups?: PublicationLookups): Doc {
+    if (!lookups) this.ensureEnabled();
     let data: Doc;
     if (kind === "users") {
-      const user = this.store.user(id);
+      const user = lookups ? lookups.user(id) : this.store.user(id);
       const previouslyFederated = !flags.some(f => user[f]) && !!this.store.db
         .prepare("SELECT 1 FROM federation_outgoing WHERE user_id=? LIMIT 1")
         .get(id);
@@ -260,18 +269,21 @@ export class Federation {
         (!flags.some((f) => user[f]) && !previouslyFederated)
       )
         throw new Problem(404, "Actor is not federated.");
+      const avatar = !user.banned && flags.some(f => user[f])
+        ? this.store.db.prepare("SELECT revision,mime FROM user_avatars WHERE user_id=?").get(user.id) as { revision: string; mime: string } | undefined
+        : undefined;
       data = {
         id: this.userActor(user),
         type: "Person",
         preferredUsername: user.username,
         name: user.display_name,
-        icon: !user.banned && flags.some(f => user[f]) && this.store.avatarUrl(user.id) ? {
-          type: "Image", mediaType: this.store.avatarImage(user.id).mime,
-          url: `${this.config.baseUrl}/federation/avatars/${user.id}?v=${this.store.db.prepare("SELECT revision FROM user_avatars WHERE user_id=?").get(user.id)!.revision}`,
+        icon: avatar ? {
+          type: "Image", mediaType: avatar.mime,
+          url: `${this.config.baseUrl}/federation/avatars/${user.id}?v=${avatar.revision}`,
         } : null,
       };
     } else {
-      const channel = this.store.channel(id);
+      const channel = lookups ? lookups.channel(id) : this.store.channel(id);
       if (!channel.federation_enabled || channel.remote_actor)
         throw new Problem(404, "Channel is not federated.");
       data = {
@@ -2271,14 +2283,15 @@ export class Federation {
       )
       .run(note.id, user.id, this.channelActor(channel), JSON.stringify(note));
   }
-  async receive(req: Request, raw: Buffer, transport?: { sender: Doc; checkpoint: Checkpoint }) {
+  /** A channel stream's transport may defer the mirror update to the end of its page. */
+  async receive(req: Request, raw: Buffer, transport?: { sender: Doc; checkpoint: Checkpoint; deferMirrors?: boolean }) {
     if (this.config.nativeChatUrl && !this.config.xmppDomain) {
       await this.store.db.listenExternalChanges();
       const headers: Record<string,string>={};
       if (!transport) for(const [key,value] of Object.entries(req.headers)) if(typeof value === "string") headers[key]=value;
       const result=await this.nativeRequest("receive",{headers,method:transport ? "GET" : req.method,target:transport ? "" : req.originalUrl,body:raw.toString("base64"),
         ...(transport ? { stream: { actor: transport.sender.id, ...transport.checkpoint } } : {}) });
-      if(result.supported) { this.nativeStats.received++; this.store.mirrorHooks?.pull(); return; }
+      if(result.supported) { this.nativeStats.received++; if (!transport?.deferMirrors) this.store.mirrorHooks?.pull(); return; }
       this.nativeStats.unsupported++;
     }
     const sender = transport?.sender || await this.authenticate(req, raw);
@@ -2799,7 +2812,7 @@ export class Federation {
         .run(activity.id, hash(raw.toString()), Date.now());
       if (transport) this.commitChannelCheckpoint(transport.checkpoint);
     }));
-    this.store.mirrorHooks?.pull();
+    if (!transport?.deferMirrors) this.store.mirrorHooks?.pull();
   }
   channelPageAllowance(recipient: string) {
     const sends = this.peerAllowance(recipient);
@@ -2825,7 +2838,7 @@ export class Federation {
     const row = this.checkChannelCheckpoint(checkpoint);
     this.store.db.prepare("UPDATE federation_channel_cursors SET cursor=?,error=NULL,retry_at=0 WHERE channel_id=?", { notify: false }).run(checkpoint.cursor, row.id);
   }
-  async receiveChannelEvent(sender: Doc, raw: string | null, checkpoint: Checkpoint) {
+  async receiveChannelEvent(sender: Doc, raw: string | null, checkpoint: Checkpoint, deferMirrors = false) {
     if (sender.id !== checkpoint.channel || sender.type !== "Group") throw new Problem(403, "Invalid channel stream authority.");
     if (raw === null) {
       await this.writes.run(() => this.store.transaction(() => this.commitChannelCheckpoint(checkpoint)));
@@ -2859,8 +2872,34 @@ export class Federation {
         return false;
       }
     }
-    await this.receive(undefined as unknown as Request, Buffer.from(raw), { sender, checkpoint });
+    await this.receive(undefined as unknown as Request, Buffer.from(raw), { sender, checkpoint, deferMirrors });
     return true;
+  }
+  /** Stores actor documents their own origin's authenticated feed carried, in one
+   *  transaction. An unchanged document is not rewritten, only marked fresh, as a
+   *  network revalidation would be. Returns the documents that changed. */
+  cacheFeedActors(actors: Doc[]) {
+    const now = Date.now(), changed: Doc[] = [], unknown = new Map<string, { actor: Doc; document: string; digest: string }>();
+    for (const actor of actors) {
+      const document = JSON.stringify(actor), digest = hash(document);
+      if (this.actorFreshness.get(actor.id)?.digest === digest) this.actorFreshness.set(actor.id, { digest, at: now });
+      else unknown.set(actor.id, { actor, document, digest });
+    }
+    if (!unknown.size) return changed;
+    const ids = [...unknown.keys()];
+    const stored = new Map((this.store.db.prepare(`SELECT id,document FROM federation_actors WHERE id IN (${ids.map(() => "?").join(",")})`)
+      .all(...ids) as { id: string; document: string }[]).map(row => [row.id, row.document]));
+    const writes = [...unknown.values()].filter(item => stored.get(item.actor.id) !== item.document);
+    if (writes.length) this.store.transaction(() => {
+      for (const item of writes)
+        this.store.db.prepare("INSERT INTO federation_actors(id,document,fetched_at) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET document=excluded.document,fetched_at=excluded.fetched_at", { notify: false }).run(item.actor.id, item.document, now);
+    });
+    for (const item of unknown.values()) {
+      if (this.actorFreshness.size >= 4096) this.actorFreshness.delete(this.actorFreshness.keys().next().value!);
+      this.actorFreshness.set(item.actor.id, { digest: item.digest, at: now });
+    }
+    for (const item of writes) changed.push(item.actor);
+    return changed;
   }
   /** Common publication policy, evaluated once per shared event, without followers.
    *  A caller checking many events passes lookups it shares between them, having
@@ -2872,15 +2911,17 @@ export class Federation {
     if (!outgoing.user_id) return;
     const user = lookups ? lookups.active(outgoing.user_id) : this.store.active(outgoing.user_id);
     if (user.remote_actor) {
-      this.allowed(user.remote_actor);
+      if (lookups) lookups.allowed(user.remote_actor); else this.allowed(user.remote_actor);
       if (this.store.rule(channel.id, user.id) === "block") throw new Problem(403, "Author blocked from channel.");
     } else if (outgoing.purpose === "relay") {
       this.granted(user, "federation_send"); this.granted(user, "federation_post");
     }
   }
-  /** Channel and account reads remembered for one pass over many events. A failed
-   *  read is remembered too, so a missing or suspended account fails each event alike. */
+  /** Channel, account, block and actor reads remembered for one pass over many events.
+   *  A failed read is remembered too, so a missing or suspended account fails each
+   *  event alike. Creating them checks once that federation is enabled. */
   publicationLookups(): PublicationLookups {
+    this.ensureEnabled();
     const memo = <T>(read: (id: string) => T) => {
       const seen = new Map<string, { value?: T; error?: unknown }>();
       return (id: string) => {
@@ -2890,7 +2931,17 @@ export class Federation {
         return found.value!;
       };
     };
-    return { channel: memo(id => this.store.channel(id)), active: memo(id => this.store.active(id)) };
+    const user = memo(id => this.store.user(id)), actors = memo(key => {
+      const [kind, id] = key.split(" ") as ["users" | "channels", string];
+      return this.publicActor(kind, id, lookups);
+    });
+    const lookups: PublicationLookups = {
+      channel: memo(id => this.store.channel(id)), user,
+      active: memo(id => this.store.admitted(user(id))),
+      allowed: memo(value => this.allowed(value)),
+      publicActor: (kind, id) => actors(`${kind} ${id}`),
+    };
+    return lookups;
   }
   private deliveryAllowed(outgoing: Outgoing, recipient: string) {
     this.ensureEnabled();
